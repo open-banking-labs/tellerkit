@@ -14,9 +14,11 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseTasksFile, TasksParseError } from "./lib/tasks.mjs";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+// Windows 上 URL().pathname 会给出 /C:/...，必须用 fileURLToPath
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const DISPATCH_DIR = join(ROOT, ".agents/dispatches");
 const USAGE = `用法:
   node tools/dispatch.mjs --tasks <tasks.md> --id T-01 [选项]

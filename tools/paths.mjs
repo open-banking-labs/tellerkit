@@ -7,8 +7,10 @@
  */
 import { readdirSync, statSync, existsSync } from "node:fs";
 import { join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 
-export const ROOT = new URL("..", import.meta.url).pathname;
+export // Windows 上 URL().pathname 会给出 /C:/...，必须用 fileURLToPath
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 export const rel = (p) => relative(ROOT, p);
 export const exists = (p) => existsSync(p);
 

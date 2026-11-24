@@ -10,9 +10,11 @@
  */
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parseTasksFile } from "./lib/tasks.mjs";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+// Windows 上 URL().pathname 会给出 /C:/...，必须用 fileURLToPath
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const USAGE = `用法:
   node tools/metrics.mjs [选项]
 
