@@ -96,6 +96,10 @@ export const mockApi = {
     return 0;
   },
 
+  async packageModule(_route: string): Promise<string> {
+    throw new Error("浏览器预览不加载业务包模块：请在 Tauri 客户端验证");
+  },
+
   async replayPending(): Promise<string> {
     return "浏览器预览：没有真实账本，重放需在 Tauri 客户端验证";
   },

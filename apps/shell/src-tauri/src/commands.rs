@@ -134,9 +134,36 @@ pub fn boot(state: State<'_, Mutex<AppState>>) -> Result<BootInfo, String> {
         pack_bytes: outcome.loaded.bytes,
         load_ms,
     };
-    st.menu = Some(outcome.loaded.tree);
+    // 业务包：扫描 → 验签 → 依赖拓扑 → 合并菜单
+    let mut tree = outcome.loaded.tree;
+    let pkg_dir = std::path::Path::new(&st.appdata_dir).join("packages");
+    let shell = tellerkit_core::pkg::Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or(
+        tellerkit_core::pkg::Version {
+            major: 0,
+            minor: 0,
+            patch: 0,
+        },
+    );
+    let (plan, failures) =
+        tellerkit_core::pkg::scan_dir(&pkg_dir, &tellerkit_core::mock::demo_verifying_key(), shell);
+    let conflicts = tellerkit_core::pkg::merge_packages(&mut tree, &plan.ordered);
+    st.packages = plan.ordered;
+
+    st.menu = Some(tree);
     st.last_load = Some(report.clone());
     let mut notes = outcome.notes;
+    for package in &st.packages {
+        notes.push(format!(
+            "已加载业务包 {} v{}",
+            package.manifest.id, package.manifest.version
+        ));
+    }
+    for failure in &failures {
+        notes.push(format!("跳过业务包 {}：{}", failure.id, failure.reason));
+    }
+    for conflict in &conflicts {
+        notes.push(format!("业务包菜单冲突，保留主壳版本：{conflict}"));
+    }
     if let Some(w) = &st.journal_warning {
         notes.push(w.clone());
     }
@@ -282,6 +309,25 @@ pub fn print_voucher(
         .printer
         .print(&voucher)
         .map_err(|e| e.to_string())
+}
+
+/// 返回业务包的模块源码，前端用 Blob URL 加载后调用 `mount(container, shell)`。
+///
+/// 为什么不返回文件路径：包在运行时是外部文件，WebView 读不到任意本地路径，
+/// 而且让前端自己拼路径等于把文件系统访问权交出去。
+#[tauri::command]
+pub fn package_module(route: String, state: State<'_, Mutex<AppState>>) -> Result<String, String> {
+    let st = lock(&state)?;
+    for package in &st.packages {
+        if let Some(module) = package.routes.get(&route) {
+            return package
+                .assets
+                .get(module)
+                .cloned()
+                .ok_or_else(|| format!("包 {} 的模块 {module} 未随包提供", package.manifest.id));
+        }
+    }
+    Err("该路由不是业务包提供的".to_string())
 }
 
 /// 重放挂起交易。返回人可读的汇总——批次里失败一笔不代表全批失败。

@@ -12,6 +12,7 @@
 | `route` | string \| null | 页面路由 |
 | `icon` | string \| null | 图标标识 |
 | `sort` | number | 同级排序，小在前；同值按 code |
+| `source` | string | `shell` 或 `pkg:<id>`，决定前端用主壳页面还是加载包模块 |
 | `actions` | string[] | 该页面挂载的按钮级权限码 |
 | `source` | string | `shell` 或 `pkg:<id>` |
 | `status` | `"active"` \| `"hidden"` | hidden 用于灰度下线，不需要改权限快照 |

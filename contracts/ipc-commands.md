@@ -16,6 +16,7 @@
 | `print_voucher` | `template, txCode, reference?, fields` | `PrintReceipt` | 否（走设备） |
 | `tx_pending_count` | — | `number` | 否 |
 | `replay_pending` | — | `string`（人可读汇总） | 是（逐笔打主机） |
+| `package_module` | `route: string` | `string`（模块源码） | 否 |
 | `dev_set_offline` | `offline: boolean` | `DevState` | 否 |
 | `dev_set_tampered` | `tampered: boolean` | `DevState` | 否 |
 | `dev_bump_server_version` | — | `DevState` | 否 |

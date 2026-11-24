@@ -47,6 +47,13 @@ pub struct BizPackage {
     pub routes: BTreeMap<String, String>,
     #[serde(default)]
     pub transactions: Vec<TxMeta>,
+    /// 前端资源：包内路径 → 模块源码。
+    ///
+    /// 打包时把 `ui/*.js` 的内容嵌进来，是因为包在运行时是**外部文件**，
+    /// 前端没法 `import("/path/to/ui/entry.js")`——只能由主壳把源码交给前端，
+    /// 前端用 Blob URL 加载。代价是包体积变大，收益是不需要本地文件服务器。
+    #[serde(default)]
+    pub assets: BTreeMap<String, String>,
 }
 
 /// 权限声明。只有 actions：菜单 code 已经在 `menus` 里了，重复声明会两头不一致。
@@ -405,6 +412,42 @@ pub fn validate_merged(tree: &MenuTree) -> Result<(), PackError> {
     Ok(())
 }
 
+/// 扫描目录下的 `*.bizpkg`，验签后做成加载计划。
+///
+/// 坏包不阻断启动：记一条决策，其余照常加载。柜面宁可少一个业务，
+/// 也不要因为别人放了个坏文件就开不了机。
+pub fn scan_dir(
+    dir: &std::path::Path,
+    verifying_key: &VerifyingKey,
+    shell: Version,
+) -> (LoadPlan, Vec<PackageDecision>) {
+    let mut blobs = Vec::new();
+    let mut rejected = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("bizpkg") {
+                continue;
+            }
+            match std::fs::read(&path) {
+                Ok(bytes) => blobs.push(bytes),
+                Err(e) => rejected.push(PackageDecision {
+                    id: path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("（未知）")
+                        .to_string(),
+                    loaded: false,
+                    reason: format!("读取失败：{e}"),
+                }),
+            }
+        }
+    }
+    let (plan, mut failures) = load_packages(&blobs, verifying_key, shell);
+    rejected.append(&mut failures);
+    (plan, rejected)
+}
+
 /// 便捷：从字节加载一批包并做出加载计划。
 pub fn load_packages(
     blobs: &[Vec<u8>],
@@ -473,6 +516,7 @@ mod tests {
             },
             routes: BTreeMap::new(),
             transactions: Vec::new(),
+            assets: BTreeMap::new(),
         }
     }
 
@@ -660,6 +704,29 @@ mod tests {
 
         let (plan, rejected) = load_packages(&[good, bad], &demo_verifying_key(), SHELL);
         assert_eq!(plan.ordered.len(), 1);
+        assert_eq!(rejected.len(), 1);
+        assert!(rejected[0].reason.contains("签名"));
+    }
+
+    #[test]
+    fn scan_dir_loads_good_and_reports_bad() {
+        let dir = tempfile::tempdir().unwrap();
+        let sk = demo_signing_key();
+        std::fs::write(
+            dir.path().join("good.bizpkg"),
+            pkg("biz.good", &[]).encode(&sk).unwrap(),
+        )
+        .unwrap();
+        let mut bad = pkg("biz.bad", &[]).encode(&sk).unwrap();
+        let idx = bad.len() / 2;
+        bad[idx] ^= 0xFF;
+        std::fs::write(dir.path().join("bad.bizpkg"), bad).unwrap();
+        // 非 bizpkg 后缀应被忽略
+        std::fs::write(dir.path().join("notes.txt"), b"ignore me").unwrap();
+
+        let (plan, rejected) = scan_dir(dir.path(), &demo_verifying_key(), SHELL);
+        assert_eq!(plan.ordered.len(), 1);
+        assert_eq!(plan.ordered[0].manifest.id, "biz.good");
         assert_eq!(rejected.len(), 1);
         assert!(rejected[0].reason.contains("签名"));
     }
