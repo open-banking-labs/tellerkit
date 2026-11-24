@@ -14,6 +14,14 @@ import { matchAny } from "./lib/glob.mjs";
 import { parseTasksFile, TasksParseError } from "./lib/tasks.mjs";
 
 const DEFAULT_TIMEOUT = 600000;
+/**
+ * 工具自己写的审计文件不算"被改动的代码"。
+ *
+ * 不加这条会自噬：--adjudicate 先落派发记录、再取 diff，记录文件本身
+ * 就会被判成越界，于是一个完全合规的任务收到 OUT_OF_SCOPE。
+ * 这类文件由 check-ai-rules 校验结构，不靠白名单兜底。
+ */
+const TOOL_OWNED = [".agents/dispatches/*.json"];
 const TAIL_LINES = 20;
 const OUTPUT_CAP = 256 * 1024; // 只留尾部，避免大日志撑爆内存
 const USAGE = `用法:
@@ -223,7 +231,7 @@ if (!selected.length) fatal(`tasks.md 里没有 ID「${opts.id}」。可用：${
 const root = findRoot();
 const base = pickBase(opts.base, root);
 // 执行前拍快照：验收命令自己可能写生成物，不能让它污染范围判定
-const changed = changedFiles(root, base);
+const changed = changedFiles(root, base).filter((p) => !matchAny(p, TOOL_OWNED));
 const results = [];
 for (const task of selected) {
   const run = await runCommand(task.command, root, opts.timeout);
