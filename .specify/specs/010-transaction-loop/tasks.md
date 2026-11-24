@@ -4,6 +4,7 @@
 |---|---|---|---|---|---|
 | T-01 | 实现交易模型与状态机 | S-01, S-03, S-04, S-05 | `core` | `packages/core/src/tx.rs`, `packages/core/src/lib.rs` | `cargo test -p tellerkit-core tx::` |
 | T-02 | 补充幂等去重的对抗用例 | S-02 | `core` | `packages/core/src/tx.rs` | `cargo test -p tellerkit-core tx::` |
+| T-03 | 修正瞬时失败缓存与幂等键复用 | S-03, S-06, S-07 | `core` | `packages/core/src/tx.rs` | `cargo test -p tellerkit-core tx::` |
 
 ## 完成定义
 

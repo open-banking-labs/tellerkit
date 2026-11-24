@@ -120,8 +120,11 @@ pub trait TxHost {
 /// 交易引擎。内存态：幂等索引 + 待重放队列。
 #[derive(Debug, Default)]
 pub struct TxEngine {
-    /// 幂等键 -> 首次结果。命中即返回，绝不再调主机。
-    idempotent: HashMap<String, TxResult>,
+    /// 幂等键 -> (载荷签名, 首次结果)。
+    ///
+    /// 存签名是为了区分"同一笔业务重复提交"与"同一个键被挪作他用"——
+    /// 后者必须显式拒绝，否则柜员会把另一笔业务误认为已成功。
+    idempotent: HashMap<String, (String, TxResult)>,
     /// 待重放请求（P1.4 会落盘）。
     pending: Vec<TxRequest>,
 }
@@ -140,27 +143,46 @@ impl TxEngine {
             return TxResult::rejected(&msg);
         }
 
-        if let Some(previous) = self.idempotent.get(&request.idempotency_key) {
+        let signature = request_signature(&request);
+        if let Some((known, previous)) = self.idempotent.get(&request.idempotency_key) {
+            if *known != signature {
+                return TxResult::rejected(
+                    "幂等键已用于另一笔交易（交易码或要素不同），请为该笔业务使用新的幂等键",
+                );
+            }
             let mut replay = previous.clone();
             replay.message = format!("重复提交：返回首次结果（{}）", previous.message);
             return replay;
         }
 
-        let result = match host.submit(&request) {
-            Ok(reference) => TxResult::committed(reference),
-            Err(HostError::Rejected(reason)) => TxResult::rejected(&format!("主机拒绝：{reason}")),
-            Err(HostError::Timeout) | Err(HostError::Unavailable) => {
-                if request.offline_capable {
-                    self.pending.push(request.clone());
-                    TxResult::pending("网络不可用：交易已挂起，将在恢复后重放")
-                } else {
-                    TxResult::rejected("网络不可用，且该交易不支持离线：请等网络恢复后重试")
-                }
+        // 瞬时失败（超时/不可达）**不写幂等索引**：
+        // 此刻我们并不知道主机是否已处理。若把"拒绝"永久缓存，柜员就再也无法安全重试；
+        // 而换个新键重试又可能重复入账。正确做法是保留原键，让重试打到主机，
+        // 由主机的幂等键去重收口。
+        let (result, cacheable) = match host.submit(&request) {
+            Ok(reference) => (TxResult::committed(reference), true),
+            Err(HostError::Rejected(reason)) => {
+                (TxResult::rejected(&format!("主机拒绝：{reason}")), true)
             }
+            Err(HostError::Timeout) | Err(HostError::Unavailable) if request.offline_capable => {
+                self.pending.push(request.clone());
+                (
+                    TxResult::pending("网络不可用：交易已挂起，将在恢复后重放"),
+                    true,
+                )
+            }
+            Err(HostError::Timeout) | Err(HostError::Unavailable) => (
+                TxResult::rejected(
+                    "网络不可用，且该交易不支持离线：请用同一笔业务重试（服务端按幂等键去重）",
+                ),
+                false,
+            ),
         };
 
-        self.idempotent
-            .insert(request.idempotency_key.clone(), result.clone());
+        if cacheable {
+            self.idempotent
+                .insert(request.idempotency_key.clone(), (signature, result.clone()));
+        }
         result
     }
 
@@ -177,6 +199,7 @@ impl TxEngine {
         let mut outcomes = Vec::new();
         for request in drained {
             let key = request.idempotency_key.clone();
+            let signature = request_signature(&request);
             // 直接走主机，不查幂等：重放的前提就是"上次没成功"
             let result = match host.submit(&request) {
                 Ok(reference) => TxResult::committed(reference),
@@ -188,11 +211,29 @@ impl TxEngine {
                     TxResult::pending("重放失败：仍不可达，保留在队列中")
                 }
             };
-            self.idempotent.insert(key.clone(), result.clone());
+            self.idempotent
+                .insert(key.clone(), (signature, result.clone()));
             outcomes.push((key, result));
         }
         outcomes
     }
+}
+
+/// 载荷签名：幂等键相同但内容不同，说明键被复用，必须拒绝。
+fn request_signature(request: &TxRequest) -> String {
+    let mut parts: Vec<String> = request
+        .elements
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
+    parts.sort();
+    format!(
+        "{}|{}|{}|{}",
+        request.tx_code,
+        request.amount_cents,
+        request.offline_capable,
+        parts.join(",")
+    )
 }
 
 /// 校验只拦"明显不该发给主机"的请求，不做业务规则（业务规则在主机侧）。
@@ -247,6 +288,16 @@ mod tests {
                     .cloned()
                     .unwrap_or(Err(HostError::Unavailable))
             }
+        }
+    }
+
+    /// 一旦被调用就 panic 的宿主：用于证明重复提交**根本没有**碰主机。
+    /// 比"调用次数 == 1"更严格——计数被错误重置或漏加时，它仍然抓得住。
+    struct PanicHost;
+
+    impl TxHost for PanicHost {
+        fn submit(&self, _request: &TxRequest) -> Result<String, HostError> {
+            panic!("重复提交不得再调用主机");
         }
     }
 
@@ -368,5 +419,251 @@ mod tests {
         let result = engine.submit(&host, req("k-neg").amount(-1));
         assert_eq!(result.status, TxStatus::Rejected);
         assert_eq!(host.calls(), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // S-02 对抗用例：同一幂等键在"成功 / 业务拒绝 / 断网挂起"三种首次结果下
+    // 重复提交。每条都断言主机调用次数，而不是只看返回值。
+    // ------------------------------------------------------------------
+
+    // S-02 对抗：首次成功后重复提交。用 PanicHost 证明主机一次都没再被碰，
+    // 同时检查重复读取不会把"重复提交"前缀叠加回缓存结果。
+    #[test]
+    fn s02_duplicate_after_success_returns_first_result_without_touching_host() {
+        let host = ScriptedHost::always(Ok("TX-FIRST".into()));
+        let mut engine = TxEngine::new();
+
+        let first = engine.submit(&host, req("k-dup-ok"));
+        assert_eq!(first.reference.as_deref(), Some("TX-FIRST"));
+
+        let second = engine.submit(&PanicHost, req("k-dup-ok"));
+        let third = engine.submit(&PanicHost, req("k-dup-ok"));
+
+        assert_eq!(second.status, TxStatus::Committed);
+        assert_eq!(
+            second.reference, first.reference,
+            "重复提交必须返回首次的 reference"
+        );
+        assert!(!second.replayable, "已成功的交易不可重放");
+        assert!(second.message.contains("重复提交"));
+        assert_eq!(
+            second.message, third.message,
+            "重复读取不得污染缓存：前缀不能每次叠加"
+        );
+        assert_eq!(host.calls(), 1, "主机只被调用一次");
+        assert!(
+            engine.pending_requests().is_empty(),
+            "成功交易不得进入待处理队列"
+        );
+    }
+
+    // S-02 对抗：首次是业务拒绝。幂等索引里存的是"拒绝"，再次提交不得变成
+    // 一次新的主机调用（本脚本里主机第二次明明会成功）——否则同一笔业务
+    // 会先后产生两个互相矛盾的结论。
+    #[test]
+    fn s02_duplicate_after_business_rejection_returns_first_rejection() {
+        let host = ScriptedHost::new(vec![
+            Err(HostError::Rejected("余额不足".into())),
+            Ok("TX-WOULD-SUCCEED".into()),
+        ]);
+        let mut engine = TxEngine::new();
+
+        let first = engine.submit(&host, req("k-dup-biz"));
+        let second = engine.submit(&host, req("k-dup-biz"));
+
+        assert_eq!(first.status, TxStatus::Rejected);
+        assert_eq!(second.status, TxStatus::Rejected);
+        assert_eq!(second.reference, None);
+        assert!(!second.replayable);
+        assert!(second.message.contains("重复提交"));
+        assert!(
+            second.message.contains("余额不足"),
+            "重复提交应带回首次拒绝原因"
+        );
+        assert_eq!(host.calls(), 1, "业务拒绝的幂等键不得再次打主机");
+        assert!(
+            engine.pending_requests().is_empty(),
+            "业务拒绝不得进入待处理队列"
+        );
+    }
+
+    // S-02 对抗：首次是断网挂起。重复提交不得再次入队——否则重放时同一笔
+    // 会向主机提交两次，恰恰制造"重复入账"。
+    #[test]
+    fn s02_duplicate_while_pending_does_not_enqueue_twice() {
+        let host = ScriptedHost::always(Err(HostError::Timeout));
+        let mut engine = TxEngine::new();
+
+        let first = engine.submit(&host, req("k-dup-pend").offline(true));
+        let second = engine.submit(&host, req("k-dup-pend").offline(true));
+        let third = engine.submit(&host, req("k-dup-pend").offline(true));
+
+        for result in [&first, &second, &third] {
+            assert_eq!(result.status, TxStatus::Pending);
+            assert!(result.replayable, "挂起结果可重放");
+            assert_eq!(result.reference, None);
+        }
+        assert_eq!(host.calls(), 1, "挂起后的重复提交不得再打主机");
+        assert_eq!(
+            engine.pending_requests().len(),
+            1,
+            "重复提交不得重复入队（否则重放会重复入账）"
+        );
+        assert_eq!(engine.pending_requests()[0].idempotency_key, "k-dup-pend");
+    }
+
+    // S-02 对抗：先挂起、再重放成功，之后用同一键重复提交，必须返回"已入账"。
+    // 防止重放成功时没更新幂等索引，让柜员一直看到过期的 Pending。
+    #[test]
+    fn s02_duplicate_after_successful_replay_returns_committed() {
+        let host = ScriptedHost::new(vec![Err(HostError::Unavailable), Ok("TX-REPLAY-A".into())]);
+        let mut engine = TxEngine::new();
+
+        let pending = engine.submit(&host, req("k-dup-replay").offline(true));
+        assert_eq!(pending.status, TxStatus::Pending);
+
+        let outcomes = engine.replay_pending(&host);
+        assert_eq!(outcomes[0].1.status, TxStatus::Committed);
+        assert_eq!(host.calls(), 2, "提交一次 + 重放一次");
+
+        let duplicate = engine.submit(&host, req("k-dup-replay").offline(true));
+        assert_eq!(duplicate.status, TxStatus::Committed);
+        assert_eq!(duplicate.reference.as_deref(), Some("TX-REPLAY-A"));
+        assert!(!duplicate.replayable);
+        assert_eq!(host.calls(), 2, "重放成功后的重复提交不得再打主机");
+        assert!(engine.pending_requests().is_empty(), "重放成功后队列应为空");
+    }
+
+    // S-02 对抗：挂起 → 重放失败（仍在队列）→ 再次重复提交 → 再重放成功。
+    // 重放失败也会改写幂等索引，重复提交必须返回 Pending 且不得二次入队；
+    // 而重放会把同一个 key 再发给主机——客户端去重挡不住这条路径，
+    // 主机必须按 key 幂等（风险见 T-02 回报）。
+    #[test]
+    fn s02_duplicate_after_failed_replay_keeps_single_queue_entry() {
+        let host = ScriptedHost::new(vec![
+            Err(HostError::Timeout),
+            Err(HostError::Unavailable),
+            Ok("TX-REPLAY-R".into()),
+        ]);
+        let mut engine = TxEngine::new();
+
+        let pending = engine.submit(&host, req("k-dup-retry").offline(true));
+        assert_eq!(pending.status, TxStatus::Pending);
+
+        let first_replay = engine.replay_pending(&host);
+        assert_eq!(first_replay[0].1.status, TxStatus::Pending);
+        assert_eq!(host.calls(), 2, "提交一次 + 重放失败一次");
+        assert_eq!(
+            engine.pending_requests().len(),
+            1,
+            "重放失败必须保留在队列中"
+        );
+
+        let duplicate = engine.submit(&host, req("k-dup-retry").offline(true));
+        assert_eq!(duplicate.status, TxStatus::Pending);
+        assert!(duplicate.replayable);
+        assert!(duplicate.message.contains("重复提交"));
+        assert_eq!(host.calls(), 2, "重复提交不得再打主机");
+        assert_eq!(engine.pending_requests().len(), 1, "重复提交不得二次入队");
+
+        let second_replay = engine.replay_pending(&host);
+        assert_eq!(second_replay[0].1.status, TxStatus::Committed);
+        assert_eq!(second_replay[0].1.reference.as_deref(), Some("TX-REPLAY-R"));
+        assert_eq!(
+            host.calls(),
+            3,
+            "重放把同一个 key 再次发给主机：依赖主机侧按 key 去重"
+        );
+        assert!(engine.pending_requests().is_empty());
+
+        let after = engine.submit(&host, req("k-dup-retry").offline(true));
+        assert_eq!(after.status, TxStatus::Committed);
+        assert_eq!(host.calls(), 3, "成功后重复提交仍不碰主机");
+    }
+
+    // S-02 对抗 / 边界：首次是"断网且不支持离线"的拒绝，网络恢复后用同一键重试。
+    // 现状把这次拒绝缓存进幂等索引，所以同一键永远不会再打主机——尽管首次文案
+    // 让柜员"等网络恢复后重试"。本用例只锁定安全性质（主机只调一次、不入队），
+    // 该文案与缓存行为的张力见 T-02 回报，是否改成"用新键重试"由人决定。
+    #[test]
+    fn s06_transient_rejection_is_not_cached_so_retry_reaches_host() {
+        let host = ScriptedHost::new(vec![Err(HostError::Unavailable), Ok("TX-RECOVERED".into())]);
+        let mut engine = TxEngine::new();
+
+        let first = engine.submit(&host, req("k-dup-off"));
+        assert_eq!(first.status, TxStatus::Rejected);
+        assert!(first.message.contains("不支持离线"));
+
+        // 网络恢复后，同一幂等键必须能真正重试——不能被"首次拒绝"永久缓存挡住。
+        // 若这里返回缓存的 Rejected，柜员就只能换新键重试，那才可能重复扣账。
+        let second = engine.submit(&host, req("k-dup-off"));
+        assert_eq!(second.status, TxStatus::Committed);
+        assert_eq!(second.reference.as_deref(), Some("TX-RECOVERED"));
+        assert_eq!(host.calls(), 2, "瞬时失败不得缓存，重试必须打到主机");
+    }
+
+    // S-02 边界：校验失败不得占用幂等键。首次因金额为负被本地拒绝后，
+    // 用同一键提交合法请求必须真的打到主机并成功；否则一次手误就会把
+    // 整个幂等键永久污染成"拒绝"。
+    #[test]
+    fn s02_validation_failure_does_not_burn_the_idempotency_key() {
+        let host = ScriptedHost::always(Ok("TX-OK".into()));
+        let mut engine = TxEngine::new();
+
+        let invalid = engine.submit(&host, req("k-burn").amount(-1));
+        assert_eq!(invalid.status, TxStatus::Rejected);
+        assert_eq!(host.calls(), 0, "校验失败不得打主机");
+
+        let valid = engine.submit(&host, req("k-burn"));
+        assert_eq!(valid.status, TxStatus::Committed);
+        assert_eq!(valid.reference.as_deref(), Some("TX-OK"));
+        assert_eq!(host.calls(), 1, "校验失败不应把幂等键写死为拒绝");
+    }
+
+    // S-02 对抗（现状锁定，非规格背书）：同一幂等键携带不同交易要素重复提交。
+    // 引擎只按 key 去重，不比对 tx_code / amount / elements，返回第一笔的 reference。
+    // spec 未定义此情形；若产品要求"键复用但要素不同必须显式冲突"，应先改实现，
+    // 再反转本用例——不允许为了变绿直接改断言。
+    #[test]
+    fn s07_reusing_key_with_different_payload_is_rejected() {
+        let host = ScriptedHost::new(vec![Ok("TX-A".into()), Ok("TX-B".into())]);
+        let mut engine = TxEngine::new();
+
+        let first = engine.submit(&host, req("k-reuse").amount(10_000).element("to", "A"));
+        assert_eq!(first.reference.as_deref(), Some("TX-A"));
+
+        // 同一个键换了金额和交易码：这不是"重复提交"，是键被挪作他用。
+        // 静默返回第一笔的成功会让柜员把另一笔业务误认为已入账。
+        let changed = TxRequest::new("account.withdraw", "k-reuse")
+            .amount(999_999)
+            .element("to", "B");
+        let second = engine.submit(&host, changed);
+
+        assert_eq!(second.status, TxStatus::Rejected);
+        assert!(second.message.contains("幂等键已用于另一笔交易"));
+        assert!(second.reference.is_none(), "不得把第一笔的流水号给出去");
+        assert_eq!(host.calls(), 1, "载荷冲突在本地就能判，不必打主机");
+        assert!(engine.pending_requests().is_empty());
+    }
+
+    // S-02 边界：去重必须按 key 隔离。不同幂等键不得互相吞掉，
+    // 否则一笔新交易会拿到另一笔的 reference。
+    #[test]
+    fn s02_distinct_idempotency_keys_are_not_deduped_together() {
+        let host = ScriptedHost::always(Err(HostError::Timeout));
+        let mut engine = TxEngine::new();
+
+        let a = engine.submit(&host, req("k-a").offline(true));
+        let b = engine.submit(&host, req("k-b").offline(true));
+
+        assert_eq!(a.status, TxStatus::Pending);
+        assert_eq!(b.status, TxStatus::Pending);
+        assert_eq!(host.calls(), 2, "不同幂等键各打一次主机");
+        let keys: Vec<&str> = engine
+            .pending_requests()
+            .iter()
+            .map(|request| request.idempotency_key.as_str())
+            .collect();
+        assert_eq!(keys, vec!["k-a", "k-b"], "两笔都应入队，顺序为提交顺序");
     }
 }
