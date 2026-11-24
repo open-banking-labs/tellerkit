@@ -1,0 +1,29 @@
+{
+  "task_id": "T-04",
+  "tasks_file": ".specify/specs/011-device-abstraction/tasks.md",
+  "spec": ".specify/specs/011-device-abstraction/spec.md",
+  "preset": "test-agent",
+  "layer": "core",
+  "scenarios": [
+    "S-02",
+    "S-03"
+  ],
+  "allowed_files": [
+    "packages/core/src/device.rs"
+  ],
+  "acceptance_cmd": "cargo test -p tellerkit-core device::",
+  "base": "HEAD",
+  "base_sha": "546d3fd14a342b75bc65debf34744973ac69e514",
+  "prompt_sha256": "a08993cb46e2702336704c52a7a844c7086a6eade069df00b000c8402d4b948d",
+  "created_at": "2026-11-24T08:04:26.535Z",
+  "status": "PASS",
+  "verdict": {
+    "exit_code": 0,
+    "duration_ms": 345,
+    "changed_files": [
+      "packages/core/src/device.rs"
+    ],
+    "violations": [],
+    "finished_at": "2026-11-24T08:04:27.063Z"
+  }
+}

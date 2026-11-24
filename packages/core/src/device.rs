@@ -110,7 +110,9 @@ impl CardData {
     /// 构造时强制掩码，调用方没有机会传入完整卡号。
     pub fn new(pan: &str, has_track2: bool) -> Self {
         let digits: String = pan.chars().filter(|c| c.is_ascii_digit()).collect();
-        let masked = if digits.len() >= 10 {
+        // 短于 13 位不可能是合法 PAN；此时保留 6+4 会把所有数字都露出来
+        // （10 位时 6+4 正好覆盖全部数字），所以整卡掩码。
+        let masked = if digits.len() >= 13 {
             format!("{}******{}", &digits[..6], &digits[digits.len() - 4..])
         } else {
             "****".to_string()
@@ -123,7 +125,11 @@ impl CardData {
 }
 
 /// PIN 块。手动实现 Debug：默认 derive 会把密文打进日志。
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// **刻意不实现 Serialize/Deserialize**：Debug 脱敏只挡住日志，
+/// 一旦它被序列化进 IPC 或日志字段，明文照样出去。要送主机只能走 `expose()`，
+/// 让每个出网点都显式可见。
+#[derive(Clone, PartialEq, Eq)]
 pub struct PinBlock(String);
 
 impl PinBlock {
@@ -226,7 +232,8 @@ impl Devices {
 #[derive(Default)]
 pub struct MockPrinter {
     pub state: Option<DeviceStatus>,
-    pub printed: std::cell::RefCell<Vec<Voucher>>,
+    printed: std::cell::RefCell<Vec<Voucher>>,
+    next_job: std::cell::Cell<u32>,
 }
 
 impl MockPrinter {
@@ -241,8 +248,13 @@ impl MockPrinter {
         }
     }
 
-    pub fn printed(&self) -> std::cell::RefCell<Vec<Voucher>> {
-        std::cell::RefCell::new(self.printed.borrow().clone())
+    /// 已打印凭证的只读视图（不是副本：副本会让人误以为能改到内部状态）。
+    pub fn printed(&self) -> std::cell::Ref<'_, Vec<Voucher>> {
+        self.printed.borrow()
+    }
+
+    pub fn printed_count(&self) -> usize {
+        self.printed.borrow().len()
     }
 }
 
@@ -259,8 +271,12 @@ impl Printer for MockPrinter {
             });
         }
         self.printed.borrow_mut().push(voucher.clone());
+        // 作业号用独立计数器：从 len() 派生会在清空后复用旧号，
+        // 若上层拿它当对账键就会撞号。
+        let n = self.next_job.get() + 1;
+        self.next_job.set(n);
         Ok(PrintReceipt {
-            job_id: format!("PRINT-{}", self.printed.borrow().len()),
+            job_id: format!("PRINT-{n}"),
             pages: 1,
         })
     }
@@ -310,6 +326,12 @@ impl MockPinPad {
     pub fn faulty(reason: &str) -> Self {
         Self {
             state: DeviceStatus::Faulty(reason.into()),
+        }
+    }
+
+    pub fn not_connected() -> Self {
+        Self {
+            state: DeviceStatus::NotConnected,
         }
     }
 }
@@ -470,5 +492,285 @@ mod tests {
             ])
             .is_ok());
         assert_eq!(devices.status_of(DeviceKind::Printer), DeviceStatus::Ready);
+    }
+
+    // ---- T-04 对抗用例 ----
+
+    /// 与 mock 共享同一份打印记录，用来观察"预检失败是否产生副作用"。
+    struct SharedPrinter(std::rc::Rc<MockPrinter>);
+
+    impl Printer for SharedPrinter {
+        fn status(&self) -> DeviceStatus {
+            self.0.status()
+        }
+
+        fn print(&self, voucher: &Voucher) -> Result<PrintReceipt, DeviceError> {
+            self.0.print(voucher)
+        }
+    }
+
+    /// 打印机就绪，但读卡器、密码键盘、高拍仪分别处于故障/未连接。
+    fn partly_faulty_devices() -> Devices {
+        Devices {
+            printer: Box::new(MockPrinter::ready()),
+            card_reader: Box::new(MockCardReader {
+                state: DeviceStatus::Faulty("读头脏污".into()),
+                pan: "6222021234567890123".into(),
+            }),
+            pinpad: Box::new(MockPinPad {
+                state: DeviceStatus::NotConnected,
+            }),
+            scanner: Box::new(MockScanner {
+                state: DeviceStatus::NotConnected,
+            }),
+        }
+    }
+
+    /// 断言错误是 NotReady，且种类与状态文案都精确匹配。
+    fn assert_not_ready(err: &DeviceError, kind: &str, state: &str) {
+        match err {
+            DeviceError::NotReady { kind: k, state: s } => {
+                assert_eq!(k, kind);
+                assert_eq!(s, state);
+            }
+            other => panic!("期望 NotReady({kind}/{state})，得到 {other:?}"),
+        }
+    }
+
+    // S-03：空需求放行；重复声明逐次校验，不 panic、不因重复而误报。
+    #[test]
+    fn s03_ensure_empty_and_duplicate_requirements() {
+        let faulty = partly_faulty_devices();
+        assert!(
+            faulty.ensure(&[]).is_ok(),
+            "空需求列表当前直接放行，不校验任何设备"
+        );
+        // 对照：同一套设备，一旦声明就会拒绝。
+        assert!(faulty.ensure(&[DeviceKind::PinPad]).is_err());
+
+        assert!(mock_devices()
+            .ensure(&[
+                DeviceKind::PinPad,
+                DeviceKind::PinPad,
+                DeviceKind::Printer,
+                DeviceKind::Printer,
+            ])
+            .is_ok());
+        let err = faulty
+            .ensure(&[DeviceKind::Printer, DeviceKind::PinPad, DeviceKind::PinPad])
+            .unwrap_err();
+        assert!(
+            matches!(&err, DeviceError::NotReady { kind, .. } if kind == "密码键盘"),
+            "重复故障设备只报第一条命中的设备：{err:?}"
+        );
+    }
+
+    // S-03：错误必须指出具体是哪一类设备、处于什么状态。
+    #[test]
+    fn s03_ensure_names_the_faulty_kind_and_state_for_each_device() {
+        let devices = partly_faulty_devices();
+        assert!(devices.ensure(&[DeviceKind::Printer]).is_ok());
+        assert_eq!(
+            devices.status_of(DeviceKind::CardReader),
+            DeviceStatus::Faulty("读头脏污".into())
+        );
+        assert_eq!(
+            devices.status_of(DeviceKind::Scanner),
+            DeviceStatus::NotConnected
+        );
+
+        let err = devices.ensure(&[DeviceKind::CardReader]).unwrap_err();
+        assert_not_ready(&err, "读卡器", "故障：读头脏污");
+        let err = devices.ensure(&[DeviceKind::PinPad]).unwrap_err();
+        assert_not_ready(&err, "密码键盘", "未连接");
+        let err = devices.ensure(&[DeviceKind::Scanner]).unwrap_err();
+        assert_not_ready(&err, "高拍仪", "未连接");
+    }
+
+    // S-03：DeviceKind 是封闭枚举，"未知设备种类"在编译期无法表示；
+    // 能进入系统的唯一入口是序列化边界，未知名字必须被拒绝。
+    #[test]
+    fn s03_unknown_device_kind_is_rejected_at_deserialization_boundary() {
+        for (json, expected) in [
+            ("\"printer\"", DeviceKind::Printer),
+            ("\"cardreader\"", DeviceKind::CardReader),
+            ("\"pinpad\"", DeviceKind::PinPad),
+            ("\"scanner\"", DeviceKind::Scanner),
+        ] {
+            assert_eq!(serde_json::from_str::<DeviceKind>(json).unwrap(), expected);
+        }
+        for json in ["\"toaster\"", "\"Printer\"", "\"pin-pad\"", "null", "0"] {
+            assert!(
+                serde_json::from_str::<DeviceKind>(json).is_err(),
+                "未知设备种类必须被拒绝：{json}"
+            );
+        }
+    }
+
+    // S-03：预检失败必须发生在打印之前，不能出现"已出纸但签名失败"的半截状态。
+    #[test]
+    fn s03_failed_ensure_prevents_half_printed_transaction() {
+        let printer = std::rc::Rc::new(MockPrinter::ready());
+        let devices = Devices {
+            printer: Box::new(SharedPrinter(std::rc::Rc::clone(&printer))),
+            card_reader: Box::new(MockCardReader::with_pan("6222021234567890123")),
+            pinpad: Box::new(MockPinPad::faulty("未连接")),
+            scanner: Box::new(MockScanner::ready()),
+        };
+
+        // 业务函数：先预检、后打印，? 阻断任何后续副作用。
+        let result = (|| -> Result<PrintReceipt, DeviceError> {
+            devices.ensure(&[DeviceKind::Printer, DeviceKind::PinPad])?;
+            devices.printer.print(&voucher())
+        })();
+
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            DeviceError::NotReady { kind, .. } if kind == "密码键盘"
+        ));
+        assert!(
+            printer.printed.borrow().is_empty(),
+            "预检失败后打印机上不得出现任何凭证"
+        );
+    }
+
+    // S-02：同一个 printer 实例在就绪/故障之间切换，下一次调用立刻反映新状态。
+    #[test]
+    fn s02_printer_state_change_is_visible_on_next_call() {
+        let mut printer = MockPrinter::ready();
+        assert_eq!(printer.print(&voucher()).unwrap().job_id, "PRINT-1");
+        assert_eq!(printer.status(), DeviceStatus::Ready);
+
+        printer.state = Some(DeviceStatus::Faulty("缺纸".into()));
+        let err = printer.print(&voucher()).unwrap_err();
+        assert_not_ready(&err, "打印机", "故障：缺纸");
+        assert_eq!(
+            printer.printed.borrow().len(),
+            1,
+            "故障时的打印不得写入已打印列表"
+        );
+
+        printer.state = Some(DeviceStatus::NotConnected);
+        let err = printer.print(&voucher()).unwrap_err();
+        assert!(
+            err.to_string().contains("未连接"),
+            "未连接状态必须可见：{err}"
+        );
+
+        printer.state = None; // None 等价于默认就绪
+        assert_eq!(
+            printer.print(&voucher()).unwrap().job_id,
+            "PRINT-2",
+            "job_id 由已打印条数派生：故障期间的失败不占号"
+        );
+        assert_eq!(printer.printed.borrow().len(), 2);
+    }
+
+    // S-02/S-03：pinpad 与读卡器的状态切换同样在下一次调用生效。
+    #[test]
+    fn s02_pinpad_and_card_reader_state_changes_are_visible_on_next_call() {
+        let mut pinpad = MockPinPad::faulty("未连接");
+        assert!(pinpad.read_pin().is_err());
+        pinpad.state = DeviceStatus::Ready;
+        let block = pinpad.read_pin().unwrap();
+        assert!(!block.is_empty());
+        assert!(!format!("{block:?}").contains(block.expose()));
+
+        pinpad.state = DeviceStatus::Faulty("按键无响应".into());
+        let err = pinpad.read_pin().unwrap_err();
+        assert!(err.to_string().contains("按键无响应"));
+
+        let mut reader = MockCardReader::with_pan("6222021234567890123");
+        assert!(reader.read().is_ok());
+        reader.state = DeviceStatus::NotConnected;
+        let err = reader.read().unwrap_err();
+        assert_not_ready(&err, "读卡器", "未连接");
+    }
+
+    // S-01：连续打印的 job_id 递增，已打印列表按顺序累积。
+    #[test]
+    fn s01_consecutive_prints_increment_job_id_and_append_to_printed_list() {
+        let printer = MockPrinter::ready();
+        let ids: Vec<String> = (0..3)
+            .map(|i| {
+                printer
+                    .print(&voucher().field("seq", &i.to_string()))
+                    .unwrap()
+                    .job_id
+            })
+            .collect();
+        assert_eq!(ids, ["PRINT-1", "PRINT-2", "PRINT-3"]);
+
+        // printed() 返回只读视图而不是副本：副本会让人误以为改得到内部状态。
+        assert_eq!(printer.printed().len(), 3);
+        assert_eq!(printer.printed()[2].fields["seq"], "2");
+
+        // 作业号用独立计数器，清空记录后不得复用旧号——
+        // 否则上层拿 job_id 当对账键就会撞号。
+        printer.printed.borrow_mut().clear();
+        assert_eq!(printer.printed_count(), 0);
+        assert_eq!(printer.print(&voucher()).unwrap().job_id, "PRINT-4");
+    }
+
+    // S-04：不足 10 位数字整体掩码；非数字字符（含全角数字）被静默剥离。
+    #[test]
+    fn s04_masking_below_ten_digits_and_non_digits() {
+        for (pan, expected) in [
+            ("", "****"),
+            ("123456789", "****"),
+            ("1234-5678-9", "****"),
+            ("6222-0212-3456-7890", "622202******7890"),
+            ("PAN-ABCD-EFGH", "****"),
+            ("６２２２０２１２３４５６７８９０", "****"),
+        ] {
+            let card = CardData::new(pan, false);
+            assert_eq!(card.pan_masked, expected, "pan={pan}");
+            if !pan.is_empty() {
+                let debug = format!("{card:?}");
+                assert!(!debug.contains(pan), "Debug 泄露输入 {pan}：{debug}");
+            }
+        }
+    }
+
+    // S-04（当前行为）：恰好 10 位时取前 6 + 后 4，覆盖全部 10 位数字，
+    // 只是被 ****** 分隔；对 10 位卡号这等于没有任何隐藏。
+    #[test]
+    fn s04_masking_boundary_below_13_digits_is_fully_masked() {
+        // 10 位时旧的 6+4 掩码会把全部数字露出来——这条边界由测试钉死。
+        for pan in ["6222020123", "622202012", "62220201234"] {
+            let card = CardData::new(pan, true);
+            assert_eq!(card.pan_masked, "****", "不足 13 位必须整卡掩码：{pan}");
+        }
+        // 13 位起才允许保留前 6 后 4。
+        let card = CardData::new("6222021234567", true);
+        assert_eq!(card.pan_masked, "622202******4567");
+    }
+
+    // S-04：空块/非空块的 expose、字节长度与 Debug 脱敏边界。
+    #[test]
+    fn s04_pin_block_boundaries_and_debug_redaction() {
+        let empty = PinBlock::new("");
+        assert_eq!(empty.len(), 0);
+        assert!(empty.is_empty());
+        assert_eq!(empty.expose(), "", "显式 expose 是唯一取明文的入口");
+        assert_eq!(format!("{empty:?}"), "PinBlock(<redacted, 0 bytes>)");
+
+        let raw = "SECRET-PIN-BLOCK";
+        let block = PinBlock::new(raw);
+        assert_eq!(block.len(), raw.len());
+        assert!(!block.is_empty());
+        assert_eq!(block.expose(), raw, "expose 只应在送主机时显式调用");
+        let debug = format!("{block:?}");
+        assert!(debug.contains("redacted"));
+        assert!(debug.contains(&raw.len().to_string()));
+        assert!(!debug.contains(raw), "Debug 不得包含 PIN 块内容：{debug}");
+
+        // 多字节内容：len 报字节数（6），不是字符数；Debug 同样不泄露。
+        let multibyte = PinBlock::new("密码");
+        assert_eq!(multibyte.len(), 6, "len 当前按字节计数");
+        assert_eq!(multibyte.expose(), "密码");
+        assert!(!format!("{multibyte:?}").contains("密码"));
+        assert!(format!("{multibyte:?}").contains("6 bytes"));
     }
 }

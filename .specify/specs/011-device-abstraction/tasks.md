@@ -6,6 +6,7 @@
 | T-02 | 实现设备就绪校验与 mock 适配器 | S-03 | `core` | `packages/core/src/device.rs` | `cargo test -p tellerkit-core device::` |
 | T-03 | 敏感数据脱敏与换实现用例 | S-04, S-05 | `core` | `packages/core/src/device.rs` | `cargo test -p tellerkit-core device::` |
 | T-04 | 补充设备错误的对抗用例 | S-02, S-03 | `core` | `packages/core/src/device.rs` | `cargo test -p tellerkit-core device::` |
+| T-05 | 修正掩码边界与 PIN 块序列化泄露 | S-04, S-06 | `core` | `packages/core/src/device.rs` | `cargo test -p tellerkit-core device::` |
 
 ## 完成定义
 
