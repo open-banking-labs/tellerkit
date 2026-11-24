@@ -18,6 +18,7 @@
     "verify": "npm run bindings && npm run gate && cargo test --workspace && npm run build && bash scripts/verify-p0.sh",
     "bindings": "node tools/gen-bindings.mjs",
     "task": "node tools/run-task.mjs",
-    "tasks:check": "node tools/check-tasks.mjs"
+    "tasks:check": "node tools/check-tasks.mjs",
+    "dispatch": "node tools/dispatch.mjs"
   }
 }

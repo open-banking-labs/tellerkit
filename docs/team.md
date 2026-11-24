@@ -13,6 +13,25 @@ AI 主力，人保留四个决策点。这不是"AI 帮忙写代码"，而是按
 | Test Agent | AI | 生成 GIVEN/WHEN/THEN 用例，引用 spec 场景 ID | 不生成"只验证实现细节"的测试 |
 | Review Agent | AI | 输出「可合并 / 需人工 / 拒绝」+ 理由 | 不做最终批准、不代替人评审 |
 
+## 派发流程（W4）
+
+```
+tasks.md ──dispatch──▶ 提示词（含预设 + 场景 + 白名单 + 验收命令）
+                          │
+                          ▼
+                    子 Agent 执行
+                          │
+                          ▼
+              run-task.mjs 裁决（exit code + 白名单）
+                          │
+                          ▼
+              dispatches/*.json（status + verdict）
+```
+
+- 派发**不是口述**：`tools/dispatch.mjs` 把预设与任务编译成同一份文本，带 sha256
+- `contract` 层永远不进 Agent 队列，派发器直接拒绝（退出码 3）
+- 事前靠提示词约束写入范围，事后靠白名单裁决——**DSH 目前没有 preset 级 toolFilter，这是已知缺口**
+
 ## 合并流程（main 受保护）
 
 ```

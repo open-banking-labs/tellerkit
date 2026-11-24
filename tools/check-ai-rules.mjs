@@ -123,6 +123,39 @@ for (const f of presets) {
   }
 }
 
+// 8.5 派发记录必须结构完整（W4 的审计凭据）
+const dispatchDir = join(ROOT, ".agents/dispatches");
+let dispatchCount = 0;
+if (existsSync(dispatchDir)) {
+  const STATUSES = ["dispatched", "PASS", "FAIL", "OUT_OF_SCOPE"];
+  for (const f of readdirSync(dispatchDir).filter((x) => x.endsWith(".json"))) {
+    dispatchCount++;
+    const where = `.agents/dispatches/${f}`;
+    let rec;
+    try {
+      rec = JSON.parse(read(join(dispatchDir, f)));
+    } catch {
+      errors.push(`${where} 不是合法 JSON`);
+      continue;
+    }
+    for (const key of ["task_id", "preset", "acceptance_cmd", "prompt_sha256", "status"]) {
+      if (!rec[key]) errors.push(`${where} 缺少字段 ${key}`);
+    }
+    if (!Array.isArray(rec.allowed_files) || rec.allowed_files.length === 0) {
+      errors.push(`${where} 的 allowed_files 必须是非空数组：没有白名单就没有裁决依据`);
+    }
+    if (!STATUSES.includes(rec.status)) {
+      errors.push(`${where} 的 status「${rec.status}」非法（应为 ${STATUSES.join(" / ")}）`);
+    }
+    if (rec.prompt_sha256 && !/^[0-9a-f]{64}$/.test(rec.prompt_sha256)) {
+      errors.push(`${where} 的 prompt_sha256 不是 sha256`);
+    }
+    if (rec.status !== "dispatched" && !rec.verdict) {
+      errors.push(`${where} 已裁决但没有 verdict：结论无法复核`);
+    }
+  }
+}
+
 // 9. 端侧 AI 只预留不实现
 const AI_TOKENS = ["openai", "anthropic", "chat/completions", "assist.suggestTx", "assist.prefill"];
 for (const file of frontendFiles) {
@@ -164,6 +197,6 @@ if (errors.length) {
 }
 
 console.log(
-  `✓ check-ai-rules 通过（${units.length} 个单位、${presets.length} 份 Agent 预设、宪法 10 条、安全边界表述齐全）`,
+  `✓ check-ai-rules 通过（${units.length} 个单位、${presets.length} 份 Agent 预设、${dispatchCount} 条派发记录、宪法 10 条、安全边界表述齐全）`,
 );
 for (const n of notes) console.log("  · " + n);

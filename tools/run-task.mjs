@@ -11,6 +11,7 @@ import { resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { constants as osConstants } from "node:os";
 import { matchAny } from "./lib/glob.mjs";
+import { parseTasksFile, TasksParseError } from "./lib/tasks.mjs";
 
 const DEFAULT_TIMEOUT = 600000;
 const TAIL_LINES = 20;
@@ -72,70 +73,14 @@ function parseArgs(argv) {
   return opts;
 }
 
-const stripTicks = (s) => s.replace(/`/g, "").trim();
-const stripWrapTicks = (s) => s.trim().replace(/^`+/, "").replace(/`+$/, "").trim();
-const isSeparator = (cells) => cells.every((c) => /^:?-{3,}:?$/.test(c));
-function parseRow(line) {
-  const s = line.trim();
-  if (!s.startsWith("|")) return null;
-  // 不闭合的行也要返回占位，交给调用方报"列数不符"而不是静默跳过
-  if (!s.endsWith("|")) return { cells: null };
-  return { cells: s.slice(1, -1).split("|").map((c) => c.trim()) };
-}
+/** 解析失败直接终止：执行器没有"部分执行"的语义。 */
 function parseTasks(file) {
-  let text;
   try {
-    text = readFileSync(file, "utf8");
+    return parseTasksFile(file, (p) => readFileSync(p, "utf8"));
   } catch (e) {
-    fatal(`读不到 tasks.md：${file}（${e.code || e.message}）`);
+    if (e instanceof TasksParseError) fatal(e.message);
+    throw e;
   }
-  const lines = text.split(/\r?\n/);
-  let header = null;
-  let headerLine = 0;
-  let inFence = false;
-  for (let i = 0; i < lines.length; i++) {
-    if (/^\s*```/.test(lines[i])) { inFence = !inFence; continue; }
-    if (inFence) continue;
-    const row = parseRow(lines[i]);
-    if (!row?.cells) continue;
-    // 按列名找表头：列顺序以后可能调整，写死下标会静默错位
-    const names = row.cells.map(stripTicks);
-    if (names.includes("ID") && names.includes("验收命令")) { header = names; headerLine = i; break; }
-  }
-  if (!header) fatal(`${file} 未找到表头：需要含「ID」与「验收命令」的表格行`);
-  for (const name of ["ID", "允许改动", "验收命令"]) {
-    if (header.indexOf(name) < 0) fatal(`${file}:${headerLine + 1} 缺少列「${name}」，无法执行`);
-    if (header.filter((h) => h === name).length > 1) fatal(`${file}:${headerLine + 1} 列名「${name}」重复`);
-  }
-  const at = (i) => `${file}:${i + 1}`;
-  const idIdx = header.indexOf("ID");
-  const allowedIdx = header.indexOf("允许改动");
-  const cmdIdx = header.indexOf("验收命令");
-  const titleIdx = header.indexOf("任务");
-  const tasks = [];
-  const seen = new Set();
-  for (let i = headerLine + 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line.trim()) break; // 只读第一张表，空行即表尾
-    const row = parseRow(line);
-    if (!row) break;
-    if (!row.cells) fatal(`${at(i)} 表格行必须以 | 开头并以 | 结尾`);
-    if (row.cells.length !== header.length) {
-      fatal(`${at(i)} 有 ${row.cells.length} 列、表头 ${header.length} 列：单元格内不允许出现「|」，多路径请用英文逗号分隔`);
-    }
-    if (isSeparator(row.cells)) continue;
-    const id = stripTicks(row.cells[idIdx]);
-    if (!id) fatal(`${at(i)} ID 为空`);
-    if (seen.has(id)) fatal(`${at(i)} ID「${id}」重复：同一文件内必须唯一`);
-    seen.add(id);
-    const allowed = row.cells[allowedIdx].replace(/`/g, "").split(",").map((p) => p.trim()).filter(Boolean);
-    const command = stripWrapTicks(row.cells[cmdIdx]);
-    if (!allowed.length) fatal(`${at(i)} 任务 ${id} 的「允许改动」为空：没有白名单就无法判越界`);
-    if (!command) fatal(`${at(i)} 任务 ${id} 的「验收命令」为空`);
-    tasks.push({ id, title: titleIdx >= 0 ? stripTicks(row.cells[titleIdx]) : "", command, allowed });
-  }
-  if (!tasks.length) fatal(`${file} 表头下没有任务行`);
-  return tasks;
 }
 
 function git(args, root) {
