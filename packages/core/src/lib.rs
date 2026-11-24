@@ -3,6 +3,7 @@
 //! 本 crate 不依赖 Tauri，可独立 `cargo test`，便于在无 GUI 环境下验证
 //! 菜单过滤、菜单包编解码、验签等关键路径。
 
+pub mod device;
 pub mod filter;
 pub mod mock;
 pub mod model;
@@ -12,6 +13,10 @@ pub mod store;
 pub mod sync;
 pub mod tx;
 
+pub use device::{
+    CardData, DeviceError, DeviceKind, DeviceStatus, Devices, PinBlock, PrintReceipt, Printer,
+    Scanner, Voucher,
+};
 pub use filter::MenuView;
 pub use model::{MenuNode, MenuTree, NodeStatus, NodeType};
 pub use pack::{MenuPack, PackError};
