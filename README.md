@@ -60,6 +60,10 @@ npm install
 npm run tauri:dev        # 开发模式（Vite + Tauri）
 ```
 
+> 裸的 `target/debug/tellerkit` 默认会去找 dev server。要单独运行可执行文件，
+> 需把前端嵌进二进制：`cargo build -p tellerkit --features custom-protocol`。
+> 出包走 `npm run tauri:build`（CLI 会自动加这个 feature）。
+
 首次启动会从 mock 服务端拉一次菜单包，装到应用数据目录：
 
 ```

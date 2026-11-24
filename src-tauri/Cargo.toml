@@ -12,6 +12,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+# 生产构建 / 不启 dev server 时必须启用：把前端产物嵌进二进制。
+# tauri CLI 在 `tauri build` 时会自动加上。
+custom-protocol = ["tauri/custom-protocol"]
+
 [dependencies]
 tauri = { version = "2", features = [] }
 serde = { workspace = true }
