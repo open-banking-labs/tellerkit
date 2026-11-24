@@ -48,3 +48,6 @@ jobs:
 
       - name: 三道门禁
         run: npm run gate
+
+      - name: 派发指标（信息性）
+        run: npm run metrics

@@ -1,0 +1,32 @@
+{
+  "task_id": "T-09",
+  "tasks_file": ".specify/specs/000-menu-permission-loop/tasks.md",
+  "spec": ".specify/specs/000-menu-permission-loop/spec.md",
+  "preset": "engine-agent",
+  "layer": "core",
+  "scenarios": [
+    "S-02"
+  ],
+  "allowed_files": [
+    "packages/core/src/filter.rs"
+  ],
+  "acceptance_cmd": "cargo test -p tellerkit-core filter::",
+  "base": "origin/main",
+  "base_sha": "0000000000000000000000000000000000000000",
+  "prompt_sha256": "b4b5670089b1182525a4971942b96811805723bb4ad5efcb2df6a6e771add2e5",
+  "created_at": "2026-11-23T00:00:00.000Z",
+  "_fixture": "fixture",
+  "status": "OUT_OF_SCOPE",
+  "verdict": {
+    "exit_code": 0,
+    "duration_ms": 9000,
+    "changed_files": [
+      "tools/mtree-tool/src/main.rs",
+      "apps/shell/src/App.vue"
+    ],
+    "violations": [
+      "apps/shell/src/App.vue"
+    ],
+    "finished_at": "2026-11-23T00:00:00.000Z"
+  }
+}

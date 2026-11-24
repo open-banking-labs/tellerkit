@@ -1,0 +1,29 @@
+{
+  "task_id": "T-02",
+  "tasks_file": ".specify/specs/000-menu-permission-loop/tasks.md",
+  "spec": ".specify/specs/000-menu-permission-loop/spec.md",
+  "preset": "engine-agent",
+  "layer": "tools",
+  "scenarios": [
+    "S-02"
+  ],
+  "allowed_files": [
+    "packages/core/src/filter.rs"
+  ],
+  "acceptance_cmd": "cargo test -p tellerkit-core filter::",
+  "base": "origin/main",
+  "base_sha": "0000000000000000000000000000000000000000",
+  "prompt_sha256": "37ea1c0c7351884a3968e49daa1a0f19e6ee03d36999037ee474fcea5e3d2249",
+  "created_at": "2026-11-20T00:00:00.000Z",
+  "_fixture": "fixture",
+  "status": "PASS",
+  "verdict": {
+    "exit_code": 0,
+    "duration_ms": 168,
+    "changed_files": [
+      "packages/core/src/filter.rs"
+    ],
+    "violations": [],
+    "finished_at": "2026-11-20T00:00:00.000Z"
+  }
+}
