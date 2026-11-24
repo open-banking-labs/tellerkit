@@ -13,6 +13,17 @@ AI 主力，人保留四个决策点。这不是"AI 帮忙写代码"，而是按
 | Test Agent | AI | 生成 GIVEN/WHEN/THEN 用例，引用 spec 场景 ID | 不生成"只验证实现细节"的测试 |
 | Review Agent | AI | 输出「可合并 / 需人工 / 拒绝」+ 理由 | 不做最终批准、不代替人评审 |
 
+## 合并流程（main 受保护）
+
+```
+分支 → 提交 → 推送 → 开 PR → gate 绿 → squash merge → 删除分支
+```
+
+- `main` 禁止直推、禁止 force push（规则集 `main protection`）
+- 必须过 `gate` 检查，且分支要 up-to-date
+- 不需要人工 approve（单人项目自审会死锁），但 **PR 正文必须自检**
+- AI 可以开 PR、可以读检查结果，**不能**点合并
+
 ## 人保留的四个决策点
 
 1. **规格定稿**：`spec.md` 的场景与验收标准只能人改。
