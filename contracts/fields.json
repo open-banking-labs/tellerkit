@@ -89,6 +89,11 @@
     "PrintReceipt": [
       "job_id",
       "pages"
+    ],
+    "SessionState": [
+      "locked",
+      "reason",
+      "idle_secs"
     ]
   },
   "ts_interfaces": {
@@ -166,6 +171,11 @@
     "PrintReceipt": [
       "job_id",
       "pages"
+    ],
+    "SessionState": [
+      "locked",
+      "reason",
+      "idle_secs"
     ]
   },
   "commands": [
@@ -185,7 +195,10 @@
     "tx_pending_count",
     "replay_pending",
     "package_module",
-    "audit_tail"
+    "audit_tail",
+    "session_touch",
+    "session_tick",
+    "session_blur"
   ],
   "generated_types": [
     "NodeType",
@@ -199,6 +212,7 @@
     "DevState",
     "TxStatus",
     "TxResult",
-    "PrintReceipt"
+    "PrintReceipt",
+    "SessionState"
   ]
 }

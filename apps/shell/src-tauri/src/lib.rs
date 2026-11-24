@@ -18,6 +18,7 @@ use tellerkit_core::mock::MockHost;
 use tellerkit_core::model::MenuTree;
 use tellerkit_core::perm::PermSnapshot;
 use tellerkit_core::pkg::BizPackage;
+use tellerkit_core::session::{SessionGuard, SessionPolicy};
 use tellerkit_core::store::MenuStore;
 use tellerkit_core::tx::{DemoTxHost, TxEngine};
 use tellerkit_core::tx::{TxJournal, TxRequest, TxResult};
@@ -49,6 +50,8 @@ pub struct AppState {
     pub audit: Option<Arc<SqliteJournal>>,
     /// 外设型号白名单。默认只允许 mock 型号——没登记就拒绝。
     pub policy: DevicePolicy,
+    /// 会话锁屏状态。`None` 表示未登录。
+    pub session: Option<SessionGuard>,
 }
 
 impl AppState {
@@ -73,6 +76,7 @@ impl AppState {
             packages: Vec::new(),
             audit,
             policy: DevicePolicy::allow_mocks(),
+            session: None,
         }
     }
 
@@ -154,6 +158,9 @@ pub fn run() {
             commands::replay_pending,
             commands::package_module,
             commands::audit_tail,
+            commands::session_touch,
+            commands::session_tick,
+            commands::session_blur,
         ])
         .run(tauri::generate_context!())
         .expect("TellerKit 启动失败");

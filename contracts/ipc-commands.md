@@ -18,6 +18,9 @@
 | `replay_pending` | — | `string`（人可读汇总） | 是（逐笔打主机） |
 | `package_module` | `route: string` | `string`（模块源码） | 否 |
 | `audit_tail` | `limit: number` | `string[]`（一行一条） | 否（读本地账本） |
+| `session_touch` | — | `SessionState` | 否 |
+| `session_tick` | — | `SessionState` | 否 |
+| `session_blur` | — | `SessionState` | 否 |
 | `dev_set_offline` | `offline: boolean` | `DevState` | 否 |
 | `dev_set_tampered` | `tampered: boolean` | `DevState` | 否 |
 | `dev_bump_server_version` | — | `DevState` | 否 |

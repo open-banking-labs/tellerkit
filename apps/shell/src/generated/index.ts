@@ -10,6 +10,7 @@ export type { NodeType } from "./NodeType";
 export type { PermSnapshot } from "./PermSnapshot";
 export type { PrintReceipt } from "./PrintReceipt";
 export type { ReloadReport } from "./ReloadReport";
+export type { SessionState } from "./SessionState";
 export type { TxResult } from "./TxResult";
 export type { TxStatus } from "./TxStatus";
 export type { UpdateReport } from "./UpdateReport";
