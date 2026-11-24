@@ -12,6 +12,7 @@ const busy = ref(false);
 const result = ref<TxResult | null>(null);
 const printed = ref<string | null>(null);
 const pending = ref(0);
+const replayNote = ref<string | null>(null);
 
 /** 金额一律换算成"分"再发给后端：浮点进交易是事故来源。 */
 const amountCents = computed(() => {
@@ -30,6 +31,11 @@ const meta = computed(() => (result.value ? statusMeta[result.value.status] : nu
 
 async function refreshPending(): Promise<void> {
   pending.value = await api.txPendingCount();
+}
+
+async function replay(): Promise<void> {
+  replayNote.value = await api.replayPending();
+  await refreshPending();
 }
 
 async function submit(): Promise<void> {
@@ -104,8 +110,11 @@ void refreshPending();
         幂等键由客户端生成；重复提交不会重复入账。
         <template v-if="pending > 0"> · 当前挂起 {{ pending }} 笔</template>
       </span>
+      <button v-if="pending > 0" class="btn" @click="replay">重放挂起交易</button>
     </div>
   </div>
+
+  <p v-if="replayNote" class="tx-hint" style="margin-top: 8px">{{ replayNote }}</p>
 
   <div v-if="result && meta" class="card">
     <h2>交易结果</h2>

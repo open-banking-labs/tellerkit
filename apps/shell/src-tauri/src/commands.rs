@@ -136,6 +136,10 @@ pub fn boot(state: State<'_, Mutex<AppState>>) -> Result<BootInfo, String> {
     };
     st.menu = Some(outcome.loaded.tree);
     st.last_load = Some(report.clone());
+    let mut notes = outcome.notes;
+    if let Some(w) = &st.journal_warning {
+        notes.push(w.clone());
+    }
 
     Ok(BootInfo {
         shell_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -144,7 +148,7 @@ pub fn boot(state: State<'_, Mutex<AppState>>) -> Result<BootInfo, String> {
         offline: st.host.offline,
         local_versions: st.store.list_versions(),
         load: report,
-        notes: outcome.notes,
+        notes,
     })
 }
 
@@ -278,6 +282,26 @@ pub fn print_voucher(
         .printer
         .print(&voucher)
         .map_err(|e| e.to_string())
+}
+
+/// 重放挂起交易。返回人可读的汇总——批次里失败一笔不代表全批失败。
+#[tauri::command]
+pub fn replay_pending(state: State<'_, Mutex<AppState>>) -> Result<String, String> {
+    let mut guard = lock(&state)?;
+    let AppState { tx, tx_host, .. } = &mut *guard;
+    let outcomes = tx.replay_pending(tx_host);
+    if outcomes.is_empty() {
+        return Ok("没有待重放的交易".to_string());
+    }
+    let committed = outcomes
+        .iter()
+        .filter(|(_, r)| r.status == tellerkit_core::tx::TxStatus::Committed)
+        .count();
+    let still_pending = outcomes.len() - committed;
+    Ok(format!(
+        "重放 {} 笔：成功 {committed} 笔，仍挂起 {still_pending} 笔",
+        outcomes.len()
+    ))
 }
 
 /// 待重放笔数：界面用它提示"还有 N 笔挂起"。

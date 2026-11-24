@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["apps/shell/src-tauri", "packages/core", "tools/mtree-tool"]
+members = [
+    "apps/shell/src-tauri",
+    "packages/core",
+    "packages/journal-sqlite",
+    "tools/mtree-tool",
+]
 
 [workspace.package]
 version = "0.1.0"

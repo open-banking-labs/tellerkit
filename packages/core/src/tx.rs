@@ -117,6 +117,24 @@ pub enum HostError {
     Rejected(String),
 }
 
+/// 持久化端口。core 只定义"需要记什么"，不关心存哪里。
+///
+/// 刻意不把 SQLite 放进 core：这一层必须能脱离磁盘与驱动做纯逻辑测试。
+/// 实现放在 `packages/journal-sqlite`，由主壳装配。
+///
+/// 方法返回 `Result` 而不是静默失败：记账失败必须能被看见，
+/// 但也不允许它改变交易结论——结论由主机与状态机决定。
+pub trait TxJournal: Send + Sync {
+    /// 追加一条交易结论（审计日志，只增）。
+    fn record(&self, request: &TxRequest, result: &TxResult) -> Result<(), String>;
+    /// 挂起请求入队，供重启后重放。
+    fn enqueue(&self, request: &TxRequest) -> Result<(), String>;
+    /// 重放完成后出队。
+    fn dequeue(&self, idempotency_key: &str) -> Result<(), String>;
+    /// 启动时读取未完成的挂起请求。
+    fn pending(&self) -> Result<Vec<TxRequest>, String>;
+}
+
 /// 主机接口。真实实现走网络，测试实现可以精确控制失败方式。
 pub trait TxHost {
     fn submit(&self, request: &TxRequest) -> Result<String, HostError>;
@@ -176,21 +194,62 @@ impl TxHost for DemoTxHost {
     }
 }
 
-/// 交易引擎。内存态：幂等索引 + 待重放队列。
-#[derive(Debug, Default)]
+/// 交易引擎。幂等索引常驻内存；待重放队列可选持久化。
 pub struct TxEngine {
     /// 幂等键 -> (载荷签名, 首次结果)。
     ///
     /// 存签名是为了区分"同一笔业务重复提交"与"同一个键被挪作他用"——
     /// 后者必须显式拒绝，否则柜员会把另一笔业务误认为已成功。
     idempotent: HashMap<String, (String, TxResult)>,
-    /// 待重放请求（P1.4 会落盘）。
+    /// 待重放请求。
     pending: Vec<TxRequest>,
+    /// 持久化端口；None 表示纯内存模式（测试与浏览器预览）。
+    journal: Option<Box<dyn TxJournal>>,
+    /// 最近一次记账失败。不改变交易结论，但必须能被上层看见。
+    journal_error: Option<String>,
+}
+
+impl Default for TxEngine {
+    fn default() -> Self {
+        Self {
+            idempotent: HashMap::new(),
+            pending: Vec::new(),
+            journal: None,
+            journal_error: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for TxEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TxEngine")
+            .field("idempotent_keys", &self.idempotent.len())
+            .field("pending", &self.pending.len())
+            .field("journaled", &self.journal.is_some())
+            .finish()
+    }
 }
 
 impl TxEngine {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 挂上持久化端口，并把上次未完成的挂起请求读回来。
+    ///
+    /// 读队列失败不阻断启动：柜面宁可"能开但提示异常"，也不要"打不开"。
+    pub fn with_journal(mut self, journal: Box<dyn TxJournal>) -> Self {
+        match journal.pending() {
+            Ok(list) => self.pending = list,
+            Err(e) => self.journal_error = Some(format!("读取待重放队列失败：{e}")),
+        }
+        self.journal = Some(journal);
+        self
+    }
+
+    /// 取走最近一次记账错误（取走后清空，避免重复上报）。
+    pub fn take_journal_error(&mut self) -> Option<String> {
+        self.journal_error.take()
     }
 
     /// 提交一笔交易。
@@ -241,6 +300,22 @@ impl TxEngine {
         if cacheable {
             self.idempotent
                 .insert(request.idempotency_key.clone(), (signature, result.clone()));
+        }
+
+        // 记账失败不改变结论：交易已经发生，日志没写成是运维问题，不是业务问题。
+        let mut journal_err = None;
+        if let Some(journal) = self.journal.as_deref() {
+            if let Err(e) = journal.record(&request, &result) {
+                journal_err = Some(e);
+            }
+            if result.status == TxStatus::Pending {
+                if let Err(e) = journal.enqueue(&request) {
+                    journal_err = Some(e);
+                }
+            }
+        }
+        if journal_err.is_some() {
+            self.journal_error = journal_err;
         }
         result
     }

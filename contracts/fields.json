@@ -180,7 +180,8 @@
     "dev_reset_local",
     "submit_transaction",
     "print_voucher",
-    "tx_pending_count"
+    "tx_pending_count",
+    "replay_pending"
   ],
   "generated_types": [
     "NodeType",
