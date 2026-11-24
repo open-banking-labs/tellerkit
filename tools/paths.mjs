@@ -66,15 +66,20 @@ export const rustFiles = [
 /** ts-rs 生成物目录（每个 app 一份） */
 export const generatedDirs = frontendDirs.map((d) => join(d, "generated")).filter(exists);
 
-/** 命令层文件 */
+/**
+ * 命令层文件。
+ *
+ * 用 posix() 之后再比后缀：Windows 上路径是 `...\commands.rs`，
+ * 直接 `endsWith("/commands.rs")` 恒为假——命令注册检查会静默变成空集。
+ */
 export const commandFiles = shellRustDirs
   .flatMap((d) => walk(d))
-  .filter((f) => f.endsWith("/commands.rs"));
+  .filter((f) => posix(f).endsWith("/commands.rs"));
 
 /** Tauri 装配入口 */
 export const handlerFiles = shellRustDirs
   .flatMap((d) => walk(d))
-  .filter((f) => f.endsWith("/lib.rs"));
+  .filter((f) => posix(f).endsWith("/lib.rs"));
 
 /** 所有受管的"单位"：每个都要有 AGENTS.md + README.md */
 export const units = [...apps, ...packages];
