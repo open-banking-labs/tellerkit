@@ -12,8 +12,8 @@
 use crate::model::{MenuNode, MenuTree, NodeStatus, NodeType};
 use crate::perm::PermSnapshot;
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 use std::collections::HashMap;
+use ts_rs::TS;
 
 /// 给前端渲染用的可见菜单节点。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -173,6 +173,66 @@ mod tests {
                 MenuNode::page("loan.disburse", Some("loan"), "贷款发放", 1),
             ],
         )
+    }
+
+    /// 便捷构造：Action 节点。只承载按钮权限码，不是导航入口。
+    fn action_node(code: &str, parent: Option<&str>) -> MenuNode {
+        let mut node = MenuNode::page(code, parent, code, 1);
+        node.node_type = NodeType::Action;
+        node.route = None;
+        node
+    }
+
+    #[test]
+    fn action_nodes_never_enter_navigation() {
+        // S-02 的 account 树 + Action 边界：Action 即使出现在快照的 menu_codes 里，
+        // 也只能作为按钮码，不得成为根入口或 children，也不得让无权父节点复活。
+        let tree = MenuTree::new(
+            1,
+            vec![
+                MenuNode::group("account", None, "账户", 1),
+                MenuNode::page("account.withdraw", Some("account"), "取款", 1),
+                MenuNode::page("account.deposit", Some("account"), "存款", 2),
+                action_node("account.withdraw.print", Some("account.withdraw")),
+                action_node("account.deposit.print", Some("account.deposit")),
+                action_node("account.batch", None),
+            ],
+        );
+        assert!(tree.validate().is_ok(), "Action 只能做叶子，此树应结构合法");
+
+        let perm = snapshot(
+            &[
+                "account.withdraw",
+                "account.withdraw.print",
+                "account.deposit.print",
+                "account.batch",
+            ],
+            &[],
+        );
+        let view = filter_visible(&tree, &perm);
+
+        let mut codes = Vec::new();
+        for root in &view {
+            root.collect_codes(&mut codes);
+        }
+        assert_eq!(
+            codes,
+            vec!["account".to_string(), "account.withdraw".to_string()],
+            "导航树里只能有容器 account 与被授予的 account.withdraw"
+        );
+        assert_eq!(view.len(), 1, "根级 Action 不得成为导航入口");
+        assert!(!view[0].direct, "account 未被授予，应作为容器");
+        assert_eq!(view[0].children.len(), 1);
+        assert_eq!(view[0].children[0].code, "account.withdraw");
+        assert!(view[0].children[0].direct, "account.withdraw 可点击");
+        assert!(
+            view[0].children[0].children.is_empty(),
+            "Action 不能作为导航子节点"
+        );
+        assert!(
+            !codes.contains(&"account.deposit".to_string()),
+            "未被授予的 account.deposit 必须剪掉，其下的 Action 不能让它复活"
+        );
     }
 
     #[test]

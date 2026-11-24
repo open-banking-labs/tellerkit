@@ -8,8 +8,8 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use serde::Serialize;
-use ts_rs::TS;
 use tauri::State;
+use ts_rs::TS;
 
 use tellerkit_core::filter::{filter_visible, MenuView};
 use tellerkit_core::mock::DemoRole;

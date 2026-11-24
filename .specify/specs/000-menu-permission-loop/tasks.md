@@ -15,6 +15,7 @@
 | T-08 | 菜单渲染与键盘漫游 | S-02, S-03 | `ui` | `apps/shell/src/**` | `npm run build` |
 | T-09 | 造包 CLI 与 fixtures | S-04 | `core` | `tools/mtree-tool/src/**` | `bash scripts/verify-p0.sh` |
 | T-10 | 安全边界文档与验收脚本 | S-04 | `docs` | `docs/**`, `scripts/**`, `README.md` | `npm run gate` |
+| T-11 | 补充 Action 节点不进导航的边界用例 | S-02 | `core` | `packages/core/src/filter.rs` | `cargo test -p tellerkit-core filter::` |
 
 ## 完成定义
 

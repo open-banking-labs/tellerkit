@@ -4,8 +4,8 @@
 //! 菜单过滤与按钮判断都是 O(1) 查表。
 
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 use std::collections::{BTreeMap, HashSet};
+use ts_rs::TS;
 
 /// 登录后由服务端下发的权限快照。
 ///
