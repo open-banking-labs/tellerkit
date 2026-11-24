@@ -325,6 +325,52 @@ impl TxEngine {
         &self.pending
     }
 
+    /// 重放**单笔**挂起交易，供调度器按退避节奏逐笔调用。
+    ///
+    /// 返回 None 表示队列里没有这笔（可能已被别处重放）。
+    pub fn replay_one(
+        &mut self,
+        host: &dyn TxHost,
+        idempotency_key: &str,
+    ) -> Option<(String, TxResult)> {
+        let index = self
+            .pending
+            .iter()
+            .position(|r| r.idempotency_key == idempotency_key)?;
+        let request = self.pending.remove(index);
+        let key = request.idempotency_key.clone();
+        let signature = request_signature(&request);
+
+        let result = match host.submit(&request) {
+            Ok(reference) => TxResult::committed(reference),
+            Err(HostError::Rejected(reason)) => TxResult::rejected(&format!("主机拒绝：{reason}")),
+            Err(HostError::Timeout) | Err(HostError::Unavailable) => {
+                // 不可达：放回队列，绝不丢单
+                self.pending.push(request.clone());
+                TxResult::pending("重放失败：仍不可达，保留在队列中")
+            }
+        };
+
+        self.idempotent
+            .insert(key.clone(), (signature, result.clone()));
+
+        let mut journal_err = None;
+        if let Some(journal) = self.journal.as_deref() {
+            if let Err(e) = journal.record(&request, &result) {
+                journal_err = Some(e);
+            }
+            if result.status == TxStatus::Committed {
+                if let Err(e) = journal.dequeue(&key) {
+                    journal_err = Some(e);
+                }
+            }
+        }
+        if journal_err.is_some() {
+            self.journal_error = journal_err;
+        }
+        Some((key, result))
+    }
+
     /// 重放全部挂起交易。成功的移出队列，失败的保留。
     ///
     /// 返回每笔的结果，便于上层逐笔向柜员展示——批次里失败一笔不代表全批失败。

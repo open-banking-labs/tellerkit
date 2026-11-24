@@ -18,7 +18,8 @@ use tellerkit_core::mock::MockHost;
 use tellerkit_core::model::MenuTree;
 use tellerkit_core::perm::PermSnapshot;
 use tellerkit_core::pkg::BizPackage;
-use tellerkit_core::session::{SessionGuard, SessionPolicy};
+use tellerkit_core::replay::{ReplayPolicy, ReplayScheduler};
+use tellerkit_core::session::SessionGuard;
 use tellerkit_core::store::MenuStore;
 use tellerkit_core::tx::{DemoTxHost, TxEngine};
 use tellerkit_core::tx::{TxJournal, TxRequest, TxResult};
@@ -52,6 +53,8 @@ pub struct AppState {
     pub policy: DevicePolicy,
     /// 会话锁屏状态。`None` 表示未登录。
     pub session: Option<SessionGuard>,
+    /// 自动重放调度。挂起交易按退避节奏逐笔重试，不再一次全推。
+    pub replay: ReplayScheduler,
 }
 
 impl AppState {
@@ -77,6 +80,7 @@ impl AppState {
             audit,
             policy: DevicePolicy::allow_mocks(),
             session: None,
+            replay: ReplayScheduler::new(ReplayPolicy::default()),
         }
     }
 

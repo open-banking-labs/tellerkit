@@ -517,33 +517,60 @@ pub fn package_module(route: String, state: State<'_, Mutex<AppState>>) -> Resul
     Err("该路由不是业务包提供的".to_string())
 }
 
-/// 重放挂起交易。返回人可读的汇总——批次里失败一笔不代表全批失败。
+/// 重放挂起交易：跑一轮自动重放调度。
+///
+/// 不是"一次全推"：每笔按自己的退避节奏到期才重试，失败累加次数，
+/// 达到上限交给人工。返回人可读汇总。
 #[tauri::command]
 pub fn replay_pending(state: State<'_, Mutex<AppState>>) -> Result<String, String> {
     let mut guard = lock(&state)?;
-    let AppState { tx, tx_host, .. } = &mut *guard;
-    let outcomes = tx.replay_pending(tx_host);
-    let detail = format!("{} 笔", outcomes.len());
     let actor = guard
         .snapshot
         .as_ref()
         .map(|s| s.teller_no.clone())
         .unwrap_or_else(|| "system".into());
-    if !outcomes.is_empty() {
-        let st = &*guard;
-        audit(st, &actor, "replay", "tx_queue", "ok", &detail);
+
+    let (run, journal_error) = {
+        let AppState {
+            tx,
+            tx_host,
+            replay,
+            ..
+        } = &mut *guard;
+        let run = tellerkit_core::replay::run_once(tx, replay, tx_host, now_secs());
+        (run, tx.take_journal_error())
+    };
+
+    if let Some(err) = journal_error {
+        audit(&guard, &actor, "replay", "tx_queue", "failed", &err);
     }
-    if outcomes.is_empty() {
+
+    if run.attempted == 0 && run.still_pending == 0 {
         return Ok("没有待重放的交易".to_string());
     }
-    let committed = outcomes
-        .iter()
-        .filter(|(_, r)| r.status == tellerkit_core::tx::TxStatus::Committed)
-        .count();
-    let still_pending = outcomes.len() - committed;
+    if run.attempted == 0 {
+        return Ok(format!("还有 {} 笔挂起，均未到重试时间", run.still_pending));
+    }
+
+    let detail = format!(
+        "attempted={} committed={} pending={} gave_up={}",
+        run.attempted,
+        run.committed,
+        run.still_pending,
+        run.gave_up.len()
+    );
+    audit(&guard, &actor, "replay", "tx_queue", "ok", &detail);
+
     Ok(format!(
-        "重放 {} 笔：成功 {committed} 笔，仍挂起 {still_pending} 笔",
-        outcomes.len()
+        "重放 {} 笔：成功 {} 笔，仍挂起 {} 笔{}",
+        run.attempted,
+        run.committed,
+        run.still_pending,
+        if run.gave_up.is_empty() {
+            String::new()
+        } else {
+            format!("，{} 笔已放弃自动重试，需人工处理", run.gave_up.len())
+        }
     ))
 }
 
