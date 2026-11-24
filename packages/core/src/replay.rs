@@ -7,6 +7,7 @@
 //! 所以这里是**调度策略**而不是执行器：回答"现在该重放哪几笔"、
 //! "失败几次算放弃"、"下次什么时候再试"。执行仍由 `TxEngine::replay_pending` 做。
 
+use crate::tx::{TxEngine, TxHost, TxStatus};
 use std::collections::HashMap;
 
 /// 重放策略。
@@ -331,5 +332,202 @@ mod tests {
         };
         let s = ReplayScheduler::new(policy.clone());
         assert_eq!(s.policy(), &policy);
+    }
+}
+
+/// 一轮自动重放的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayRun {
+    /// 本轮尝试的笔数。
+    pub attempted: usize,
+    /// 成功提交的笔数。
+    pub committed: usize,
+    /// 队列里仍挂着的笔数（含本轮失败与未到期的）。
+    pub still_pending: usize,
+    /// 本轮达到重试上限、交给人工的幂等键。
+    pub gave_up: Vec<String>,
+}
+
+/// 跑一轮自动重放。
+///
+/// 顺序：先把引擎里的挂起交易纳入调度（重启后第一次运行时调度表是空的），
+/// 再取到期的逐笔重放，最后按结果更新退避。
+///
+/// 为什么逐笔而不是整批：整批失败时无法区分"哪笔该退避"，
+/// 而且主机刚恢复时一批推过去更容易打垮它。
+pub fn run_once(
+    engine: &mut TxEngine,
+    scheduler: &mut ReplayScheduler,
+    host: &dyn TxHost,
+    now_secs: u64,
+) -> ReplayRun {
+    // 1. 接管引擎里尚未登记的挂起交易
+    let pending_keys: Vec<String> = engine
+        .pending_requests()
+        .iter()
+        .map(|r| r.idempotency_key.clone())
+        .collect();
+    for key in &pending_keys {
+        scheduler.track(key, now_secs);
+    }
+
+    // 2. 到期的逐笔重放
+    let due = scheduler.due(now_secs);
+    let mut committed = 0;
+    let mut gave_up = Vec::new();
+
+    for key in &due {
+        match engine.replay_one(host, key) {
+            Some((_, result)) => {
+                if result.status == TxStatus::Committed {
+                    committed += 1;
+                    scheduler.record_success(key);
+                } else {
+                    scheduler.record_failure(key, now_secs);
+                    if scheduler.exhausted(key) {
+                        gave_up.push(key.clone());
+                    }
+                }
+            }
+            // 队列里没有这笔（可能被手动重放掉了）：释放调度名额
+            None => scheduler.record_success(key),
+        }
+    }
+
+    ReplayRun {
+        attempted: due.len(),
+        committed,
+        still_pending: engine.pending_requests().len(),
+        gave_up,
+    }
+}
+
+#[cfg(test)]
+mod coordinator_tests {
+    use super::*;
+    use crate::tx::{HostError, TxEngine, TxHost, TxRequest, TxStatus};
+    use std::cell::{Cell, RefCell};
+    use std::collections::VecDeque;
+
+    /// 按脚本依次返回结果，并记录调用次数。
+    struct ScriptedHost {
+        script: RefCell<VecDeque<Result<String, HostError>>>,
+        calls: Cell<u32>,
+    }
+
+    impl ScriptedHost {
+        fn new(script: Vec<Result<String, HostError>>) -> Self {
+            Self {
+                script: RefCell::new(script.into()),
+                calls: Cell::new(0),
+            }
+        }
+        fn calls(&self) -> u32 {
+            self.calls.get()
+        }
+    }
+
+    impl TxHost for ScriptedHost {
+        fn submit(&self, _r: &TxRequest) -> Result<String, HostError> {
+            self.calls.set(self.calls.get() + 1);
+            self.script
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or(Err(HostError::Unavailable))
+        }
+    }
+
+    fn req(key: &str) -> TxRequest {
+        TxRequest::new("account.deposit", key)
+            .amount(10_000)
+            .offline(true)
+    }
+
+    /// 造一个已经挂着 N 笔交易的引擎：断网提交 → Pending。
+    fn engine_with_pending(keys: &[&str]) -> TxEngine {
+        let offline = ScriptedHost::new(vec![]);
+        let mut engine = TxEngine::new();
+        for key in keys {
+            let result = engine.submit(&offline, req(key));
+            assert_eq!(result.status, TxStatus::Pending);
+        }
+        engine
+    }
+
+    #[test]
+    fn first_run_adopts_pending_and_replays_when_host_is_back() {
+        let mut engine = engine_with_pending(&["k1", "k2"]);
+        let mut scheduler = ReplayScheduler::new(ReplayPolicy::default());
+        let host = ScriptedHost::new(vec![Ok("TX-1".into()), Ok("TX-2".into())]);
+
+        let run = run_once(&mut engine, &mut scheduler, &host, 100);
+        assert_eq!(run.attempted, 2);
+        assert_eq!(run.committed, 2);
+        assert_eq!(run.still_pending, 0);
+        assert!(run.gave_up.is_empty());
+        assert_eq!(host.calls(), 2);
+        assert_eq!(scheduler.tracked(), 0, "成功后应移出调度");
+    }
+
+    #[test]
+    fn unreachable_host_keeps_transaction_and_backs_off() {
+        let mut engine = engine_with_pending(&["k1"]);
+        let mut scheduler = ReplayScheduler::new(ReplayPolicy::default());
+        let host = ScriptedHost::new(vec![Err(HostError::Unavailable)]);
+
+        let run = run_once(&mut engine, &mut scheduler, &host, 100);
+        assert_eq!(run.attempted, 1);
+        assert_eq!(run.committed, 0);
+        assert_eq!(run.still_pending, 1, "不可达不得丢单");
+
+        // 退避期内不再重试
+        let run2 = run_once(&mut engine, &mut scheduler, &host, 110);
+        assert_eq!(run2.attempted, 0, "未到期不应重试");
+        assert_eq!(host.calls(), 1);
+    }
+
+    #[test]
+    fn gives_up_after_max_attempts_and_stops_retrying() {
+        let mut engine = engine_with_pending(&["k1"]);
+        let policy = ReplayPolicy {
+            max_attempts: 2,
+            base_backoff_secs: 10,
+            max_backoff_secs: 10,
+        };
+        let mut scheduler = ReplayScheduler::new(policy);
+        let host = ScriptedHost::new(vec![
+            Err(HostError::Unavailable),
+            Err(HostError::Unavailable),
+        ]);
+
+        let first = run_once(&mut engine, &mut scheduler, &host, 100);
+        assert!(first.gave_up.is_empty());
+        let second = run_once(&mut engine, &mut scheduler, &host, 110);
+        assert_eq!(second.gave_up, vec!["k1".to_string()]);
+        assert_eq!(engine.pending_requests().len(), 1, "放弃不等于丢弃");
+
+        let third = run_once(&mut engine, &mut scheduler, &host, 999);
+        assert_eq!(third.attempted, 0, "放弃后不再自动重试");
+        assert_eq!(host.calls(), 2);
+    }
+
+    #[test]
+    fn manual_replay_removes_entry_from_scheduler() {
+        let mut engine = engine_with_pending(&["k1"]);
+        let mut scheduler = ReplayScheduler::new(ReplayPolicy::default());
+        let online = ScriptedHost::new(vec![Ok("TX-MANUAL".into())]);
+
+        // 上一轮自动重放已经把它纳入调度（否则下面的 due 是空的，测不到接管分支）
+        scheduler.track("k1", 100);
+
+        // 手动重放掉这笔（模拟用户点了按钮）
+        assert!(engine.replay_pending(&online).len() == 1);
+        assert_eq!(engine.pending_requests().len(), 0);
+
+        // 自动重放接管时发现队列已空，应释放调度名额
+        let run = run_once(&mut engine, &mut scheduler, &online, 200);
+        assert_eq!(run.attempted, 1);
+        assert_eq!(run.committed, 0);
+        assert_eq!(scheduler.tracked(), 0);
     }
 }
