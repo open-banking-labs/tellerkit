@@ -16,17 +16,17 @@
 set -euo pipefail
 
 HOST="${TK_BUILD_HOST:-tailscale-seoul}"
-DIR="${TK_BUILD_DIR:-$HOME/build/tk-work}"
-REMOTE_DIR="\$HOME/build/tk-work"
+# rsync 的远端路径相对远端 home；ssh 里再用 $HOME 拼绝对路径
+DIR_REL="${TK_BUILD_DIR:-build/tk-work}"
 CMD="${*:-cargo test --workspace}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-echo "→ 同步源码到 $HOST:$REMOTE_DIR"
+echo "→ 同步源码到 $HOST:~/$DIR_REL"
 rsync -az --delete \
   --exclude target --exclude node_modules --exclude dist --exclude .git \
-  ./ "$HOST:$REMOTE_DIR/"
+  ./ "$HOST:$DIR_REL/"
 
 echo "→ 远端执行：$CMD"
-ssh "$HOST" "set -e; source \$HOME/.cargo/env; cd $REMOTE_DIR; $CMD"
+ssh "$HOST" "set -e; source \$HOME/.cargo/env; cd \$HOME/$DIR_REL; $CMD"
