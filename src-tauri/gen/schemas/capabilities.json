@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"TellerKit 默认能力：仅核心 API，不给任何 fs/shell 权限。","local":true,"windows":["main"],"permissions":["core:default"]}}

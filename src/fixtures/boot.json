@@ -1,0 +1,17 @@
+{
+  "appdata_dir": "（浏览器预览：真实路径在 Tauri 客户端内）",
+  "load": {
+    "load_ms": 11.889487,
+    "menu_nodes": 20,
+    "menu_version": 7,
+    "pack_bytes": 1670,
+    "source": "local"
+  },
+  "local_versions": [
+    7
+  ],
+  "notes": [],
+  "offline": false,
+  "pubkey_hex": "e74e02a28562355e9d53ba5dc375d8c8e39bad0555e26b2ded241821fde886b7",
+  "shell_version": "0.1.0"
+}

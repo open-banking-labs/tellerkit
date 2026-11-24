@@ -1,0 +1,19 @@
+[package]
+name = "tellerkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TellerKit 柜面终端主壳"
+
+[lib]
+name = "tellerkit_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tellerkit-core = { path = "../crates/tellerkit-core" }

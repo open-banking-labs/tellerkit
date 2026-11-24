@@ -1,0 +1,392 @@
+{
+  "lobby": {
+    "filter_ms": 0.044002000000000006,
+    "menu": [
+      {
+        "actions": [],
+        "children": [
+          {
+            "actions": [
+              "action.transfer.print"
+            ],
+            "children": [],
+            "code": "account.transfer",
+            "direct": true,
+            "route": "/tx/account/transfer",
+            "sort": 30,
+            "title": "行内转账",
+            "type": "page"
+          }
+        ],
+        "code": "account",
+        "direct": false,
+        "sort": 10,
+        "title": "账务处理",
+        "type": "group"
+      },
+      {
+        "actions": [],
+        "children": [
+          {
+            "actions": [],
+            "children": [],
+            "code": "customer.query",
+            "direct": true,
+            "route": "/tx/customer/query",
+            "sort": 10,
+            "title": "客户信息查询",
+            "type": "page"
+          },
+          {
+            "actions": [],
+            "children": [],
+            "code": "customer.profile",
+            "direct": true,
+            "route": "/tx/customer/profile",
+            "sort": 30,
+            "title": "客户画像",
+            "type": "page"
+          }
+        ],
+        "code": "customer",
+        "direct": false,
+        "sort": 20,
+        "title": "客户管理",
+        "type": "group"
+      },
+      {
+        "actions": [],
+        "children": [
+          {
+            "actions": [],
+            "children": [],
+            "code": "report.flow",
+            "direct": true,
+            "route": "/tx/report/flow",
+            "sort": 10,
+            "title": "交易流水查询",
+            "type": "page"
+          }
+        ],
+        "code": "report",
+        "direct": false,
+        "sort": 50,
+        "title": "查询报表",
+        "type": "group"
+      }
+    ],
+    "snapshot": {
+      "action_codes": [
+        "action.transfer.print"
+      ],
+      "menu_codes": [
+        "customer.query",
+        "customer.profile",
+        "report.flow",
+        "account.transfer"
+      ],
+      "outlet_code": "01023",
+      "perm_version": 107,
+      "role_label": "大堂经理",
+      "shortcuts": {
+        "account.deposit": "Alt+1",
+        "account.transfer": "Alt+3",
+        "account.withdraw": "Alt+2"
+      },
+      "teller_no": "T0450",
+      "user_id": "u-lobby"
+    }
+  },
+  "supervisor": {
+    "filter_ms": 0.056508,
+    "menu": [
+      {
+        "actions": [],
+        "children": [
+          {
+            "actions": [
+              "action.withdraw.print",
+              "action.withdraw.reversal"
+            ],
+            "children": [],
+            "code": "account.withdraw",
+            "direct": true,
+            "route": "/tx/account/withdraw",
+            "sort": 20,
+            "title": "活期取款",
+            "type": "page"
+          }
+        ],
+        "code": "account",
+        "direct": false,
+        "sort": 10,
+        "title": "账务处理",
+        "type": "group"
+      },
+      {
+        "actions": [],
+        "children": [
+          {
+            "actions": [
+              "action.loan.approve"
+            ],
+            "children": [],
+            "code": "credit.loan.disburse",
+            "direct": true,
+            "route": "/tx/credit/loan/disburse",
+            "sort": 20,
+            "title": "贷款发放",
+            "type": "page"
+          }
+        ],
+        "code": "credit",
+        "direct": false,
+        "sort": 30,
+        "title": "信贷业务",
+        "type": "group"
+      },
+      {
+        "actions": [],
+        "children": [
+          {
+            "actions": [],
+            "children": [],
+            "code": "approval.queue",
+            "direct": true,
+            "route": "/tx/approval/queue",
+            "sort": 10,
+            "title": "待办授权",
+            "type": "page"
+          },
+          {
+            "actions": [
+              "action.reversal.approve"
+            ],
+            "children": [],
+            "code": "approval.reversal",
+            "direct": true,
+            "route": "/tx/approval/reversal",
+            "sort": 20,
+            "title": "冲正处理",
+            "type": "page"
+          }
+        ],
+        "code": "approval",
+        "direct": false,
+        "sort": 40,
+        "title": "授权中心",
+        "type": "group"
+      },
+      {
+        "actions": [],
+        "children": [
+          {
+            "actions": [],
+            "children": [],
+            "code": "report.flow",
+            "direct": true,
+            "route": "/tx/report/flow",
+            "sort": 10,
+            "title": "交易流水查询",
+            "type": "page"
+          },
+          {
+            "actions": [
+              "action.report.export"
+            ],
+            "children": [],
+            "code": "report.daily",
+            "direct": true,
+            "route": "/tx/report/daily",
+            "sort": 20,
+            "title": "日终报表",
+            "type": "page"
+          }
+        ],
+        "code": "report",
+        "direct": false,
+        "sort": 50,
+        "title": "查询报表",
+        "type": "group"
+      },
+      {
+        "actions": [],
+        "children": [
+          {
+            "actions": [],
+            "children": [],
+            "code": "system.device",
+            "direct": true,
+            "route": "/tx/system/device",
+            "sort": 10,
+            "title": "设备管理",
+            "type": "page"
+          }
+        ],
+        "code": "system",
+        "direct": false,
+        "sort": 60,
+        "title": "系统管理",
+        "type": "group"
+      }
+    ],
+    "snapshot": {
+      "action_codes": [
+        "action.withdraw.print",
+        "action.withdraw.reversal",
+        "action.reversal.approve",
+        "action.loan.approve",
+        "action.report.export"
+      ],
+      "menu_codes": [
+        "account.withdraw",
+        "approval.queue",
+        "approval.reversal",
+        "credit.loan.disburse",
+        "report.flow",
+        "report.daily",
+        "system.device"
+      ],
+      "outlet_code": "01023",
+      "perm_version": 107,
+      "role_label": "主管",
+      "shortcuts": {
+        "account.deposit": "Alt+1",
+        "account.transfer": "Alt+3",
+        "account.withdraw": "Alt+2",
+        "approval.queue": "Alt+A"
+      },
+      "teller_no": "T0101",
+      "user_id": "u-supervisor"
+    }
+  },
+  "teller": {
+    "filter_ms": 0.068742,
+    "menu": [
+      {
+        "actions": [],
+        "children": [
+          {
+            "actions": [
+              "action.deposit.print"
+            ],
+            "children": [],
+            "code": "account.deposit",
+            "direct": true,
+            "route": "/tx/account/deposit",
+            "sort": 10,
+            "title": "活期存款",
+            "type": "page"
+          },
+          {
+            "actions": [
+              "action.withdraw.print"
+            ],
+            "children": [],
+            "code": "account.withdraw",
+            "direct": true,
+            "route": "/tx/account/withdraw",
+            "sort": 20,
+            "title": "活期取款",
+            "type": "page"
+          },
+          {
+            "actions": [
+              "action.transfer.print"
+            ],
+            "children": [],
+            "code": "account.transfer",
+            "direct": true,
+            "route": "/tx/account/transfer",
+            "sort": 30,
+            "title": "行内转账",
+            "type": "page"
+          }
+        ],
+        "code": "account",
+        "direct": false,
+        "sort": 10,
+        "title": "账务处理",
+        "type": "group"
+      },
+      {
+        "actions": [],
+        "children": [
+          {
+            "actions": [],
+            "children": [],
+            "code": "customer.query",
+            "direct": true,
+            "route": "/tx/customer/query",
+            "sort": 10,
+            "title": "客户信息查询",
+            "type": "page"
+          },
+          {
+            "actions": [
+              "action.customer.print"
+            ],
+            "children": [],
+            "code": "customer.open",
+            "direct": true,
+            "route": "/tx/customer/open",
+            "sort": 20,
+            "title": "开户",
+            "type": "page"
+          }
+        ],
+        "code": "customer",
+        "direct": false,
+        "sort": 20,
+        "title": "客户管理",
+        "type": "group"
+      },
+      {
+        "actions": [],
+        "children": [
+          {
+            "actions": [],
+            "children": [],
+            "code": "report.flow",
+            "direct": true,
+            "route": "/tx/report/flow",
+            "sort": 10,
+            "title": "交易流水查询",
+            "type": "page"
+          }
+        ],
+        "code": "report",
+        "direct": false,
+        "sort": 50,
+        "title": "查询报表",
+        "type": "group"
+      }
+    ],
+    "snapshot": {
+      "action_codes": [
+        "action.deposit.print",
+        "action.withdraw.print",
+        "action.transfer.print",
+        "action.customer.print"
+      ],
+      "menu_codes": [
+        "account.deposit",
+        "account.withdraw",
+        "account.transfer",
+        "customer.query",
+        "customer.open",
+        "report.flow"
+      ],
+      "outlet_code": "01023",
+      "perm_version": 107,
+      "role_label": "柜员",
+      "shortcuts": {
+        "account.deposit": "Alt+1",
+        "account.transfer": "Alt+3",
+        "account.withdraw": "Alt+2"
+      },
+      "teller_no": "T0231",
+      "user_id": "u-teller"
+    }
+  }
+}

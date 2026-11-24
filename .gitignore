@@ -1,0 +1,14 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Node
+node_modules/
+dist/
+
+# macOS
+.DS_Store
+
+# 本地日志与临时产物
+*.log
+*.mtree.tmp
