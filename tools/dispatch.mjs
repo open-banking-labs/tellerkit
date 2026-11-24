@@ -156,6 +156,15 @@ ${task.command}
 `;
 }
 
+/** 文件内容哈希；读不到返回 null（记录仍可写，只是不可复算）。 */
+function sha256Of(path) {
+  try {
+    return createHash("sha256").update(readFileSync(path)).digest("hex");
+  } catch {
+    return null;
+  }
+}
+
 function latestRecordFor(taskId) {
   if (!existsSync(DISPATCH_DIR)) return null;
   const files = readdirSync(DISPATCH_DIR)
@@ -219,6 +228,13 @@ const record = {
   base: opts.base || "origin/main",
   base_sha: gitSha(opts.base || "origin/main"),
   prompt_sha256: createHash("sha256").update(prompt).digest("hex"),
+  // 输入指纹：任务清单、规格、预设三个文件在派发时刻的内容哈希。
+  // 有了它，轨迹门禁才能区分"输入变了导致记录失效"与"有人改了记录"。
+  inputs: {
+    tasks_sha256: sha256Of(tasksPath),
+    spec_sha256: sha256Of(specPath),
+    preset_sha256: sha256Of(presetPath),
+  },
   created_at: new Date().toISOString(),
   status: "dispatched",
   verdict: null,

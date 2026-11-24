@@ -184,7 +184,8 @@
     "print_voucher",
     "tx_pending_count",
     "replay_pending",
-    "package_module"
+    "package_module",
+    "audit_tail"
   ],
   "generated_types": [
     "NodeType",

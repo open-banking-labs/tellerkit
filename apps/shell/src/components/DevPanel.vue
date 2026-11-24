@@ -10,6 +10,7 @@ defineProps<{
 }>();
 
 const emit = defineEmits<{
+  (e: "audit"): void;
   (e: "check-update"): void;
   (e: "toggle-offline"): void;
   (e: "toggle-tampered"): void;
@@ -87,6 +88,9 @@ const emit = defineEmits<{
       <h3>会话</h3>
       <div class="row">
         <button class="btn wide" @click="emit('logout')">登出并清除权限快照</button>
+      </div>
+      <div class="row">
+        <button class="btn wide" @click="emit('audit')">查看审计日志</button>
       </div>
       <p class="hint">
         登出会立刻丢弃内存中的权限快照；换账号后不应看到上一个账号的菜单。
