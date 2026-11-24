@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { api, isTauri } from "./api";
+import { installClipboardGuard, onClipboardBlocked } from "./clipboard";
 import { actionLabel, menuNote } from "./labels";
 import type { BootInfo, DevState, LoginResult, MenuView, UpdateReport } from "./generated";
 import type { LogEntry, MenuRow } from "./ui-types";
@@ -308,6 +309,14 @@ async function run(action: () => Promise<void>): Promise<void> {
   }
 }
 
+function showAudit(): Promise<void> {
+  return run(async () => {
+    const lines = await api.auditTail(20);
+    for (const line of lines.slice(0, 10)) log("info", `[审计] ${line}`);
+    if (lines.length > 10) log("info", `[审计] 还有 ${lines.length - 10} 条，见账本`);
+  });
+}
+
 function checkUpdate(): Promise<void> {
   return run(async () => {
     const r = await api.checkUpdate();
@@ -374,14 +383,23 @@ function resetLocal(): Promise<void> {
   });
 }
 
+let uninstallClipboard: (() => void) | null = null;
+let unsubscribeClipboard: (() => void) | null = null;
+
 onMounted(() => {
   window.addEventListener("keydown", onKeydown);
+  uninstallClipboard = installClipboardGuard();
+  unsubscribeClipboard = onClipboardBlocked((field) => {
+    log("warn", `已阻止复制敏感字段：${field}`);
+  });
   void init();
 });
 
 onUnmounted(() => {
   window.clearTimeout(probeTimer);
   window.removeEventListener("keydown", onKeydown);
+  uninstallClipboard?.();
+  unsubscribeClipboard?.();
 });
 </script>
 
@@ -501,6 +519,7 @@ onUnmounted(() => {
         @reload="reload"
         @reset="resetLocal"
         @logout="logout"
+        @audit="showAudit"
       />
     </div>
 

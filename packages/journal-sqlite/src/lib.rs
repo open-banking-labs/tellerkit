@@ -8,6 +8,20 @@ use std::path::Path;
 use std::sync::Mutex;
 use tellerkit_core::tx::{TxJournal, TxRequest, TxResult, TxStatus};
 
+/// 一条管理审计事件：谁、在什么时候、对什么、做了什么、结果如何。
+///
+/// `at` 由 [`SqliteJournal::audit`] 写入，调用方传空字符串即可；
+/// 即便传了值也会被实现覆盖，防止业务层伪造时间线。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AuditEvent {
+    pub actor: String,
+    pub action: String,
+    pub target: String,
+    pub result: String,
+    pub detail: String,
+    pub at: String,
+}
+
 /// 本地账本。一个进程一个连接，用 Mutex 串行化（柜面终端是单柜员场景）。
 pub struct SqliteJournal {
     conn: Mutex<Connection>,
@@ -49,6 +63,17 @@ impl SqliteJournal {
                 offline_capable  INTEGER NOT NULL,
                 created_at       TEXT    NOT NULL
             );
+            -- 管理审计：只增表。本类型刻意不提供 update/delete/clear，
+            -- 能删的审计等于没有审计（见 docs/security-boundary.md §4）。
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor   TEXT    NOT NULL,
+                action  TEXT    NOT NULL,
+                target  TEXT    NOT NULL,
+                result  TEXT    NOT NULL,
+                detail  TEXT    NOT NULL,
+                at      TEXT    NOT NULL
+            );
             "#,
         )
         .map_err(|e| format!("建表失败：{e}"))?;
@@ -79,6 +104,60 @@ impl SqliteJournal {
             .map_err(|e| e.to_string())?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())
+    }
+
+    /// 追加一条审计事件。`at` 由这里写入，调用方传什么都会被覆盖。
+    ///
+    /// 只有追加，没有修改与删除——这是审计日志的意义所在。
+    pub fn audit(&self, event: &AuditEvent) -> Result<(), String> {
+        self.lock()
+            .execute(
+                "INSERT INTO audit_log (actor, action, target, result, detail, at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    event.actor,
+                    event.action,
+                    event.target,
+                    event.result,
+                    event.detail,
+                    now(),
+                ],
+            )
+            .map(|_| ())
+            .map_err(|e| format!("追加审计日志失败：{e}"))
+    }
+
+    /// 按时间倒序取最近 `limit` 条。同一秒内按自增 id 倒序，顺序稳定。
+    pub fn audit_tail(&self, limit: usize) -> Result<Vec<AuditEvent>, String> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT actor, action, target, result, detail, at
+                 FROM audit_log ORDER BY at DESC, id DESC LIMIT ?1",
+            )
+            .map_err(|e| format!("读取审计日志失败：{e}"))?;
+        let rows = stmt
+            .query_map(params![limit], |r| {
+                Ok(AuditEvent {
+                    actor: r.get(0)?,
+                    action: r.get(1)?,
+                    target: r.get(2)?,
+                    result: r.get(3)?,
+                    detail: r.get(4)?,
+                    at: r.get(5)?,
+                })
+            })
+            .map_err(|e| format!("读取审计日志失败：{e}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("读取审计日志失败：{e}"))
+    }
+
+    /// 审计事件总数（测试与运维用）。
+    pub fn audit_count(&self) -> Result<i64, String> {
+        self.lock()
+            .query_row("SELECT COUNT(*) FROM audit_log", [], |r| r.get(0))
+            .map_err(|e| format!("统计审计日志失败：{e}"))
     }
 }
 
@@ -307,5 +386,99 @@ mod tests {
         assert_eq!(outcomes[0].1.status, TxStatus::Committed);
         assert!(engine.pending_requests().is_empty());
         assert!(engine.take_journal_error().is_none(), "记账不应报错");
+    }
+
+    fn audit_event(action: &str, target: &str) -> AuditEvent {
+        AuditEvent {
+            actor: "T001".into(),
+            action: action.into(),
+            target: target.into(),
+            result: "ok".into(),
+            detail: String::new(),
+            at: String::new(),
+        }
+    }
+
+    #[test]
+    fn audit_appends_and_tail_returns_latest() {
+        let j = SqliteJournal::in_memory().unwrap();
+        j.audit(&audit_event("login", "T001")).unwrap();
+        j.audit(&audit_event("menu_access", "account.open"))
+            .unwrap();
+        assert_eq!(j.audit_count().unwrap(), 2);
+
+        let tail = j.audit_tail(1).unwrap();
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].target, "account.open", "tail(1) 必须返回最新一条");
+    }
+
+    #[test]
+    fn audit_tail_is_newest_first() {
+        let j = SqliteJournal::in_memory().unwrap();
+        for target in ["m1", "m2", "m3"] {
+            j.audit(&audit_event("menu_access", target)).unwrap();
+        }
+        let targets: Vec<String> = j
+            .audit_tail(10)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.target)
+            .collect();
+        assert_eq!(targets, ["m3", "m2", "m1"], "审计尾部必须按时间倒序");
+        assert_eq!(j.audit_count().unwrap(), 3, "只增：取尾部不改变条数");
+    }
+
+    #[test]
+    fn audit_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tx.db");
+        {
+            let j = SqliteJournal::open(&path).unwrap();
+            j.audit(&audit_event("login", "T001")).unwrap();
+        }
+        let j = SqliteJournal::open(&path).unwrap();
+        assert_eq!(j.audit_count().unwrap(), 1, "重启后审计日志必须还在");
+        let tail = j.audit_tail(1).unwrap();
+        assert_eq!(tail[0].action, "login");
+        assert_eq!(tail[0].actor, "T001");
+    }
+
+    #[test]
+    fn audit_fills_at_itself() {
+        let j = SqliteJournal::in_memory().unwrap();
+        let mut event = audit_event("submit_tx", "account.deposit");
+        event.at = "caller-supplied".into();
+        j.audit(&event).unwrap();
+
+        let tail = j.audit_tail(1).unwrap();
+        assert!(!tail[0].at.is_empty(), "at 必须由实现写入且非空");
+        assert_ne!(tail[0].at, "caller-supplied", "调用方传的 at 必须被覆盖");
+        assert!(
+            tail[0].at.chars().all(|c| c.is_ascii_digit()),
+            "at 是零填充的 epoch 秒，可直接按字符串排序"
+        );
+    }
+
+    #[test]
+    fn audit_keeps_empty_detail() {
+        let j = SqliteJournal::in_memory().unwrap();
+        let event = audit_event("print", "voucher");
+        assert!(event.detail.is_empty());
+        j.audit(&event).unwrap();
+
+        let tail = j.audit_tail(1).unwrap();
+        assert_eq!(tail[0].detail, "", "空 detail 必须原样存取");
+        assert_eq!(tail[0].target, "voucher");
+    }
+
+    #[test]
+    fn audit_event_serializes_roundtrip() {
+        let j = SqliteJournal::in_memory().unwrap();
+        j.audit(&audit_event("package_load", "biz.demo")).unwrap();
+        let stored = j.audit_tail(1).unwrap().remove(0);
+
+        let json = serde_json::to_string(&stored).unwrap();
+        let back: AuditEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, stored);
     }
 }

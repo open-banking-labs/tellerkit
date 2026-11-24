@@ -95,7 +95,12 @@ void refreshPending();
       </label>
       <label>
         <span>账号 / 卡号</span>
-        <input v-model="account" placeholder="6222…" />
+        <input
+          v-model="account"
+          placeholder="6222…"
+          data-sensitive
+          data-sensitive-label="账号/卡号"
+        />
       </label>
       <label class="wide">
         <span>备注</span>

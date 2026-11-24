@@ -102,6 +102,13 @@ export const api = {
     return m ? m.mockApi.txPendingCount() : call<number>("tx_pending_count");
   },
 
+  async auditTail(limit = 20): Promise<string[]> {
+    const m = await mock();
+    return m
+      ? m.mockApi.auditTail(limit)
+      : call<string[]>("audit_tail", { limit });
+  },
+
   async packageModule(route: string): Promise<string> {
     const m = await mock();
     return m

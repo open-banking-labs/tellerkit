@@ -19,6 +19,7 @@ use tellerkit_core::perm::PermSnapshot;
 use tellerkit_core::sync;
 use tellerkit_core::tx::{TxHostMode, TxRequest, TxResult};
 use tellerkit_core::LoadSource;
+use tellerkit_journal_sqlite::AuditEvent;
 
 use crate::AppState;
 
@@ -106,6 +107,51 @@ fn source_label(source: &LoadSource) -> String {
         LoadSource::LocalFile { .. } => "local".to_string(),
         LoadSource::NetworkFallback { .. } => "network".to_string(),
     }
+}
+
+/// 记一条审计。写不进去不影响业务，但要把失败暴露出来（审计坏了不能静默）。
+fn audit(st: &AppState, actor: &str, action: &str, target: &str, result: &str, detail: &str) {
+    if let Some(journal) = &st.audit {
+        let event = AuditEvent {
+            actor: actor.to_string(),
+            action: action.to_string(),
+            target: target.to_string(),
+            result: result.to_string(),
+            detail: detail.to_string(),
+            at: String::new(), // 由实现填时间戳
+        };
+        if let Err(e) = journal.audit(&event) {
+            eprintln!("审计写入失败：{e}");
+        }
+    }
+}
+
+/// 审计日志尾部。返回已格式化的一行一条，避免为一屏日志再加一个 DTO。
+#[tauri::command]
+pub fn audit_tail(limit: usize, state: State<'_, Mutex<AppState>>) -> Result<Vec<String>, String> {
+    let st = lock(&state)?;
+    let Some(journal) = &st.audit else {
+        return Ok(vec!["审计日志不可用：账本未能打开".into()]);
+    };
+    let events = journal.audit_tail(limit.min(500))?;
+    Ok(events
+        .into_iter()
+        .map(|e| {
+            format!(
+                "{} · {} {} {} · {}{}",
+                e.at,
+                e.actor,
+                e.action,
+                e.target,
+                e.result,
+                if e.detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {}", e.detail)
+                }
+            )
+        })
+        .collect())
 }
 
 fn dev_state_of(st: &AppState) -> DevState {
@@ -198,6 +244,14 @@ pub fn login(role_id: String, state: State<'_, Mutex<AppState>>) -> Result<Login
     let filter_ms = started.elapsed().as_secs_f64() * 1000.0;
 
     st.snapshot = Some(snapshot.clone());
+    audit(
+        &st,
+        &snapshot.teller_no,
+        "login",
+        &snapshot.outlet_code,
+        "ok",
+        &format!("角色 {}", snapshot.role_label),
+    );
     Ok(LoginResult {
         snapshot,
         menu: view,
@@ -209,6 +263,9 @@ pub fn login(role_id: String, state: State<'_, Mutex<AppState>>) -> Result<Login
 #[tauri::command]
 pub fn logout(state: State<'_, Mutex<AppState>>) -> Result<(), String> {
     let mut st = lock(&state)?;
+    if let Some(snapshot) = &st.snapshot {
+        audit(&st, &snapshot.teller_no, "logout", "", "ok", "");
+    }
     st.clear_session();
     Ok(())
 }
@@ -280,8 +337,13 @@ pub fn submit_transaction(
     state: State<'_, Mutex<AppState>>,
 ) -> Result<TxResult, String> {
     let mut guard = lock(&state)?;
-    // 拆分借用：引擎要 &mut，主机要 &，两者是同一个结构体的不同字段
-    let AppState { tx, tx_host, .. } = &mut *guard;
+    // 先把不需要引擎的东西取出来，再结束可变借用——否则 audit(&*guard) 借不到
+    let actor = guard
+        .snapshot
+        .as_ref()
+        .map(|s| s.teller_no.clone())
+        .unwrap_or_else(|| "unknown".into());
+
     let request = TxRequest {
         tx_code,
         idempotency_key,
@@ -289,7 +351,28 @@ pub fn submit_transaction(
         elements,
         offline_capable,
     };
-    Ok(tx.submit(tx_host, request))
+    let code = request.tx_code.clone();
+
+    let result = {
+        // 拆分借用：引擎要 &mut，主机要 &，两者是同一结构体的不同字段
+        let AppState { tx, tx_host, .. } = &mut *guard;
+        tx.submit(tx_host, request)
+    };
+
+    let detail = format!("status={:?} amount_cents={amount_cents}", result.status);
+    audit(
+        &guard,
+        &actor,
+        "submit_tx",
+        &code,
+        if result.status == tellerkit_core::tx::TxStatus::Committed {
+            "ok"
+        } else {
+            "failed"
+        },
+        &detail,
+    );
+    Ok(result)
 }
 
 /// 打印凭证。模板与要素分离：套打格式随网点配置变，要素由交易产生。
@@ -302,13 +385,32 @@ pub fn print_voucher(
     state: State<'_, Mutex<AppState>>,
 ) -> Result<PrintReceipt, String> {
     let st = lock(&state)?;
+    // 白名单先于动作：未登记的型号连纸都不该动
+    st.devices
+        .ensure_allowed(&st.policy)
+        .map_err(|e| e.to_string())?;
     let mut voucher = Voucher::new(&template, &tx_code);
     voucher.reference = reference;
     voucher.fields = fields;
-    st.devices
+    let outcome = st
+        .devices
         .printer
         .print(&voucher)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+    let actor = st
+        .snapshot
+        .as_ref()
+        .map(|s| s.teller_no.clone())
+        .unwrap_or_else(|| "unknown".into());
+    audit(
+        &st,
+        &actor,
+        "print",
+        &tx_code,
+        if outcome.is_ok() { "ok" } else { "failed" },
+        &template,
+    );
+    outcome
 }
 
 /// 返回业务包的模块源码，前端用 Blob URL 加载后调用 `mount(container, shell)`。
@@ -336,6 +438,16 @@ pub fn replay_pending(state: State<'_, Mutex<AppState>>) -> Result<String, Strin
     let mut guard = lock(&state)?;
     let AppState { tx, tx_host, .. } = &mut *guard;
     let outcomes = tx.replay_pending(tx_host);
+    let detail = format!("{} 笔", outcomes.len());
+    let actor = guard
+        .snapshot
+        .as_ref()
+        .map(|s| s.teller_no.clone())
+        .unwrap_or_else(|| "system".into());
+    if !outcomes.is_empty() {
+        let st = &*guard;
+        audit(st, &actor, "replay", "tx_queue", "ok", &detail);
+    }
     if outcomes.is_empty() {
         return Ok("没有待重放的交易".to_string());
     }

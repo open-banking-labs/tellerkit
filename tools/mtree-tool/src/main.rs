@@ -7,6 +7,9 @@
 //! 用法：
 //!   mtree-tool keygen
 //!   mtree-tool pubkey
+//!   mtree-tool pkg-init   <dir> [--id biz.example]
+//!   mtree-tool pkg-build  <dir> <out.bizpkg>
+//!   mtree-tool pkg-verify <file.bizpkg>
 //!   mtree-tool build  <tree.json> <out.mtree> [--key <hex>] [--version N]
 //!   mtree-tool verify <file.mtree> [--pubkey <hex>]
 //!   mtree-tool inspect <file.mtree>
@@ -30,6 +33,7 @@ fn main() -> ExitCode {
         }
         "demo" => demo(rest),
         "fixtures" => fixtures(rest),
+        "pkg-init" => pkg_init(rest),
         "pkg-build" => pkg_build(rest),
         "pkg-verify" => pkg_verify(rest),
         "build" => build(rest),
@@ -55,6 +59,9 @@ fn help() {
     eprintln!(
         "用法:\n  mtree-tool keygen\n  mtree-tool pubkey\n  \
          mtree-tool demo [out.json]\n  \
+         mtree-tool pkg-init   <dir> [--id biz.example]\n  \
+         mtree-tool pkg-build  <dir> <out.bizpkg>\n  \
+         mtree-tool pkg-verify <file.bizpkg>\n  \
          mtree-tool build <tree.json> <out.mtree> [--key <hex>] [--version N]\n  \
          mtree-tool verify <file.mtree> [--pubkey <hex>]\n  \
          mtree-tool inspect <file.mtree>\n  mtree-tool dump <file.mtree>"
@@ -92,6 +99,265 @@ fn positional(rest: &[String]) -> Vec<&String> {
     }
     out
 }
+
+/// 生成一个可直接 `pkg-build` 的业务包骨架。
+///
+/// 输出目录必须不存在或为空：这个命令会写 7 个文件，不做覆盖检测的脚手架
+/// 迟早会把别人正在维护的包冲掉。包 ID 同时是菜单命名空间，所有 code 都在它下面。
+fn pkg_init(rest: &[String]) -> Result<(), String> {
+    let pos = positional(rest);
+    let dir = pos
+        .first()
+        .ok_or("缺少输出目录（用法: pkg-init <输出目录> [--id biz.example]）")?;
+    let id = flag(rest, "--id").unwrap_or_else(|| "biz.example".to_string());
+    let id = id.trim();
+    validate_pkg_id(id)?;
+
+    let out = std::path::Path::new(dir);
+    prepare_empty_dir(out, dir)?;
+
+    let files = [
+        ("manifest.json", render(MANIFEST_TMPL, id)),
+        ("menus.json", render(MENUS_TMPL, id)),
+        ("permissions.json", render(PERMISSIONS_TMPL, id)),
+        ("routes.json", render(ROUTES_TMPL, id)),
+        ("transactions.json", render(TRANSACTIONS_TMPL, id)),
+        ("ui/entry.js", render(UI_ENTRY_TMPL, id)),
+        ("README.md", render(README_TMPL, id)),
+    ];
+
+    for (name, content) in &files {
+        // JSON 先自检再落盘：宁可命令失败，也不要生成一个 pkg-build 才报错的包。
+        if name.ends_with(".json") {
+            serde_json::from_str::<serde_json::Value>(content)
+                .map_err(|e| format!("生成 {name} 失败（内部错误）: {e}"))?;
+        }
+        let path = out.join(*name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("创建目录 {} 失败: {e}", parent.display()))?;
+        }
+        std::fs::write(&path, content.as_bytes())
+            .map_err(|e| format!("写入 {} 失败: {e}", path.display()))?;
+    }
+
+    println!("已生成业务包骨架: {}", out.display());
+    println!("  包 ID  = {id}");
+    println!("  路由   = /{}/home", id.replace('.', "/"));
+    println!("  下一步 = mtree-tool pkg-build {dir} <输出.bizpkg>");
+    Ok(())
+}
+
+/// 包 ID 至少两段（与 core 的 `validate_manifest` 一致），每段只允许
+/// 字母/数字/下划线/连字符——code 和文件路径都要拼它，不能有歧义字符。
+fn validate_pkg_id(id: &str) -> Result<(), String> {
+    let segments: Vec<&str> = id.split('.').collect();
+    if segments.len() < 2 || segments.iter().any(|s| s.is_empty()) {
+        return Err(format!("包 ID 非法: {id}（至少两段，如 biz.example）"));
+    }
+    let valid = segments.iter().all(|s| {
+        s.chars()
+            .next()
+            .map(|c| c.is_ascii_alphanumeric())
+            .unwrap_or(false)
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    });
+    if !valid {
+        return Err(format!(
+            "包 ID 非法: {id}（每段只能含字母/数字/下划线/连字符，且须以字母或数字开头）"
+        ));
+    }
+    Ok(())
+}
+
+/// 目录不存在则创建；已存在且非空则拒绝。
+fn prepare_empty_dir(path: &std::path::Path, shown: &str) -> Result<(), String> {
+    if path.exists() {
+        if !path.is_dir() {
+            return Err(format!("输出路径已存在且不是目录: {shown}"));
+        }
+        let mut entries =
+            std::fs::read_dir(path).map_err(|e| format!("读取目录 {shown} 失败: {e}"))?;
+        if entries.next().is_some() {
+            return Err(format!(
+                "输出目录已存在且非空，拒绝覆盖: {shown}（请换一个空目录，或先自行清理）"
+            ));
+        }
+    } else {
+        std::fs::create_dir_all(path).map_err(|e| format!("创建目录 {shown} 失败: {e}"))?;
+    }
+    Ok(())
+}
+
+/// 单次扫描替换占位符：替换进去的值不再被二次替换（包 ID 里带 `__` 也不会串）。
+fn render(tmpl: &str, id: &str) -> String {
+    let pairs: [(&str, String); 4] = [
+        ("__ID__", id.to_string()),
+        ("__PAGE_CODE__", format!("{id}.home")),
+        ("__ACTION_CODE__", format!("{id}.action.print")),
+        ("__ROUTE__", format!("/{}/home", id.replace('.', "/"))),
+    ];
+    let mut out = String::with_capacity(tmpl.len() + 64);
+    let mut rest = tmpl;
+    loop {
+        let mut earliest: Option<(usize, &str, &str)> = None;
+        for (token, value) in &pairs {
+            if let Some(pos) = rest.find(*token) {
+                if earliest.map_or(true, |(p, _, _)| pos < p) {
+                    earliest = Some((pos, *token, value.as_str()));
+                }
+            }
+        }
+        match earliest {
+            Some((pos, token, value)) => {
+                out.push_str(&rest[..pos]);
+                out.push_str(value);
+                rest = &rest[pos + token.len()..];
+            }
+            None => {
+                out.push_str(rest);
+                return out;
+            }
+        }
+    }
+}
+
+const MANIFEST_TMPL: &str = r#"{
+  "id": "__ID__",
+  "name": "__ID__",
+  "version": "0.1.0",
+  "min_shell": "0.1.0",
+  "max_shell": "0.x",
+  "deps": [],
+  "entry": "ui/entry.js"
+}
+"#;
+
+const MENUS_TMPL: &str = r#"[
+  {
+    "code": "__ID__",
+    "parent_code": null,
+    "title": "__ID__",
+    "type": "group",
+    "route": null,
+    "sort": 90,
+    "actions": [],
+    "source": "pkg:__ID__",
+    "status": "active"
+  },
+  {
+    "code": "__PAGE_CODE__",
+    "parent_code": "__ID__",
+    "title": "业务首页",
+    "type": "page",
+    "route": "__ROUTE__",
+    "sort": 10,
+    "actions": ["__ACTION_CODE__"],
+    "source": "pkg:__ID__",
+    "status": "active"
+  }
+]
+"#;
+
+const PERMISSIONS_TMPL: &str = r#"{
+  "actions": ["__ACTION_CODE__"]
+}
+"#;
+
+const ROUTES_TMPL: &str = r#"{
+  "__ROUTE__": "ui/entry.js"
+}
+"#;
+
+const TRANSACTIONS_TMPL: &str = r#"[
+  {
+    "code": "__PAGE_CODE__",
+    "idempotency": "client-uuid",
+    "offline_capable": false,
+    "devices": []
+  }
+]
+"#;
+
+const UI_ENTRY_TMPL: &str = r#"/**
+ * __ID__ · 业务包前端入口（由 mtree-tool pkg-init 生成）。
+ *
+ * 约定：主壳按 routes.json 找到本模块，用 Blob URL 加载后调用
+ * mount(container, shell)。这里不能有 import 语句——包在运行时是
+ * 孤立模块，没有打包器解析依赖。需要能力时只用 shell，不要碰
+ * window.__TAURI__。
+ */
+export function mount(container, shell) {
+  container.innerHTML = "";
+
+  const title = document.createElement("h2");
+  title.className = "pkg-title";
+  title.textContent = "__ID__";
+  container.appendChild(title);
+
+  const note = document.createElement("p");
+  note.className = "hint";
+  note.textContent = "脚手架页面：点击按钮，经主壳打印一张测试凭证。";
+  container.appendChild(note);
+
+  const printBtn = document.createElement("button");
+  printBtn.className = "btn";
+  printBtn.textContent = "打印测试凭证";
+  printBtn.onclick = async () => {
+    try {
+      const receipt = await shell.printVoucher({
+        template: "voucher-default",
+        txCode: "__PAGE_CODE__",
+        reference: "SCAFFOLD-0001",
+        fields: { note: "pkg-init 脚手架" },
+      });
+      note.textContent = `主壳返回作业号 ${receipt.job_id}（${receipt.pages} 页）`;
+    } catch (err) {
+      note.textContent = `调用失败：${err}`;
+    }
+  };
+  container.appendChild(printBtn);
+}
+"#;
+
+const README_TMPL: &str = r#"# __ID__ · 业务包骨架
+
+本目录由 `mtree-tool pkg-init` **生成**，是 `.bizpkg` 的最小可打包形状。
+长期维护时请把它当作起点复制成正式业务包，不要把生成物直接当成"已完成的业务"。
+
+## 文件
+
+| 文件 | 作用 |
+|---|---|
+| `manifest.json` | 包 ID、name、版本、主壳兼容范围、依赖、前端入口 |
+| `menus.json` | 菜单增量：一个 group（code = 包 ID）+ 一个 page（首页） |
+| `permissions.json` | 本包声明的按钮权限码，必须与 `menus.json` 的 actions 一致 |
+| `routes.json` | 路由 → 前端模块（顶层就是 map） |
+| `transactions.json` | 交易元数据：交易码、幂等策略、离线能力、所需设备 |
+| `ui/entry.js` | 前端入口，自包含 ES module，只导出 `mount(container, shell)` |
+
+## 打包与验签
+
+在仓库根目录执行（本仓库不在本机跑 cargo，实际构建走 `scripts/remote-build.sh`）：
+
+```bash
+cargo run -q -p mtree-tool -- pkg-build . <输出.bizpkg>
+cargo run -q -p mtree-tool -- pkg-verify <输出.bizpkg>
+```
+
+`pkg-build` 会把 `ui/*.js` 的内容嵌进包并签名；`pkg-verify` 打印「验签通过」
+才说明产物可用。
+
+## 接下来要改的地方
+
+1. `manifest.json` 的 `name`（现在等于包 ID）。
+2. `menus.json` / `permissions.json` / `routes.json` 里的 code、标题、路由。
+   **所有 code 必须留在 `__ID__.` 命名空间内**，否则加载时会被拒绝。
+3. `ui/entry.js`：不要写 `import`，能力只能走主壳传入的 `shell`。
+4. `transactions.json` 的 `code` 与页面 code 对齐；资金类交易不要打开
+   `offline_capable`。
+"#;
 
 /// 把一个业务包目录打成签名的 `.bizpkg`。
 ///

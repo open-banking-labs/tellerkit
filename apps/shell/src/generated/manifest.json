@@ -2,7 +2,7 @@
   "generator": "tools/gen-bindings.mjs",
   "files": {
     "index.ts": "83b1fab9df617ddc57c7a3da3efb65a5387c66aadd7659eeeed4af46b1e170d2",
-    "commands.ts": "6b2a64c3413246137c6c53e05c0fa7b94cb54793bd28b49d8c4ed1ed7a161e77",
+    "commands.ts": "dfbd14a17bd4206ac39ccf2ff2d2be30c25d541c404eec59e9183363717a0f17",
     "BootInfo.ts": "b8027b31267b8fb0e5e105742aa472178101936139f5834bc1bf3342cee9988c",
     "DevState.ts": "b0fe4d7384ebcbe5c2db25cbdd5ac71202058cce08e704b4729e2e2976b3ab74",
     "LoadReport.ts": "20c5ddcf8be5c8e925bda86a923eac6c27cc44b9e50c9afcfbfc291c8978a009",

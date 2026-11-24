@@ -96,6 +96,10 @@ export const mockApi = {
     return 0;
   },
 
+  async auditTail(_limit = 20): Promise<string[]> {
+    return ["浏览器预览：审计日志在 Tauri 客户端内查看"];
+  },
+
   async packageModule(_route: string): Promise<string> {
     throw new Error("浏览器预览不加载业务包模块：请在 Tauri 客户端验证");
   },

@@ -14,7 +14,7 @@
     "tauri:build": "npm -w @tellerkit/shell run tauri:build",
     "fixtures": "cargo run -q -p mtree-tool -- fixtures apps/shell/src/fixtures",
     "test": "cargo test --workspace",
-    "gate": "node tools/check-boundaries.mjs && node tools/check-contracts.mjs && node tools/check-tasks.mjs && node tools/check-ai-rules.mjs && cargo fmt --all -- --check",
+    "gate": "node tools/check-boundaries.mjs && node tools/check-contracts.mjs && node tools/check-tasks.mjs && node tools/check-ai-rules.mjs && node tools/check-trajectory.mjs && cargo fmt --all -- --check",
     "verify": "npm run bindings && npm run gate && cargo test --workspace && npm run build && bash scripts/verify-p0.sh",
     "bindings": "node tools/gen-bindings.mjs",
     "task": "node tools/run-task.mjs",

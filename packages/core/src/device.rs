@@ -8,7 +8,7 @@
 //! 2. 完整卡号与 PIN 块不得进入 Debug、日志或错误信息。
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 /// 设备种类。错误信息与交易元数据都用它，避免出现字符串字面量。
@@ -58,6 +58,9 @@ impl DeviceStatus {
 pub enum DeviceError {
     #[error("{kind}不可用（{state}）")]
     NotReady { kind: String, state: String },
+    /// 型号不在白名单。必须带型号名：现场据此判断是"登记漏了"还是"插错设备"。
+    #[error("{kind} 型号未授权：{model}")]
+    NotWhitelisted { kind: String, model: String },
     #[error("{0}操作超时")]
     Timeout(&'static str),
     #[error("柜员取消了{0}操作")]
@@ -165,23 +168,78 @@ pub struct CapturedImage {
 }
 
 pub trait Printer: Send + Sync {
+    /// 适配器登记的型号。白名单按它放行，必须是稳定字面量，不随运行时状态变化。
+    fn model(&self) -> &'static str;
     fn status(&self) -> DeviceStatus;
     fn print(&self, voucher: &Voucher) -> Result<PrintReceipt, DeviceError>;
 }
 
 pub trait CardReader: Send + Sync {
+    fn model(&self) -> &'static str;
     fn status(&self) -> DeviceStatus;
     fn read(&self) -> Result<CardData, DeviceError>;
 }
 
 pub trait PinPad: Send + Sync {
+    fn model(&self) -> &'static str;
     fn status(&self) -> DeviceStatus;
     fn read_pin(&self) -> Result<PinBlock, DeviceError>;
 }
 
 pub trait Scanner: Send + Sync {
+    fn model(&self) -> &'static str;
     fn status(&self) -> DeviceStatus;
     fn capture(&self, kind: &str) -> Result<CapturedImage, DeviceError>;
+}
+
+/// mock 适配器登记的型号。收敛成常量，避免 `allow_mocks()` 与实现里的
+/// 字面量各写一份后漂移。
+const MOCK_PRINTER_MODEL: &str = "mock-printer";
+const MOCK_CARD_READER_MODEL: &str = "mock-card-reader";
+const MOCK_PINPAD_MODEL: &str = "mock-pinpad";
+const MOCK_SCANNER_MODEL: &str = "mock-scanner";
+
+/// 设备型号策略。默认拒绝：没登记过的型号不准用。
+///
+/// 与"设备是否就绪"是两件事：就绪回答"能不能用"，本策略回答"准不准用"。
+/// 两者都通过才允许产生副作用，见 [`Devices::ensure_allowed`]。
+///
+/// 内部不提供"默认放行"的构造：`deny_all()` 是空集合，`allow(&[])` 也是空集合，
+/// 写完白名单却漏了型号，结果同样是拒绝。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DevicePolicy {
+    allowed: BTreeSet<String>,
+}
+
+impl DevicePolicy {
+    /// 空策略：拒绝一切设备（默认态，防止忘记配置就放行）。
+    pub fn deny_all() -> Self {
+        Self {
+            allowed: BTreeSet::new(),
+        }
+    }
+
+    /// 只允许这些型号。空切片等价于拒绝一切，不是"不限制"。
+    pub fn allow(models: &[&str]) -> Self {
+        Self {
+            allowed: models.iter().map(|m| (*m).to_string()).collect(),
+        }
+    }
+
+    /// 演示/测试用：允许 mock 适配器的型号。
+    pub fn allow_mocks() -> Self {
+        Self::allow(&[
+            MOCK_PRINTER_MODEL,
+            MOCK_CARD_READER_MODEL,
+            MOCK_PINPAD_MODEL,
+            MOCK_SCANNER_MODEL,
+        ])
+    }
+
+    /// 型号是否被放行。`deny_all()` 对任何输入都返回 `false`。
+    pub fn permits(&self, model: &str) -> bool {
+        self.allowed.contains(model)
+    }
 }
 
 /// 设备集合：业务代码拿到的唯一入口。
@@ -212,6 +270,29 @@ impl Devices {
                 return Err(DeviceError::NotReady {
                     kind: kind.label().to_string(),
                     state: status.describe(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// 型号白名单校验：四类设备的 `model()` 都必须被策略放行。
+    ///
+    /// 与 [`Devices::ensure`] 互不影响：就绪但型号未登记仍然拒绝，
+    /// 型号已登记但设备不就绪也仍然由 `ensure` 拒绝。两次校验都应在副作用之前完成。
+    pub fn ensure_allowed(&self, policy: &DevicePolicy) -> Result<(), DeviceError> {
+        // 固定按字段顺序检查四类设备：任一台未登记即拒绝，
+        // 且错误必须指出种类与型号，方便现场判断该补登记还是该换设备。
+        for (kind, model) in [
+            (DeviceKind::Printer, self.printer.model()),
+            (DeviceKind::CardReader, self.card_reader.model()),
+            (DeviceKind::PinPad, self.pinpad.model()),
+            (DeviceKind::Scanner, self.scanner.model()),
+        ] {
+            if !policy.permits(model) {
+                return Err(DeviceError::NotWhitelisted {
+                    kind: kind.label().to_string(),
+                    model: model.to_string(),
                 });
             }
         }
@@ -265,6 +346,10 @@ impl MockPrinter {
 }
 
 impl Printer for MockPrinter {
+    fn model(&self) -> &'static str {
+        MOCK_PRINTER_MODEL
+    }
+
     fn status(&self) -> DeviceStatus {
         self.state.clone().unwrap_or(DeviceStatus::Ready)
     }
@@ -308,6 +393,10 @@ impl MockCardReader {
 }
 
 impl CardReader for MockCardReader {
+    fn model(&self) -> &'static str {
+        MOCK_CARD_READER_MODEL
+    }
+
     fn status(&self) -> DeviceStatus {
         self.state.clone()
     }
@@ -348,6 +437,10 @@ impl MockPinPad {
 }
 
 impl PinPad for MockPinPad {
+    fn model(&self) -> &'static str {
+        MOCK_PINPAD_MODEL
+    }
+
     fn status(&self) -> DeviceStatus {
         self.state.clone()
     }
@@ -376,6 +469,10 @@ impl MockScanner {
 }
 
 impl Scanner for MockScanner {
+    fn model(&self) -> &'static str {
+        MOCK_SCANNER_MODEL
+    }
+
     fn status(&self) -> DeviceStatus {
         self.state.clone()
     }
@@ -511,6 +608,27 @@ mod tests {
     struct SharedPrinter(std::sync::Arc<MockPrinter>);
 
     impl Printer for SharedPrinter {
+        fn model(&self) -> &'static str {
+            self.0.model()
+        }
+
+        fn status(&self) -> DeviceStatus {
+            self.0.status()
+        }
+
+        fn print(&self, voucher: &Voucher) -> Result<PrintReceipt, DeviceError> {
+            self.0.print(voucher)
+        }
+    }
+
+    /// 就绪、但型号未登记为 mock 的打印机：证明"设备能用"不等于"设备准用"。
+    struct UnregisteredPrinter(MockPrinter);
+
+    impl Printer for UnregisteredPrinter {
+        fn model(&self) -> &'static str {
+            "acme-thermal-900"
+        }
+
         fn status(&self) -> DeviceStatus {
             self.0.status()
         }
@@ -779,5 +897,147 @@ mod tests {
         assert_eq!(multibyte.expose(), "密码");
         assert!(!format!("{multibyte:?}").contains("密码"));
         assert!(format!("{multibyte:?}").contains("6 bytes"));
+    }
+
+    // ---- 白名单策略：默认拒绝，未登记型号一律不放行 ----
+
+    const MOCK_MODELS: [&str; 4] = [
+        MOCK_PRINTER_MODEL,
+        MOCK_CARD_READER_MODEL,
+        MOCK_PINPAD_MODEL,
+        MOCK_SCANNER_MODEL,
+    ];
+
+    /// 断言错误是 NotWhitelisted，且种类与型号都精确匹配。
+    fn assert_not_whitelisted(err: &DeviceError, kind: &str, model: &str) {
+        match err {
+            DeviceError::NotWhitelisted { kind: k, model: m } => {
+                assert_eq!(k, kind);
+                assert_eq!(m, model);
+            }
+            other => panic!("期望 NotWhitelisted({kind}/{model})，得到 {other:?}"),
+        }
+    }
+
+    // 默认态：拒绝一切；每台设备被拒时错误都要点名型号。
+    #[test]
+    fn policy_deny_all_rejects_every_device_with_model_name() {
+        let devices = mock_devices();
+        let policy = DevicePolicy::deny_all();
+
+        for model in MOCK_MODELS {
+            assert!(!policy.permits(model), "deny_all 不得放行 {model}");
+        }
+        assert!(
+            !DevicePolicy::allow(&[]).permits(MOCK_PRINTER_MODEL),
+            "空白名单不是\"不限制\"，必须同样拒绝"
+        );
+
+        // 逐台验证：只把这一台排除在白名单外，错误必须点名它。
+        for (model, label) in [
+            (MOCK_PRINTER_MODEL, "打印机"),
+            (MOCK_CARD_READER_MODEL, "读卡器"),
+            (MOCK_PINPAD_MODEL, "密码键盘"),
+            (MOCK_SCANNER_MODEL, "高拍仪"),
+        ] {
+            let allowlist: Vec<&str> = MOCK_MODELS
+                .iter()
+                .copied()
+                .filter(|m| *m != model)
+                .collect();
+            let err = devices
+                .ensure_allowed(&DevicePolicy::allow(&allowlist))
+                .unwrap_err();
+            assert_not_whitelisted(&err, label, model);
+        }
+
+        let text = devices.ensure_allowed(&policy).unwrap_err().to_string();
+        assert!(
+            text.contains("打印机") && text.contains(MOCK_PRINTER_MODEL),
+            "错误必须带种类与型号：{text}"
+        );
+    }
+
+    // 单型号白名单：只放行打印机，其余三类仍被拒。
+    #[test]
+    fn policy_allow_single_model_only_permits_that_kind() {
+        let policy = DevicePolicy::allow(&[MOCK_PRINTER_MODEL]);
+        assert!(policy.permits(MOCK_PRINTER_MODEL));
+        for model in [
+            MOCK_CARD_READER_MODEL,
+            MOCK_PINPAD_MODEL,
+            MOCK_SCANNER_MODEL,
+        ] {
+            assert!(!policy.permits(model), "只登记了打印机，不得放行 {model}");
+        }
+        assert!(!policy.permits("acme-thermal-900"));
+
+        // 四类设备都就绪，但白名单只登记了打印机：第一台未登记的读卡器被拒。
+        let err = mock_devices().ensure_allowed(&policy).unwrap_err();
+        assert_not_whitelisted(&err, "读卡器", MOCK_CARD_READER_MODEL);
+    }
+
+    // 演示白名单：四类 mock 全部放行，且不放行任何真机型号。
+    #[test]
+    fn policy_allow_mocks_permits_all_four_kinds() {
+        let policy = DevicePolicy::allow_mocks();
+        for model in MOCK_MODELS {
+            assert!(policy.permits(model), "allow_mocks 必须放行 {model}");
+        }
+        assert!(
+            !policy.permits("acme-thermal-900"),
+            "mock 白名单不得通配真机型号"
+        );
+
+        // 型号字面量是上游约定，钉死在这里，常量改动会立刻暴露。
+        assert_eq!(MockPrinter::ready().model(), "mock-printer");
+        assert_eq!(MockCardReader::with_pan("6222").model(), "mock-card-reader");
+        assert_eq!(MockPinPad::ready().model(), "mock-pinpad");
+        assert_eq!(MockScanner::ready().model(), "mock-scanner");
+
+        assert!(mock_devices().ensure_allowed(&policy).is_ok());
+    }
+
+    // 白名单检查与就绪检查互不影响：两者都通过才允许产生副作用。
+    #[test]
+    fn policy_check_is_independent_of_readiness_check() {
+        // 四类设备全部就绪、就绪检查通过，但型号一台都没登记。
+        let ready = mock_devices();
+        assert!(ready
+            .ensure(&[
+                DeviceKind::Printer,
+                DeviceKind::CardReader,
+                DeviceKind::PinPad,
+                DeviceKind::Scanner
+            ])
+            .is_ok());
+        let err = ready
+            .ensure_allowed(&DevicePolicy::allow(&["acme-thermal-900"]))
+            .unwrap_err();
+        assert_not_whitelisted(&err, "打印机", MOCK_PRINTER_MODEL);
+
+        // 反向：型号全部登记，但设备没就绪——白名单放行，就绪检查照旧拒绝。
+        let faulty = partly_faulty_devices();
+        assert!(faulty.ensure_allowed(&DevicePolicy::allow_mocks()).is_ok());
+        let err = faulty.ensure(&[DeviceKind::CardReader]).unwrap_err();
+        assert_not_ready(&err, "读卡器", "故障：读头脏污");
+
+        // 混装现场：真机就绪但型号未登记，另三台是 mock。
+        let mixed = Devices {
+            printer: Box::new(UnregisteredPrinter(MockPrinter::ready())),
+            ..mock_devices()
+        };
+        assert!(mixed
+            .ensure(&[
+                DeviceKind::Printer,
+                DeviceKind::CardReader,
+                DeviceKind::PinPad,
+                DeviceKind::Scanner
+            ])
+            .is_ok());
+        let err = mixed
+            .ensure_allowed(&DevicePolicy::allow_mocks())
+            .unwrap_err();
+        assert_not_whitelisted(&err, "打印机", "acme-thermal-900");
     }
 }
