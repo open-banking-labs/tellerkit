@@ -10,7 +10,9 @@ pub mod model;
 pub mod pack;
 pub mod perm;
 pub mod pkg;
+pub mod replay;
 pub mod reversal;
+pub mod session;
 pub mod store;
 pub mod sync;
 pub mod tx;
@@ -25,10 +27,12 @@ pub use model::{MenuNode, MenuTree, NodeStatus, NodeType};
 pub use pack::{MenuPack, PackError};
 pub use perm::PermSnapshot;
 pub use pkg::{BizManifest, BizPackage, LoadPlan, PackageDecision, PkgError, ShellRange, Version};
+pub use replay::{ReplayAttempt, ReplayPolicy, ReplayScheduler};
 pub use reversal::{
     Authorization, Authorizer, ExceptionKind, ReversalBook, ReversalError, ReversalRecord,
     ReversalRequest,
 };
+pub use session::{LockReason, SessionGuard, SessionPolicy};
 pub use store::{LoadSource, LoadedMenu, MenuStore, StoreError};
 pub use sync::{boot_load, check_and_update, reload, BootError, BootOutcome, UpdateOutcome};
 pub use tx::{DemoTxHost, HostError, TxEngine, TxHost, TxHostMode, TxRequest, TxResult, TxStatus};
