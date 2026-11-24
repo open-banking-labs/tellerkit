@@ -1,5 +1,9 @@
 # TellerKit
 
+[![gate](https://github.com/open-banking-labs/tellerkit/actions/workflows/gate.yml/badge.svg)](https://github.com/open-banking-labs/tellerkit/actions/workflows/gate.yml)
+[![Tauri 2](https://img.shields.io/badge/Tauri-2-24C8DB)](https://tauri.app)
+[![Rust tests](https://img.shields.io/badge/rust%20tests-56-brightgreen)](https://github.com/open-banking-labs/tellerkit)
+
 柜面终端客户端。目标形态是「主壳 + 基础菜单 + 可插拔业务包 + 服务端授权」。
 
 当前进度：**P0 已完成**（菜单权限闭环，53 个 Rust 测试 + 6 项人工验收）；
