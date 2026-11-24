@@ -53,6 +53,20 @@ TellerKit/
 
 ---
 
+## 界面
+
+**登录（三角色）**
+
+![登录](docs/screenshots/login.png)
+
+**柜员：只能看到自己有权访问的 9 个节点**
+
+![柜员](docs/screenshots/teller.png)
+
+**主管：父分组无权但仍作为容器保留（◇），下挂有权的子菜单**
+
+![主管](docs/screenshots/supervisor.png)
+
 ## 快速开始
 
 ```bash
