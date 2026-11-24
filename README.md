@@ -59,6 +59,7 @@ TellerKit/
 │   ├── PLAN.md                   # 诉求梳理与路线
 │   ├── constitution.md           # 项目宪法（10 条）
 │   ├── team.md                   # 团队分工（AI 主力）
+│   ├── metrics.md                # 指标定义与"变了该做什么" 
 │   ├── security-boundary.md      # 安全边界与对外话术
 │   └── adr/                      # 6 条架构决策
 └── scripts/verify-p0.sh

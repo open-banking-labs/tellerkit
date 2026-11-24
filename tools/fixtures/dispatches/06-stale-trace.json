@@ -1,0 +1,29 @@
+{
+  "task_id": "T-99",
+  "tasks_file": ".specify/specs/000-menu-permission-loop/tasks.md",
+  "spec": ".specify/specs/000-menu-permission-loop/spec.md",
+  "preset": "engine-agent",
+  "layer": "core",
+  "scenarios": [
+    "S-02"
+  ],
+  "allowed_files": [
+    "packages/core/src/filter.rs"
+  ],
+  "acceptance_cmd": "cargo test -p tellerkit-core filter::",
+  "base": "origin/main",
+  "base_sha": "0000000000000000000000000000000000000000",
+  "prompt_sha256": "e37f54464eba78c8045f557d78b657f6b6f85151b779c276ef18ec412361fe06",
+  "created_at": "2026-11-25T00:00:00.000Z",
+  "_fixture": "引用已删除的任务，用于演示追溯失效",
+  "status": "PASS",
+  "verdict": {
+    "exit_code": 0,
+    "duration_ms": 1200,
+    "changed_files": [
+      "packages/core/src/filter.rs"
+    ],
+    "violations": [],
+    "finished_at": "2026-11-25T00:00:00.000Z"
+  }
+}

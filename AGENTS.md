@@ -46,5 +46,6 @@ npm run build                 # 前端类型检查 + 打包（apps/shell）
 bash scripts/verify-p0.sh     # 菜单包端到端验收
 npm run task -- --tasks .specify/specs/<id>/tasks.md --id T-01   # 跑一个任务并裁决
 npm run dispatch -- --tasks .specify/specs/<id>/tasks.md --id T-01 --record   # 编译任务单并留痕
+npm run metrics               # 派发指标与判断（打回率/越界率/追溯）
 npm run dev                   # 浏览器预览（无需 Tauri）
 ```

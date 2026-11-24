@@ -19,6 +19,7 @@
     "bindings": "node tools/gen-bindings.mjs",
     "task": "node tools/run-task.mjs",
     "tasks:check": "node tools/check-tasks.mjs",
-    "dispatch": "node tools/dispatch.mjs"
+    "dispatch": "node tools/dispatch.mjs",
+    "metrics": "node tools/metrics.mjs"
   }
 }
