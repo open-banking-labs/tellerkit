@@ -6,12 +6,14 @@
  * 新增一个 app 或 package 时门禁必须自动覆盖到，否则"绿"就是假的。
  */
 import { readdirSync, statSync, existsSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export // Windows 上 URL().pathname 会给出 /C:/...，必须用 fileURLToPath
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 export const rel = (p) => relative(ROOT, p);
+/** 统一成正斜杠：字符串比对不能依赖平台分隔符（Windows 是反斜杠）。 */
+export const posix = (p) => p.split(sep).join("/");
 export const exists = (p) => existsSync(p);
 
 export function walk(dir, out = []) {

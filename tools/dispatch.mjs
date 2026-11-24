@@ -14,6 +14,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
+import { posix } from "./paths.mjs";
 import { fileURLToPath } from "node:url";
 import { parseTasksFile, TasksParseError } from "./lib/tasks.mjs";
 
@@ -170,7 +171,7 @@ function gitSha(ref) {
 
 const opts = parseArgs(process.argv.slice(2));
 const tasksPath = resolve(opts.tasks);
-const tasksRel = relative(ROOT, tasksPath);
+const tasksRel = posix(relative(ROOT, tasksPath));
 
 let tasks;
 try {
@@ -190,7 +191,7 @@ if (!existsSync(presetPath)) {
 }
 
 const specPath = join(dirname(tasksPath), "spec.md");
-const specRel = relative(ROOT, specPath);
+const specRel = posix(relative(ROOT, specPath));
 const scenarios = scenariosFrom(specPath, task.scenarios);
 const missing = task.scenarios.filter((s) => !scenarios.some((b) => b.id === s));
 if (missing.length) {
