@@ -30,6 +30,8 @@ fn main() -> ExitCode {
         }
         "demo" => demo(rest),
         "fixtures" => fixtures(rest),
+        "pkg-build" => pkg_build(rest),
+        "pkg-verify" => pkg_verify(rest),
         "build" => build(rest),
         "verify" => verify(rest),
         "inspect" => inspect(rest),
@@ -89,6 +91,82 @@ fn positional(rest: &[String]) -> Vec<&String> {
         out.push(a);
     }
     out
+}
+
+/// 把一个业务包目录打成签名的 `.bizpkg`。
+///
+/// 目录里四份 JSON 的字段名必须与 Rust 结构体一致（snake_case）；
+/// 这里不做任何字段改名，避免"打包脚本悄悄兼容了错误格式"。
+fn pkg_build(rest: &[String]) -> Result<(), String> {
+    use tellerkit_core::pkg::BizPackage;
+
+    let pos = positional(rest);
+    let dir = pos.first().ok_or("缺少业务包目录")?;
+    let out = pos.get(1).ok_or("缺少输出 .bizpkg 路径")?;
+
+    let read_json = |name: &str| -> Result<String, String> {
+        let path = std::path::Path::new(dir).join(name);
+        std::fs::read_to_string(&path).map_err(|e| format!("读取 {} 失败: {e}", path.display()))
+    };
+
+    let manifest = serde_json::from_str(&read_json("manifest.json")?)
+        .map_err(|e| format!("manifest.json 解析失败: {e}"))?;
+    let menus = serde_json::from_str(&read_json("menus.json")?)
+        .map_err(|e| format!("menus.json 解析失败: {e}"))?;
+    let permissions = serde_json::from_str(&read_json("permissions.json")?)
+        .map_err(|e| format!("permissions.json 解析失败: {e}"))?;
+    let routes = serde_json::from_str(&read_json("routes.json")?)
+        .map_err(|e| format!("routes.json 解析失败: {e}"))?;
+    let transactions = serde_json::from_str(&read_json("transactions.json")?)
+        .map_err(|e| format!("transactions.json 解析失败: {e}"))?;
+
+    let package = BizPackage {
+        manifest,
+        menus,
+        permissions,
+        routes,
+        transactions,
+    };
+    let bytes = package
+        .encode(&tellerkit_core::mock::demo_signing_key())
+        .map_err(|e| format!("打包失败: {e}"))?;
+    if let Some(parent) = std::path::Path::new(out).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
+        }
+    }
+    std::fs::write(out, &bytes).map_err(|e| format!("写入 {out} 失败: {e}"))?;
+    println!(
+        "已生成 {out}：{} v{} · {} 个菜单 · {} 字节",
+        package.manifest.id,
+        package.manifest.version,
+        package.menus.len(),
+        bytes.len()
+    );
+    Ok(())
+}
+
+fn pkg_verify(rest: &[String]) -> Result<(), String> {
+    use tellerkit_core::pkg::{BizPackage, Version};
+    let pos = positional(rest);
+    let file = pos.first().ok_or("缺少 .bizpkg 路径")?;
+    let bytes = std::fs::read(file).map_err(|e| format!("读取失败: {e}"))?;
+    let package = BizPackage::decode(&bytes, &tellerkit_core::mock::demo_verifying_key())
+        .map_err(|e| format!("验签失败: {e}"))?;
+    println!(
+        "验签通过: {} v{} · 菜单 {} · 路由 {} · 交易 {}",
+        package.manifest.id,
+        package.manifest.version,
+        package.menus.len(),
+        package.routes.len(),
+        package.transactions.len()
+    );
+    let shell = Version::parse(env!("CARGO_PKG_VERSION")).map_err(|e| e.to_string())?;
+    let plan = tellerkit_core::pkg::plan_load(vec![package], shell);
+    for decision in &plan.skipped {
+        println!("  跳过 {}：{}", decision.id, decision.reason);
+    }
+    Ok(())
 }
 
 /// 生成前端预览用的 fixture。

@@ -70,3 +70,41 @@
 
 **安全边界**：签名只能检测篡改、阻止非授权方下发，**不防本机管理员**。
 见 `docs/security-boundary.md`。
+
+## `.bizpkg` 容器
+
+业务包与菜单包用**不同的**容器：业务包带路由、交易元数据与依赖声明，
+迭代节奏独立（菜单包随主壳发版，业务包按月甚至按周）。
+
+```
+[0..8)    magic "MTKPKG01"
+[8..10)   format_version u16 LE = 1
+[10..14)  payload_len u32 LE
+[14..22)  预留（u64，当前为 0）
+[22..26)  预留（u16 ×2，当前为 0）
+[26..)    payload: MessagePack(BizPackage)
+[末 64B]  Ed25519 签名 over sha256(header || payload)
+```
+
+### 字段命名
+
+一律 **snake_case**，与 Rust serde 名一致：`min_shell` / `max_shell` /
+`offline_capable`。包格式、契约、IPC 三处同一套命名，少一次翻译少一处错。
+
+### 内容形状
+
+| 文件 | 类型 |
+|---|---|
+| `manifest.json` | 对象：`id` / `name` / `version` / `min_shell` / `max_shell` / `deps` / `entry` |
+| `menus.json` | 数组：`MenuNode`（见上） |
+| `permissions.json` | 对象：`{ "actions": string[] }` |
+| `routes.json` | 对象：路由路径 → 前端模块（顶层就是 map） |
+| `transactions.json` | 数组：`code` / `idempotency` / `offline_capable` / `devices` |
+
+### 加载约束
+
+1. 包 ID 至少两段（`biz.demo`）
+2. 菜单 code 必须等于包 ID 或以 `包ID.` 开头
+3. 已存在的 code 一律保留主壳版本（包不得劫持导航）
+4. `source` 在加载时强制改写为 `pkg:<包ID>`
+5. 版本不兼容 / 缺依赖 / 成环 → 跳过该包并记录原因，不影响其他包
