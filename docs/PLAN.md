@@ -322,7 +322,7 @@ templates/        # 打印模板（套打）
 | T1-2 | 交易元数据注册表（`transactions.json` → 内存） | 按交易码查 `offlineCapable` / `devices` |
 | T1-3 | 一个完整交易页：选菜单→录入→提交→结果→打印 | ✅ P1.3 已完成 |
 | T1-4 | 幂等键（客户端 UUID）+ 超时进 pending 而非报失败 | 重复提交不重复记账（mock 校验） |
-| T1-5 | pending 落盘 SQLite + 手动重放按钮 | 不做自动 untanking |
+| T1-5 | pending 落盘 SQLite + 手动重放按钮 | ✅ P1.4 已完成（ADR-0008） |
 | T1-6 | 按钮级权限（actionCodes 过滤） | 越权按钮不可见 |
 | T1-7 | `tx_log` 写入 + 幂等键唯一索引 | 可按用户/时间检索 |
 

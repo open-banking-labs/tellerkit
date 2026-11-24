@@ -17,6 +17,7 @@ use tellerkit_core::model::MenuTree;
 use tellerkit_core::perm::PermSnapshot;
 use tellerkit_core::store::MenuStore;
 use tellerkit_core::tx::{DemoTxHost, TxEngine};
+use tellerkit_journal_sqlite::SqliteJournal;
 
 use tauri::Manager;
 
@@ -30,6 +31,8 @@ pub struct AppState {
     pub menu: Option<MenuTree>,
     pub last_load: Option<commands::LoadReport>,
     pub appdata_dir: String,
+    /// 账本打不开时的告警。柜面宁可"能开但提示异常"，也不要"打不开"。
+    pub journal_warning: Option<String>,
     /// 交易引擎：幂等索引 + 待重放队列（P1.4 会落盘）。
     pub tx: TxEngine,
     /// 演示主机：可切换在线/离线/业务拒绝。
@@ -39,7 +42,12 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(store: MenuStore, appdata_dir: String) -> Self {
+    pub fn new(
+        store: MenuStore,
+        appdata_dir: String,
+        tx: TxEngine,
+        journal_warning: Option<String>,
+    ) -> Self {
         Self {
             host: MockHost::default(),
             store,
@@ -47,7 +55,8 @@ impl AppState {
             menu: None,
             last_load: None,
             appdata_dir,
-            tx: TxEngine::new(),
+            journal_warning,
+            tx,
             tx_host: DemoTxHost::default(),
             devices: mock_devices(),
         }
@@ -66,7 +75,16 @@ pub fn run() {
             let menu_dir = appdata.join("menu");
             // P0：公钥内置在客户端；生产环境由构建配置注入，私钥永不进客户端。
             let store = MenuStore::new(menu_dir, demo_verifying_key());
-            let state = AppState::new(store, appdata.display().to_string());
+
+            // 交易账本：打不开也不阻断启动，但要留下告警让上层显示
+            let (tx, journal_warning) = match SqliteJournal::open(appdata.join("tx.db")) {
+                Ok(journal) => (TxEngine::new().with_journal(Box::new(journal)), None),
+                Err(e) => (
+                    TxEngine::new(),
+                    Some(format!("交易账本不可用（{e}）：本会话不会落盘")),
+                ),
+            };
+            let state = AppState::new(store, appdata.display().to_string(), tx, journal_warning);
             app.manage(Mutex::new(state));
             Ok(())
         })
@@ -85,6 +103,7 @@ pub fn run() {
             commands::submit_transaction,
             commands::print_voucher,
             commands::tx_pending_count,
+            commands::replay_pending,
         ])
         .run(tauri::generate_context!())
         .expect("TellerKit 启动失败");

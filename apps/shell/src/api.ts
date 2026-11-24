@@ -102,6 +102,11 @@ export const api = {
     return m ? m.mockApi.txPendingCount() : call<number>("tx_pending_count");
   },
 
+  async replayPending(): Promise<string> {
+    const m = await mock();
+    return m ? m.mockApi.replayPending() : call<string>("replay_pending");
+  },
+
   async devSetOffline(offline: boolean): Promise<DevState> {
     const m = await mock();
     return m ? m.mockApi.devSetOffline(offline) : call<DevState>("dev_set_offline", { offline });
