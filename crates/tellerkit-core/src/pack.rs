@@ -132,7 +132,11 @@ impl MenuPack {
             return Err(PackError::UnsupportedFormatVersion(format_version));
         }
         let payload_len = u32::from_le_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]) as usize;
-        let menu_version = u64::from_le_bytes(bytes[14..22].try_into().unwrap());
+        let menu_version = u64::from_le_bytes(
+            bytes[14..22]
+                .try_into()
+                .map_err(|_| PackError::TooShort)?,
+        );
         let shell_compat_min = u16::from_le_bytes([bytes[22], bytes[23]]);
         let shell_compat_max = u16::from_le_bytes([bytes[24], bytes[25]]);
 

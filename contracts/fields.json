@@ -1,0 +1,132 @@
+{
+  "$comment": "机器可读的契约摘要。check-contracts.mjs 用它和代码双向比对；改这里等于改契约，必须走 changes/ 提案。",
+  "version": 1,
+  "rust_structs": {
+    "MenuNode": [
+      "code",
+      "parent_code",
+      "title",
+      "title_key",
+      "type",
+      "route",
+      "icon",
+      "sort",
+      "actions",
+      "source",
+      "status"
+    ],
+    "MenuView": [
+      "code",
+      "title",
+      "title_key",
+      "type",
+      "route",
+      "icon",
+      "sort",
+      "direct",
+      "actions",
+      "children"
+    ],
+    "PermSnapshot": [
+      "user_id",
+      "teller_no",
+      "outlet_code",
+      "perm_version",
+      "menu_codes",
+      "action_codes",
+      "shortcuts",
+      "role_label"
+    ],
+    "LoadReport": [
+      "menu_version",
+      "source",
+      "menu_nodes",
+      "pack_bytes",
+      "load_ms"
+    ],
+    "BootInfo": [
+      "shell_version",
+      "pubkey_hex",
+      "appdata_dir",
+      "offline",
+      "local_versions",
+      "load",
+      "notes"
+    ],
+    "LoginResult": ["snapshot", "menu", "filter_ms"],
+    "UpdateReport": ["checked", "local", "latest", "updated", "note"],
+    "ReloadReport": [
+      "menu_version",
+      "source",
+      "recovered",
+      "verify_failed",
+      "note",
+      "menu"
+    ],
+    "DevState": ["offline", "tampered", "server_version", "local_versions"]
+  },
+  "ts_interfaces": {
+    "MenuView": [
+      "code",
+      "title",
+      "title_key",
+      "type",
+      "route",
+      "icon",
+      "sort",
+      "direct",
+      "actions",
+      "children"
+    ],
+    "PermSnapshot": [
+      "user_id",
+      "teller_no",
+      "outlet_code",
+      "perm_version",
+      "menu_codes",
+      "action_codes",
+      "shortcuts",
+      "role_label"
+    ],
+    "LoadReport": [
+      "menu_version",
+      "source",
+      "menu_nodes",
+      "pack_bytes",
+      "load_ms"
+    ],
+    "BootInfo": [
+      "shell_version",
+      "pubkey_hex",
+      "appdata_dir",
+      "offline",
+      "local_versions",
+      "load",
+      "notes"
+    ],
+    "LoginResult": ["snapshot", "menu", "filter_ms"],
+    "UpdateReport": ["checked", "local", "latest", "updated", "note"],
+    "ReloadReport": [
+      "menu_version",
+      "source",
+      "recovered",
+      "verify_failed",
+      "note",
+      "menu"
+    ],
+    "DevState": ["offline", "tampered", "server_version", "local_versions"]
+  },
+  "commands": [
+    "boot",
+    "login",
+    "logout",
+    "current_menu",
+    "check_update",
+    "reload_from_disk",
+    "dev_set_offline",
+    "dev_set_tampered",
+    "dev_bump_server_version",
+    "dev_corrupt_local",
+    "dev_reset_local"
+  ]
+}

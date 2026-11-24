@@ -1,0 +1,36 @@
+name: gate
+
+# CI 与本地跑同一条命令：npm run gate。
+# 门禁结论只认 exit code，不认任何人的"已通过"。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 核心逻辑测试
+        run: cargo test --workspace
+
+      - name: 前端类型检查与打包
+        run: npm run build
+
+      - name: 三道门禁
+        run: npm run gate
