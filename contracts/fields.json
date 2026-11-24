@@ -78,6 +78,16 @@
       "tampered",
       "server_version",
       "local_versions"
+    ],
+    "TxResult": [
+      "status",
+      "reference",
+      "message",
+      "replayable"
+    ],
+    "PrintReceipt": [
+      "job_id",
+      "pages"
     ]
   },
   "ts_interfaces": {
@@ -144,6 +154,16 @@
       "tampered",
       "server_version",
       "local_versions"
+    ],
+    "TxResult": [
+      "status",
+      "reference",
+      "message",
+      "replayable"
+    ],
+    "PrintReceipt": [
+      "job_id",
+      "pages"
     ]
   },
   "commands": [
@@ -157,7 +177,10 @@
     "dev_set_tampered",
     "dev_bump_server_version",
     "dev_corrupt_local",
-    "dev_reset_local"
+    "dev_reset_local",
+    "submit_transaction",
+    "print_voucher",
+    "tx_pending_count"
   ],
   "generated_types": [
     "NodeType",
@@ -168,6 +191,9 @@
     "LoginResult",
     "UpdateReport",
     "ReloadReport",
-    "DevState"
+    "DevState",
+    "TxStatus",
+    "TxResult",
+    "PrintReceipt"
   ]
 }

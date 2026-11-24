@@ -81,6 +81,10 @@ TellerKit/
 
 ![主管](docs/screenshots/supervisor.png)
 
+**交易面板（P1.3）：录入要素 → 提交 → 三态结果 → 打印凭证**
+
+![交易面板](docs/screenshots/tx-panel.png)
+
 ## AI 约束与门禁
 
 这个仓库由人 + AI 共同维护，所以规则必须能被执行，而不只是写在文档里。

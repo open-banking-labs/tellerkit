@@ -23,4 +23,4 @@ pub use pack::{MenuPack, PackError};
 pub use perm::PermSnapshot;
 pub use store::{LoadSource, LoadedMenu, MenuStore, StoreError};
 pub use sync::{boot_load, check_and_update, reload, BootError, BootOutcome, UpdateOutcome};
-pub use tx::{HostError, TxEngine, TxHost, TxRequest, TxResult, TxStatus};
+pub use tx::{DemoTxHost, HostError, TxEngine, TxHost, TxHostMode, TxRequest, TxResult, TxStatus};

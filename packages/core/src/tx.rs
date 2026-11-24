@@ -6,13 +6,17 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use ts_rs::TS;
 
 /// 一笔交易对柜员而言只有三种可见状态。
 ///
 /// 刻意不做 `Unknown`：状态不明是最坏的情况，客户端不该有"我不知道"这种终态，
 /// 要么挂起可重放（Pending），要么拒绝（Rejected）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
+#[ts(export)]
 pub enum TxStatus {
     /// 主机已受理，拿到流水号。
     Committed,
@@ -64,7 +68,8 @@ impl TxRequest {
 }
 
 /// 提交结果。`replayable` 是重放队列的唯一判据，不靠调用方猜。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct TxResult {
     pub status: TxStatus,
     pub reference: Option<String>,
@@ -115,6 +120,60 @@ pub enum HostError {
 /// 主机接口。真实实现走网络，测试实现可以精确控制失败方式。
 pub trait TxHost {
     fn submit(&self, request: &TxRequest) -> Result<String, HostError>;
+}
+
+/// 演示用主机：把"在线/离线/业务拒绝"做成可切换的开关。
+///
+/// 真实实现走网络；这个版本让界面能在没有后端的情况下演示完整状态机。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TxHostMode {
+    Online,
+    Offline,
+    Reject(String),
+}
+
+pub struct DemoTxHost {
+    mode: Mutex<TxHostMode>,
+    seq: AtomicU64,
+}
+
+impl Default for DemoTxHost {
+    fn default() -> Self {
+        Self {
+            mode: Mutex::new(TxHostMode::Online),
+            seq: AtomicU64::new(0),
+        }
+    }
+}
+
+impl DemoTxHost {
+    pub fn new(mode: TxHostMode) -> Self {
+        Self {
+            mode: Mutex::new(mode),
+            seq: AtomicU64::new(0),
+        }
+    }
+
+    pub fn set_mode(&self, mode: TxHostMode) {
+        *self.mode.lock().unwrap_or_else(|e| e.into_inner()) = mode;
+    }
+
+    pub fn mode(&self) -> TxHostMode {
+        self.mode.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
+impl TxHost for DemoTxHost {
+    fn submit(&self, _request: &TxRequest) -> Result<String, HostError> {
+        match self.mode() {
+            TxHostMode::Online => {
+                let n = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+                Ok(format!("TX{n:08}"))
+            }
+            TxHostMode::Offline => Err(HostError::Unavailable),
+            TxHostMode::Reject(reason) => Err(HostError::Rejected(reason)),
+        }
+    }
 }
 
 /// 交易引擎。内存态：幂等索引 + 待重放队列。

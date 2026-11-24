@@ -10,11 +10,13 @@ pub mod commands;
 
 use std::sync::Mutex;
 
+use tellerkit_core::device::{mock_devices, Devices};
 use tellerkit_core::mock::demo_verifying_key;
 use tellerkit_core::mock::MockHost;
 use tellerkit_core::model::MenuTree;
 use tellerkit_core::perm::PermSnapshot;
 use tellerkit_core::store::MenuStore;
+use tellerkit_core::tx::{DemoTxHost, TxEngine};
 
 use tauri::Manager;
 
@@ -28,6 +30,12 @@ pub struct AppState {
     pub menu: Option<MenuTree>,
     pub last_load: Option<commands::LoadReport>,
     pub appdata_dir: String,
+    /// 交易引擎：幂等索引 + 待重放队列（P1.4 会落盘）。
+    pub tx: TxEngine,
+    /// 演示主机：可切换在线/离线/业务拒绝。
+    pub tx_host: DemoTxHost,
+    /// 设备集合：P1.2 的 mock 适配器，P3 换真机只换这一处构造。
+    pub devices: Devices,
 }
 
 impl AppState {
@@ -39,6 +47,9 @@ impl AppState {
             menu: None,
             last_load: None,
             appdata_dir,
+            tx: TxEngine::new(),
+            tx_host: DemoTxHost::default(),
+            devices: mock_devices(),
         }
     }
 
@@ -71,6 +82,9 @@ pub fn run() {
             commands::dev_bump_server_version,
             commands::dev_corrupt_local,
             commands::dev_reset_local,
+            commands::submit_transaction,
+            commands::print_voucher,
+            commands::tx_pending_count,
         ])
         .run(tauri::generate_context!())
         .expect("TellerKit 启动失败");
