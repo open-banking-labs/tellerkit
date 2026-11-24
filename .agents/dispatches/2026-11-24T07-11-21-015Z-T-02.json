@@ -1,0 +1,28 @@
+{
+  "task_id": "T-02",
+  "tasks_file": ".specify/specs/010-transaction-loop/tasks.md",
+  "spec": ".specify/specs/010-transaction-loop/spec.md",
+  "preset": "test-agent",
+  "layer": "core",
+  "scenarios": [
+    "S-02"
+  ],
+  "allowed_files": [
+    "packages/core/src/tx.rs"
+  ],
+  "acceptance_cmd": "cargo test -p tellerkit-core tx::",
+  "base": "HEAD",
+  "base_sha": "5ccfe2bb8efdf87b945bca68487dbe41065b28c0",
+  "prompt_sha256": "bbd48d8625f3f5c4350a2b0fed271e3259a5e1b889ab755c6b11210f37b48e33",
+  "created_at": "2026-11-24T07:11:21.015Z",
+  "status": "PASS",
+  "verdict": {
+    "exit_code": 0,
+    "duration_ms": 555,
+    "changed_files": [
+      "packages/core/src/tx.rs"
+    ],
+    "violations": [],
+    "finished_at": "2026-11-24T07:11:21.769Z"
+  }
+}
