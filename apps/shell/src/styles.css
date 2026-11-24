@@ -812,3 +812,15 @@ code,
   background: var(--danger-soft);
   border-color: #e3b4b0;
 }
+
+/* ---------- 业务包宿主 ---------- */
+
+.pkg-host {
+  margin-top: 10px;
+}
+
+.pkg-head {
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 6px;
+}

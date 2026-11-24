@@ -15,6 +15,7 @@ use tellerkit_core::mock::demo_verifying_key;
 use tellerkit_core::mock::MockHost;
 use tellerkit_core::model::MenuTree;
 use tellerkit_core::perm::PermSnapshot;
+use tellerkit_core::pkg::BizPackage;
 use tellerkit_core::store::MenuStore;
 use tellerkit_core::tx::{DemoTxHost, TxEngine};
 use tellerkit_journal_sqlite::SqliteJournal;
@@ -39,6 +40,8 @@ pub struct AppState {
     pub tx_host: DemoTxHost,
     /// 设备集合：P1.2 的 mock 适配器，P3 换真机只换这一处构造。
     pub devices: Devices,
+    /// 已加载的业务包（按依赖拓扑序）。前端按 route 找模块。
+    pub packages: Vec<BizPackage>,
 }
 
 impl AppState {
@@ -59,6 +62,7 @@ impl AppState {
             tx,
             tx_host: DemoTxHost::default(),
             devices: mock_devices(),
+            packages: Vec::new(),
         }
     }
 
@@ -104,6 +108,7 @@ pub fn run() {
             commands::print_voucher,
             commands::tx_pending_count,
             commands::replay_pending,
+            commands::package_module,
         ])
         .run(tauri::generate_context!())
         .expect("TellerKit 启动失败");

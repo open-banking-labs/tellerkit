@@ -102,6 +102,13 @@ export const api = {
     return m ? m.mockApi.txPendingCount() : call<number>("tx_pending_count");
   },
 
+  async packageModule(route: string): Promise<string> {
+    const m = await mock();
+    return m
+      ? m.mockApi.packageModule(route)
+      : call<string>("package_module", { route });
+  },
+
   async replayPending(): Promise<string> {
     const m = await mock();
     return m ? m.mockApi.replayPending() : call<string>("replay_pending");

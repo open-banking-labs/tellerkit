@@ -120,12 +120,32 @@ fn pkg_build(rest: &[String]) -> Result<(), String> {
     let transactions = serde_json::from_str(&read_json("transactions.json")?)
         .map_err(|e| format!("transactions.json 解析失败: {e}"))?;
 
+    // 前端资源：把 ui/ 下的文件内容嵌进包
+    let mut assets = std::collections::BTreeMap::new();
+    let ui_dir = std::path::Path::new(dir).join("ui");
+    if let Ok(entries) = std::fs::read_dir(&ui_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("js") {
+                let rel = path
+                    .strip_prefix(std::path::Path::new(dir))
+                    .map_err(|e| e.to_string())?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let source = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("读取 {} 失败: {e}", path.display()))?;
+                assets.insert(rel, source);
+            }
+        }
+    }
+
     let package = BizPackage {
         manifest,
         menus,
         permissions,
         routes,
         transactions,
+        assets,
     };
     let bytes = package
         .encode(&tellerkit_core::mock::demo_signing_key())

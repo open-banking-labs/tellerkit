@@ -30,6 +30,8 @@ pub struct MenuView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
     pub sort: i32,
+    /// `shell` 或 `pkg:<id>`。前端据此决定用主壳页面还是加载业务包模块。
+    pub source: String,
     /// 自身是否被授予权限。`false` 表示它只是"容器"（因为子孙有权才留下），
     /// 前端应渲染为不可点击的分组标题。
     pub direct: bool,
@@ -131,6 +133,7 @@ fn build(
         route: node.route.clone(),
         icon: node.icon.clone(),
         sort: node.sort,
+        source: node.source.clone(),
         direct,
         actions,
         children: kids,

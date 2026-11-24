@@ -25,6 +25,7 @@
       "sort",
       "direct",
       "actions",
+      "source",
       "children"
     ],
     "PermSnapshot": [
@@ -101,6 +102,7 @@
       "sort",
       "direct",
       "actions",
+      "source",
       "children"
     ],
     "PermSnapshot": [
@@ -181,7 +183,8 @@
     "submit_transaction",
     "print_voucher",
     "tx_pending_count",
-    "replay_pending"
+    "replay_pending",
+    "package_module"
   ],
   "generated_types": [
     "NodeType",

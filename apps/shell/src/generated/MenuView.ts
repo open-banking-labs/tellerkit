@@ -6,6 +6,10 @@ import type { NodeType } from "./NodeType";
  */
 export type MenuView = { code: string, title: string, title_key: string | null, type: NodeType, route: string | null, icon: string | null, sort: number, 
 /**
+ * `shell` 或 `pkg:<id>`。前端据此决定用主壳页面还是加载业务包模块。
+ */
+source: string, 
+/**
  * 自身是否被授予权限。`false` 表示它只是"容器"（因为子孙有权才留下），
  * 前端应渲染为不可点击的分组标题。
  */

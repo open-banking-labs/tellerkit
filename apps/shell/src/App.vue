@@ -7,6 +7,7 @@ import type { LogEntry, MenuRow } from "./ui-types";
 import DevPanel from "./components/DevPanel.vue";
 import LoginView from "./components/LoginView.vue";
 import MenuList from "./components/MenuList.vue";
+import PackageHost from "./components/PackageHost.vue";
 import TxPanel from "./components/TxPanel.vue";
 
 type Phase = "booting" | "login" | "ready" | "error";
@@ -480,7 +481,8 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <TxPanel :key="selected.code" :node="selected" />
+          <TxPanel v-if="selected.source === 'shell'" :key="selected.code" :node="selected" />
+          <PackageHost v-else :key="selected.code" :node="selected" />
         </template>
         <div v-else class="placeholder">选择左侧菜单开始。</div>
       </main>
