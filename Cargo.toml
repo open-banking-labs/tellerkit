@@ -16,3 +16,4 @@ sha2 = "0.10"
 hex = "0.4"
 thiserror = "2"
 rand = "0.8"
+ts-rs = { version = "12", features = ["serde-compat"] }

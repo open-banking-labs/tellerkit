@@ -8,6 +8,7 @@
  * 使用的是同一套 Rust 逻辑导出的 fixture，方便前端单独迭代样式。
  */
 import { invoke } from "@tauri-apps/api/core";
+import type { CommandName } from "./generated/commands";
 import type {
   BootInfo,
   DevState,
@@ -15,7 +16,17 @@ import type {
   MenuView,
   ReloadReport,
   UpdateReport,
-} from "./contracts";
+} from "./generated";
+
+/**
+ * 所有 IPC 调用的唯一入口。
+ *
+ * `CommandName` 由 `generate_handler!` 生成，所以拼错命令名是**类型错误**，
+ * 而不是运行时的 "command not found"。
+ */
+function call<T>(cmd: CommandName, args?: Record<string, unknown>): Promise<T> {
+  return invoke<T>(cmd, args);
+}
 
 export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -34,60 +45,60 @@ async function mock(): Promise<MockModule | null> {
 export const api = {
   async boot(): Promise<BootInfo> {
     const m = await mock();
-    return m ? m.mockApi.boot() : invoke<BootInfo>("boot");
+    return m ? m.mockApi.boot() : call<BootInfo>("boot");
   },
 
   async login(roleId: string): Promise<LoginResult> {
     const m = await mock();
-    return m ? m.mockApi.login(roleId) : invoke<LoginResult>("login", { roleId });
+    return m ? m.mockApi.login(roleId) : call<LoginResult>("login", { roleId });
   },
 
   async logout(): Promise<void> {
     const m = await mock();
     if (m) return m.mockApi.logout();
-    return invoke<void>("logout");
+    return call<void>("logout");
   },
 
   async currentMenu(): Promise<MenuView[]> {
     const m = await mock();
-    return m ? m.mockApi.currentMenu() : invoke<MenuView[]>("current_menu");
+    return m ? m.mockApi.currentMenu() : call<MenuView[]>("current_menu");
   },
 
   async checkUpdate(): Promise<UpdateReport> {
     const m = await mock();
-    return m ? m.mockApi.checkUpdate() : invoke<UpdateReport>("check_update");
+    return m ? m.mockApi.checkUpdate() : call<UpdateReport>("check_update");
   },
 
   async reloadFromDisk(): Promise<ReloadReport> {
     const m = await mock();
-    return m ? m.mockApi.reloadFromDisk() : invoke<ReloadReport>("reload_from_disk");
+    return m ? m.mockApi.reloadFromDisk() : call<ReloadReport>("reload_from_disk");
   },
 
   async devSetOffline(offline: boolean): Promise<DevState> {
     const m = await mock();
-    return m ? m.mockApi.devSetOffline(offline) : invoke<DevState>("dev_set_offline", { offline });
+    return m ? m.mockApi.devSetOffline(offline) : call<DevState>("dev_set_offline", { offline });
   },
 
   async devSetTampered(tampered: boolean): Promise<DevState> {
     const m = await mock();
     return m
       ? m.mockApi.devSetTampered(tampered)
-      : invoke<DevState>("dev_set_tampered", { tampered });
+      : call<DevState>("dev_set_tampered", { tampered });
   },
 
   async devBumpServerVersion(): Promise<DevState> {
     const m = await mock();
-    return m ? m.mockApi.devBumpServerVersion() : invoke<DevState>("dev_bump_server_version");
+    return m ? m.mockApi.devBumpServerVersion() : call<DevState>("dev_bump_server_version");
   },
 
   async devCorruptLocal(): Promise<string> {
     const m = await mock();
-    return m ? m.mockApi.devCorruptLocal() : invoke<string>("dev_corrupt_local");
+    return m ? m.mockApi.devCorruptLocal() : call<string>("dev_corrupt_local");
   },
 
   async devResetLocal(): Promise<DevState> {
     const m = await mock();
-    return m ? m.mockApi.devResetLocal() : invoke<DevState>("dev_reset_local");
+    return m ? m.mockApi.devResetLocal() : call<DevState>("dev_reset_local");
   },
 };
 

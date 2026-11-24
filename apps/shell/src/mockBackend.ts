@@ -14,7 +14,7 @@ import type {
   MenuView,
   ReloadReport,
   UpdateReport,
-} from "./contracts";
+} from "./generated";
 
 const boot = bootFixture as unknown as BootInfo;
 const sessions = sessionsFixture as unknown as Record<string, LoginResult>;

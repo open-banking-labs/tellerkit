@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { BootInfo } from "../contracts";
+import type { BootInfo } from "../generated";
 import { ROLES } from "../api";
 
 defineProps<{

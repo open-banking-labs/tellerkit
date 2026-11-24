@@ -2,15 +2,8 @@
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { api, isTauri } from "./api";
 import { actionLabel, menuNote } from "./labels";
-import type {
-  BootInfo,
-  DevState,
-  LoginResult,
-  LogEntry,
-  MenuRow,
-  MenuView,
-  UpdateReport,
-} from "./contracts";
+import type { BootInfo, DevState, LoginResult, MenuView, UpdateReport } from "./generated";
+import type { LogEntry, MenuRow } from "./ui-types";
 import DevPanel from "./components/DevPanel.vue";
 import LoginView from "./components/LoginView.vue";
 import MenuList from "./components/MenuList.vue";

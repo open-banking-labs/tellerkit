@@ -22,3 +22,4 @@ tauri = { version = "2", features = [] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tellerkit-core = { path = "../../../packages/core" }
+ts-rs.workspace = true

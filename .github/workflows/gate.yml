@@ -29,6 +29,11 @@ jobs:
       - name: 核心逻辑测试
         run: cargo test --workspace
 
+      - name: 生成物必须与源码同步
+        run: |
+          npm run bindings
+          git diff --exit-code -- apps/shell/src/generated
+
       - name: 前端类型检查与打包
         run: npm run build
 

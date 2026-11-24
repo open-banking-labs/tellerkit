@@ -1,5 +1,5 @@
 {
-  "$comment": "机器可读的契约摘要。check-contracts.mjs 用它和代码双向比对；改这里等于改契约，必须走 changes/ 提案。",
+  "$comment": "机器可读的契约摘要。check-contracts.mjs 用它和代码、以及 ts-rs 生成物三方比对；改这里等于改契约，必须走 changes/ 提案。",
   "version": 1,
   "rust_structs": {
     "MenuNode": [
@@ -53,8 +53,18 @@
       "load",
       "notes"
     ],
-    "LoginResult": ["snapshot", "menu", "filter_ms"],
-    "UpdateReport": ["checked", "local", "latest", "updated", "note"],
+    "LoginResult": [
+      "snapshot",
+      "menu",
+      "filter_ms"
+    ],
+    "UpdateReport": [
+      "checked",
+      "local",
+      "latest",
+      "updated",
+      "note"
+    ],
     "ReloadReport": [
       "menu_version",
       "source",
@@ -63,7 +73,12 @@
       "note",
       "menu"
     ],
-    "DevState": ["offline", "tampered", "server_version", "local_versions"]
+    "DevState": [
+      "offline",
+      "tampered",
+      "server_version",
+      "local_versions"
+    ]
   },
   "ts_interfaces": {
     "MenuView": [
@@ -104,8 +119,18 @@
       "load",
       "notes"
     ],
-    "LoginResult": ["snapshot", "menu", "filter_ms"],
-    "UpdateReport": ["checked", "local", "latest", "updated", "note"],
+    "LoginResult": [
+      "snapshot",
+      "menu",
+      "filter_ms"
+    ],
+    "UpdateReport": [
+      "checked",
+      "local",
+      "latest",
+      "updated",
+      "note"
+    ],
     "ReloadReport": [
       "menu_version",
       "source",
@@ -114,7 +139,12 @@
       "note",
       "menu"
     ],
-    "DevState": ["offline", "tampered", "server_version", "local_versions"]
+    "DevState": [
+      "offline",
+      "tampered",
+      "server_version",
+      "local_versions"
+    ]
   },
   "commands": [
     "boot",
@@ -128,5 +158,16 @@
     "dev_bump_server_version",
     "dev_corrupt_local",
     "dev_reset_local"
+  ],
+  "generated_types": [
+    "NodeType",
+    "MenuView",
+    "PermSnapshot",
+    "LoadReport",
+    "BootInfo",
+    "LoginResult",
+    "UpdateReport",
+    "ReloadReport",
+    "DevState"
   ]
 }

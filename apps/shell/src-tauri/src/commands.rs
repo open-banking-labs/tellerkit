@@ -8,6 +8,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use serde::Serialize;
+use ts_rs::TS;
 use tauri::State;
 
 use tellerkit_core::filter::{filter_visible, MenuView};
@@ -26,8 +27,10 @@ fn lock<'a>(
         .map_err(|_| "应用状态已损坏，请重启客户端".to_string())
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 pub struct LoadReport {
+    #[ts(type = "number")]
     pub menu_version: u64,
     /// `local` = 本地文件命中；`network` = 回退服务端拉取。
     pub source: String,
@@ -37,18 +40,21 @@ pub struct LoadReport {
     pub load_ms: f64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 pub struct BootInfo {
     pub shell_version: String,
     pub pubkey_hex: String,
     pub appdata_dir: String,
     pub offline: bool,
+    #[ts(type = "Array<number>")]
     pub local_versions: Vec<u64>,
     pub load: LoadReport,
     pub notes: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 pub struct LoginResult {
     pub snapshot: PermSnapshot,
     pub menu: Vec<MenuView>,
@@ -56,17 +62,22 @@ pub struct LoginResult {
     pub filter_ms: f64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 pub struct UpdateReport {
     pub checked: bool,
+    #[ts(type = "number | null")]
     pub local: Option<u64>,
+    #[ts(type = "number | null")]
     pub latest: Option<u64>,
     pub updated: bool,
     pub note: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 pub struct ReloadReport {
+    #[ts(type = "number")]
     pub menu_version: u64,
     pub source: String,
     pub recovered: bool,
@@ -75,11 +86,15 @@ pub struct ReloadReport {
     pub menu: Option<Vec<MenuView>>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
 pub struct DevState {
     pub offline: bool,
     pub tampered: bool,
+    #[ts(type = "number")]
+    #[ts(type = "number")]
     pub server_version: u64,
+    #[ts(type = "Array<number>")]
     pub local_versions: Vec<u64>,
 }
 

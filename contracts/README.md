@@ -20,6 +20,18 @@
 | `lifecycle.md` | 启动 / 登录 / 登出 / 更新 / 回退的时序约束 |
 | `fields.json` | 上述结构体的字段集合（门禁数据源） |
 
+## 契约即代码（W2）
+
+前端类型不再手写。Rust 结构体上的 `#[ts(export)]` 会在 `cargo test` 时导出到
+`apps/shell/src/generated/`，命令名由 `generate_handler!` 生成 `CommandName`。
+
+```bash
+npm run bindings    # 重新生成 + 写 manifest.json
+npm run gate        # 校验 fields.json ↔ Rust ↔ generated 三方一致
+```
+
+**禁止**新建 `apps/shell/src/contracts.ts`——手写契约文件会被门禁拦下（ADR-0007）。
+
 ## 怎么改
 
 ```bash

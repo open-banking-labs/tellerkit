@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { BootInfo, DevState, LoginResult, UpdateReport } from "../contracts";
+import type { BootInfo, DevState, LoginResult, UpdateReport } from "../generated";
 
 defineProps<{
   boot: BootInfo | null;

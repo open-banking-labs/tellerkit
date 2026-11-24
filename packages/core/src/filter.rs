@@ -12,10 +12,12 @@
 use crate::model::{MenuNode, MenuTree, NodeStatus, NodeType};
 use crate::perm::PermSnapshot;
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 use std::collections::HashMap;
 
 /// 给前端渲染用的可见菜单节点。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct MenuView {
     pub code: String,
     pub title: String,

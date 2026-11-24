@@ -59,8 +59,8 @@ export const rustFiles = [
   ...walk(join(ROOT, "tools/mtree-tool/src")),
 ].filter((f) => f.endsWith(".rs"));
 
-/** 前端类型契约文件（每个 app 一份） */
-export const contractsTsFiles = frontendFiles.filter((f) => f.endsWith("/contracts.ts"));
+/** ts-rs 生成物目录（每个 app 一份） */
+export const generatedDirs = frontendDirs.map((d) => join(d, "generated")).filter(exists);
 
 /** 命令层文件 */
 export const commandFiles = shellRustDirs

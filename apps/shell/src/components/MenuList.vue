@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { MenuRow } from "../contracts";
+import type { MenuRow } from "../ui-types";
 
 defineProps<{
   rows: MenuRow[];

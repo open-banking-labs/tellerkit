@@ -6,11 +6,13 @@
 //! - 全量树服务所有角色；权限差异只体现在 `PermSnapshot`，不存在"按角色打包"。
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// 节点类型。`Group` 只是容器，`Page` 可导航，`Action` 是按钮级权限点。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
+#[ts(export)]
 pub enum NodeType {
     Group,
     Page,

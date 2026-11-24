@@ -4,13 +4,15 @@
 //! 菜单过滤与按钮判断都是 O(1) 查表。
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 use std::collections::{BTreeMap, HashSet};
 
 /// 登录后由服务端下发的权限快照。
 ///
 /// 注意：JWT 里**只**放 `userId` + `permVersion`，权限明细走这份快照，
 /// 因为 Token 签发后无法撤回，而权限变更必须能即时生效。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct PermSnapshot {
     pub user_id: String,
     /// 柜员号，用于水印与审计。
@@ -18,6 +20,7 @@ pub struct PermSnapshot {
     /// 网点号，用于水印与审计。
     pub outlet_code: String,
     /// 权限版本号。服务端权限变更时递增，客户端比对后决定是否重拉。
+    #[ts(type = "number")]
     pub perm_version: u64,
     /// 可见的菜单节点 code（通常只放叶子/可导航节点）。
     pub menu_codes: Vec<String>,

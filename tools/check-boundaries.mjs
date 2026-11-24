@@ -24,7 +24,8 @@ const read = (p) => readFileSync(p, "utf8");
 // 规则 1：前端不得自己判断权限（唯一例外是各 app 的 contracts.ts 类型定义）
 const PERM_TOKENS = ["filter_visible", "menu_codes", "action_codes"];
 for (const file of frontendFiles) {
-  if (file.endsWith("/contracts.ts")) continue;
+  // generated/ 是生成物，不是手写逻辑：它的内容由 check-contracts 的 hash 校验兜底
+  if (file.includes("/generated/")) continue;
   const text = read(file);
   for (const token of PERM_TOKENS) {
     if (text.includes(token)) {

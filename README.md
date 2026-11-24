@@ -28,6 +28,7 @@ TellerKit/
 ├── apps/
 │   └── shell/                    # 柜面客户端主壳
 │       ├── src/                  # Vue 3，只渲染
+│       │   └── generated/        # 由 Rust 生成的类型（勿手改）
 │       ├── src-tauri/            # AppState + IPC 命令
 │       └── dist/                 # 构建产物
 ├── packages/
@@ -44,6 +45,7 @@ TellerKit/
 │   ├── check-boundaries.mjs
 │   ├── check-contracts.mjs
 │   ├── check-ai-rules.mjs
+│   ├── gen-bindings.mjs          # Rust → TS 类型与命令名
 │   └── mtree-tool/               # 造包 / 验签 / fixtures
 ├── contracts/                    # 唯一事实源（只读）
 ├── .specify/                     # 规格层
@@ -89,6 +91,18 @@ TellerKit/
 | 规格 | [.specify/](.specify/README.md) | 行为规格，AI 可起草不可改验收标准 |
 | 团队 | [docs/team.md](docs/team.md) + [.agents/presets/](.agents/README.md) | 六个角色、四个决策点、每个角色的门禁 |
 
+### 契约即代码
+
+前端类型不是手写的：Rust 结构体上标 `#[ts(export)]`，`cargo test` 时导出到
+`apps/shell/src/generated/`；命令名由 `generate_handler!` 生成 `CommandName` 联合类型。
+
+```bash
+npm run bindings    # 改完 Rust 必须跑这一步
+```
+
+于是：拼错命令名是**编译错误**（不是运行时 `command not found`）；
+手改生成物会被 `manifest.json` 的 hash 拦下；漏更新会被三方比对拦下。
+
 ### 门禁（唯一裁决入口）
 
 ```bash
@@ -98,7 +112,7 @@ npm run gate
 | 门禁 | 拦什么 | 真实拦到过的例子 |
 |---|---|---|
 | `check-boundaries` | 前端推导权限、core 依赖 tauri、命令层 `unwrap()` | `src/mockBackend.ts` 注释里出现 `filter_visible` |
-| `check-contracts` | 契约与代码字段/命令不一致 | 给 `UpdateReport` 偷加字段（未走提案） |
+| `check-contracts` | 契约、Rust、生成物三方不一致；手改生成物 | 手改 `generated/LoginResult.ts`、偷加 `UpdateReport` 字段 |
 | `check-ai-rules` | 文档缺失、调试残留、端侧 AI 偷偷实现 | `src/App.vue` 里的 `console.log` |
 
 **三条硬规矩**：AI 不改 `contracts/`（要改先写 `changes/` 提案）；AI 不能自称"测试通过"（只认 exit code）；

@@ -35,6 +35,7 @@
 
 ```bash
 npm run gate                  # 三道门禁，唯一裁决入口
+npm run bindings              # 由 Rust 重新生成前端类型（改了 Rust 必须跑）
 npm run test                  # cargo test --workspace
 npm run build                 # 前端类型检查 + 打包（apps/shell）
 bash scripts/verify-p0.sh     # 菜单包端到端验收
