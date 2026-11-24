@@ -10,6 +10,7 @@ import { join } from "node:path";
 import {
   ROOT,
   rel,
+  posix,
   apps,
   packages,
   frontendFiles,
@@ -25,7 +26,7 @@ const read = (p) => readFileSync(p, "utf8");
 const PERM_TOKENS = ["filter_visible", "menu_codes", "action_codes"];
 for (const file of frontendFiles) {
   // generated/ 是生成物，不是手写逻辑：它的内容由 check-contracts 的 hash 校验兜底
-  if (file.includes("/generated/")) continue;
+  if (posix(file).includes("/generated/")) continue;
   const text = read(file);
   for (const token of PERM_TOKENS) {
     if (text.includes(token)) {

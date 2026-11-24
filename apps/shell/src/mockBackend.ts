@@ -12,7 +12,9 @@ import type {
   DevState,
   LoginResult,
   MenuView,
+  PrintReceipt,
   ReloadReport,
+  TxResult,
   UpdateReport,
 } from "./generated";
 
@@ -67,6 +69,31 @@ export const mockApi = {
       note: "浏览器预览模式：不做真实验签，请用 `npm run tauri:dev` 验证",
       menu: current?.menu ?? null,
     };
+  },
+
+  /**
+   * 浏览器预览的交易桩：**不做任何状态机判断**（那在 Rust 里）。
+   * 固定返回"成功"，界面顶部已标"浏览器预览·静态数据"，
+   * 真实的状态机行为必须在 Tauri 客户端验证。
+   */
+  async submitTransaction(args: {
+    txCode: string;
+    amountCents: number;
+  }): Promise<TxResult> {
+    return {
+      status: "committed",
+      reference: `PREVIEW-${args.txCode}-${args.amountCents}`,
+      message: "浏览器预览：这是模拟结果，真实状态机请在 Tauri 客户端验证",
+      replayable: false,
+    };
+  },
+
+  async printVoucher(_args?: unknown): Promise<PrintReceipt> {
+    return { job_id: "PREVIEW-PRINT-1", pages: 1 };
+  },
+
+  async txPendingCount(): Promise<number> {
+    return 0;
   },
 
   async devSetOffline(offline: boolean): Promise<DevState> {

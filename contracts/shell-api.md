@@ -64,3 +64,21 @@
 | `tampered` | boolean | 服务端是否下发坏包 |
 | `server_version` | number | mock 服务端版本 |
 | `local_versions` | number[] | 本地版本列表 |
+
+## TxResult
+
+交易结论。柜员可见的全部信息都在这里，不再包一层 DTO。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `status` | `"committed"` \| `"pending"` \| `"rejected"` | 三态，**刻意没有 unknown** |
+| `reference` | string \| null | 主机流水号，仅 committed 有 |
+| `message` | string | 给柜员看的文案，可直接展示 |
+| `replayable` | boolean | 是否进入待重放队列（唯一判据，界面不自行推断） |
+
+## PrintReceipt
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `job_id` | string | 打印作业号 |
+| `pages` | number | 页数 |

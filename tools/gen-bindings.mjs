@@ -15,8 +15,10 @@ import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+// Windows 上 URL().pathname 会给出 /C:/...，必须用 fileURLToPath
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const DIR = join(ROOT, "apps/shell/src/generated");
 
 const run = (args) => {

@@ -10,7 +10,9 @@ on:
 
 jobs:
   gate:
-    runs-on: ubuntu-latest
+    # 柜面的实际部署平台是 Windows，Linux 不是目标平台。
+    # 之前用 ubuntu 要 apt 装 WebKitGTK，两次卡在 apt 上十几分钟——为不存在的平台付出代价。
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -24,13 +26,6 @@ jobs:
           components: rustfmt
 
       - uses: Swatinem/rust-cache@v2
-
-      # Tauri 在 Linux 上编译需要 WebKitGTK 等系统库，缺了 cargo test 会直接失败
-      - name: 安装 Linux 系统依赖
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
-            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 
       - name: 安装依赖
         run: npm ci
@@ -46,7 +41,7 @@ jobs:
       - name: 前端类型检查与打包
         run: npm run build
 
-      - name: 三道门禁
+      - name: 门禁
         run: npm run gate
 
       - name: 派发指标（信息性）

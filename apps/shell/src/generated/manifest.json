@@ -1,8 +1,8 @@
 {
   "generator": "tools/gen-bindings.mjs",
   "files": {
-    "index.ts": "26b331de83785eb22b0e8daa97855c2c5ad391525ae7771992b08deff5b22921",
-    "commands.ts": "c467a3c311487865a750668a2c84f98d4193a8285eb8473ae38a0406a9aa1d4b",
+    "index.ts": "83b1fab9df617ddc57c7a3da3efb65a5387c66aadd7659eeeed4af46b1e170d2",
+    "commands.ts": "bd377d87cf4df585f3fe07284b4b0066a03e6542e9e480f67e6e519b647c0f49",
     "BootInfo.ts": "b8027b31267b8fb0e5e105742aa472178101936139f5834bc1bf3342cee9988c",
     "DevState.ts": "b0fe4d7384ebcbe5c2db25cbdd5ac71202058cce08e704b4729e2e2976b3ab74",
     "LoadReport.ts": "20c5ddcf8be5c8e925bda86a923eac6c27cc44b9e50c9afcfbfc291c8978a009",
@@ -10,7 +10,10 @@
     "MenuView.ts": "e813f5e6014aa55fb9d00f32c4c2162491e18194ab60e70ff1089f9ebbed0168",
     "NodeType.ts": "a11feeac609427f2b5ed878077a63db47e99497cc91b55530420a9f356f40642",
     "PermSnapshot.ts": "68ab76388f9469243777db329ac861a485d78be412d602aeb6e164f2588c9fd2",
+    "PrintReceipt.ts": "73ab2de644be8a4d8b77fb40a50b14c78b9fe4ae81d7fb924344e5e7bddc303c",
     "ReloadReport.ts": "53df82df0632a97e59dbd624982696ef516f24562b1ec80d09aba9b779a7a55d",
+    "TxResult.ts": "4fc30539855ae8524deac964aef99956585e31cd671eccbb7ef5f629a5e37e75",
+    "TxStatus.ts": "5a92c77126eb782f8548df241b8e4e7a853cb69544a57a0ff08946cd3682ea17",
     "UpdateReport.ts": "591198f3fb7dd0d0a0502fcbe001157cfa7823e113689b6ca29951b70a17f6aa"
   }
 }

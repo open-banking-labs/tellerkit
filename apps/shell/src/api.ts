@@ -14,7 +14,9 @@ import type {
   DevState,
   LoginResult,
   MenuView,
+  PrintReceipt,
   ReloadReport,
+  TxResult,
   UpdateReport,
 } from "./generated";
 
@@ -72,6 +74,32 @@ export const api = {
   async reloadFromDisk(): Promise<ReloadReport> {
     const m = await mock();
     return m ? m.mockApi.reloadFromDisk() : call<ReloadReport>("reload_from_disk");
+  },
+
+  async submitTransaction(args: {
+    txCode: string;
+    idempotencyKey: string;
+    amountCents: number;
+    elements: Record<string, string>;
+    offlineCapable: boolean;
+  }): Promise<TxResult> {
+    const m = await mock();
+    return m ? m.mockApi.submitTransaction(args) : call<TxResult>("submit_transaction", args);
+  },
+
+  async printVoucher(args: {
+    template: string;
+    txCode: string;
+    reference: string | null;
+    fields: Record<string, string>;
+  }): Promise<PrintReceipt> {
+    const m = await mock();
+    return m ? m.mockApi.printVoucher(args) : call<PrintReceipt>("print_voucher", args);
+  },
+
+  async txPendingCount(): Promise<number> {
+    const m = await mock();
+    return m ? m.mockApi.txPendingCount() : call<number>("tx_pending_count");
   },
 
   async devSetOffline(offline: boolean): Promise<DevState> {

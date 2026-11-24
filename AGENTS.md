@@ -18,6 +18,11 @@
 7. 权限快照不落盘；菜单隐藏 ≠ 安全。
 8. 端侧 AI 只预留契约位置，不写实现。
 
+## 编译纪律
+
+**不在本机跑 cargo。** 编译一律走 `scripts/remote-build.sh`（经 Tailscale 到首尔构建机），
+Windows / Ubuntu / macOS 产物都在那台机器上验证。本地只跑 `npm run gate` 的 node 部分。
+
 ## 分支纪律
 
 `main` 受保护：**改动必须走 PR，且 `gate` 检查通过才能合并**。禁止直推、禁止 force push。

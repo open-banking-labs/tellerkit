@@ -6,10 +6,14 @@
  * 新增一个 app 或 package 时门禁必须自动覆盖到，否则"绿"就是假的。
  */
 import { readdirSync, statSync, existsSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join, relative, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
-export const ROOT = new URL("..", import.meta.url).pathname;
+export // Windows 上 URL().pathname 会给出 /C:/...，必须用 fileURLToPath
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 export const rel = (p) => relative(ROOT, p);
+/** 统一成正斜杠：字符串比对不能依赖平台分隔符（Windows 是反斜杠）。 */
+export const posix = (p) => p.split(sep).join("/");
 export const exists = (p) => existsSync(p);
 
 export function walk(dir, out = []) {
@@ -62,15 +66,20 @@ export const rustFiles = [
 /** ts-rs 生成物目录（每个 app 一份） */
 export const generatedDirs = frontendDirs.map((d) => join(d, "generated")).filter(exists);
 
-/** 命令层文件 */
+/**
+ * 命令层文件。
+ *
+ * 用 posix() 之后再比后缀：Windows 上路径是 `...\commands.rs`，
+ * 直接 `endsWith("/commands.rs")` 恒为假——命令注册检查会静默变成空集。
+ */
 export const commandFiles = shellRustDirs
   .flatMap((d) => walk(d))
-  .filter((f) => f.endsWith("/commands.rs"));
+  .filter((f) => posix(f).endsWith("/commands.rs"));
 
 /** Tauri 装配入口 */
 export const handlerFiles = shellRustDirs
   .flatMap((d) => walk(d))
-  .filter((f) => f.endsWith("/lib.rs"));
+  .filter((f) => posix(f).endsWith("/lib.rs"));
 
 /** 所有受管的"单位"：每个都要有 AGENTS.md + README.md */
 export const units = [...apps, ...packages];

@@ -3,6 +3,7 @@
 //! 这一层刻意保持很薄：加锁、计时、把错误翻成中文、提供演示开关。
 //! 所有决策逻辑都在 `tellerkit-core::sync` 与 `filter`，因此重要路径可以被单测覆盖。
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -11,10 +12,12 @@ use serde::Serialize;
 use tauri::State;
 use ts_rs::TS;
 
+use tellerkit_core::device::{PrintReceipt, Voucher};
 use tellerkit_core::filter::{filter_visible, MenuView};
 use tellerkit_core::mock::DemoRole;
 use tellerkit_core::perm::PermSnapshot;
 use tellerkit_core::sync;
+use tellerkit_core::tx::{TxHostMode, TxRequest, TxResult};
 use tellerkit_core::LoadSource;
 
 use crate::AppState;
@@ -235,6 +238,55 @@ pub fn reload_from_disk(state: State<'_, Mutex<AppState>>) -> Result<ReloadRepor
 
 // ---- 演示开关：只影响 mock 宿主，不改变真实逻辑 ----
 
+/// 提交交易。幂等键由前端生成——断网时客户端拿不到服务端 ID。
+#[tauri::command]
+pub fn submit_transaction(
+    tx_code: String,
+    idempotency_key: String,
+    amount_cents: i64,
+    elements: BTreeMap<String, String>,
+    offline_capable: bool,
+    state: State<'_, Mutex<AppState>>,
+) -> Result<TxResult, String> {
+    let mut guard = lock(&state)?;
+    // 拆分借用：引擎要 &mut，主机要 &，两者是同一个结构体的不同字段
+    let AppState { tx, tx_host, .. } = &mut *guard;
+    let request = TxRequest {
+        tx_code,
+        idempotency_key,
+        amount_cents,
+        elements,
+        offline_capable,
+    };
+    Ok(tx.submit(tx_host, request))
+}
+
+/// 打印凭证。模板与要素分离：套打格式随网点配置变，要素由交易产生。
+#[tauri::command]
+pub fn print_voucher(
+    template: String,
+    tx_code: String,
+    reference: Option<String>,
+    fields: BTreeMap<String, String>,
+    state: State<'_, Mutex<AppState>>,
+) -> Result<PrintReceipt, String> {
+    let st = lock(&state)?;
+    let mut voucher = Voucher::new(&template, &tx_code);
+    voucher.reference = reference;
+    voucher.fields = fields;
+    st.devices
+        .printer
+        .print(&voucher)
+        .map_err(|e| e.to_string())
+}
+
+/// 待重放笔数：界面用它提示"还有 N 笔挂起"。
+#[tauri::command]
+pub fn tx_pending_count(state: State<'_, Mutex<AppState>>) -> Result<usize, String> {
+    let st = lock(&state)?;
+    Ok(st.tx.pending_requests().len())
+}
+
 #[tauri::command]
 pub fn dev_set_offline(
     offline: bool,
@@ -242,6 +294,12 @@ pub fn dev_set_offline(
 ) -> Result<DevState, String> {
     let mut st = lock(&state)?;
     st.host.offline = offline;
+    // 一个开关同时控制菜单探测与交易主机，演示时不用来回切两处
+    st.tx_host.set_mode(if offline {
+        TxHostMode::Offline
+    } else {
+        TxHostMode::Online
+    });
     Ok(dev_state_of(&st))
 }
 

@@ -7,6 +7,7 @@ import type { LogEntry, MenuRow } from "./ui-types";
 import DevPanel from "./components/DevPanel.vue";
 import LoginView from "./components/LoginView.vue";
 import MenuList from "./components/MenuList.vue";
+import TxPanel from "./components/TxPanel.vue";
 
 type Phase = "booting" | "login" | "ready" | "error";
 
@@ -479,9 +480,7 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <div class="placeholder">
-            交易页在 P1 实现：选菜单 → 录入要素 → 提交 → 结果 → 凭证打印（外设走 mock trait）。
-          </div>
+          <TxPanel :key="selected.code" :node="selected" />
         </template>
         <div v-else class="placeholder">选择左侧菜单开始。</div>
       </main>

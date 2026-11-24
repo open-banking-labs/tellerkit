@@ -92,7 +92,8 @@ impl Voucher {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
 pub struct PrintReceipt {
     pub job_id: String,
     pub pages: u32,
@@ -163,22 +164,22 @@ pub struct CapturedImage {
     pub mime: String,
 }
 
-pub trait Printer {
+pub trait Printer: Send + Sync {
     fn status(&self) -> DeviceStatus;
     fn print(&self, voucher: &Voucher) -> Result<PrintReceipt, DeviceError>;
 }
 
-pub trait CardReader {
+pub trait CardReader: Send + Sync {
     fn status(&self) -> DeviceStatus;
     fn read(&self) -> Result<CardData, DeviceError>;
 }
 
-pub trait PinPad {
+pub trait PinPad: Send + Sync {
     fn status(&self) -> DeviceStatus;
     fn read_pin(&self) -> Result<PinBlock, DeviceError>;
 }
 
-pub trait Scanner {
+pub trait Scanner: Send + Sync {
     fn status(&self) -> DeviceStatus;
     fn capture(&self, kind: &str) -> Result<CapturedImage, DeviceError>;
 }
@@ -232,8 +233,8 @@ impl Devices {
 #[derive(Default)]
 pub struct MockPrinter {
     pub state: Option<DeviceStatus>,
-    printed: std::cell::RefCell<Vec<Voucher>>,
-    next_job: std::cell::Cell<u32>,
+    printed: std::sync::Mutex<Vec<Voucher>>,
+    next_job: std::sync::atomic::AtomicU32,
 }
 
 impl MockPrinter {
@@ -248,13 +249,18 @@ impl MockPrinter {
         }
     }
 
-    /// 已打印凭证的只读视图（不是副本：副本会让人误以为能改到内部状态）。
-    pub fn printed(&self) -> std::cell::Ref<'_, Vec<Voucher>> {
-        self.printed.borrow()
+    /// 已打印凭证的视图（不是副本：副本会让人误以为能改到内部状态）。
+    pub fn printed(&self) -> std::sync::MutexGuard<'_, Vec<Voucher>> {
+        self.printed.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn printed_count(&self) -> usize {
-        self.printed.borrow().len()
+        self.printed().len()
+    }
+
+    #[cfg(test)]
+    pub fn clear_printed(&self) {
+        self.printed().clear();
     }
 }
 
@@ -270,11 +276,16 @@ impl Printer for MockPrinter {
                 state: self.status().describe(),
             });
         }
-        self.printed.borrow_mut().push(voucher.clone());
+        self.printed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(voucher.clone());
         // 作业号用独立计数器：从 len() 派生会在清空后复用旧号，
         // 若上层拿它当对账键就会撞号。
-        let n = self.next_job.get() + 1;
-        self.next_job.set(n);
+        let n = self
+            .next_job
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
         Ok(PrintReceipt {
             job_id: format!("PRINT-{n}"),
             pages: 1,
@@ -410,7 +421,7 @@ mod tests {
         let receipt = printer.print(&voucher()).unwrap();
         assert_eq!(receipt.job_id, "PRINT-1");
         assert_eq!(receipt.pages, 1);
-        assert_eq!(printer.printed.borrow().len(), 1);
+        assert_eq!(printer.printed_count(), 1);
     }
 
     // S-02
@@ -497,7 +508,7 @@ mod tests {
     // ---- T-04 对抗用例 ----
 
     /// 与 mock 共享同一份打印记录，用来观察"预检失败是否产生副作用"。
-    struct SharedPrinter(std::rc::Rc<MockPrinter>);
+    struct SharedPrinter(std::sync::Arc<MockPrinter>);
 
     impl Printer for SharedPrinter {
         fn status(&self) -> DeviceStatus {
@@ -610,9 +621,9 @@ mod tests {
     // S-03：预检失败必须发生在打印之前，不能出现"已出纸但签名失败"的半截状态。
     #[test]
     fn s03_failed_ensure_prevents_half_printed_transaction() {
-        let printer = std::rc::Rc::new(MockPrinter::ready());
+        let printer = std::sync::Arc::new(MockPrinter::ready());
         let devices = Devices {
-            printer: Box::new(SharedPrinter(std::rc::Rc::clone(&printer))),
+            printer: Box::new(SharedPrinter(std::sync::Arc::clone(&printer))),
             card_reader: Box::new(MockCardReader::with_pan("6222021234567890123")),
             pinpad: Box::new(MockPinPad::faulty("未连接")),
             scanner: Box::new(MockScanner::ready()),
@@ -630,7 +641,7 @@ mod tests {
             DeviceError::NotReady { kind, .. } if kind == "密码键盘"
         ));
         assert!(
-            printer.printed.borrow().is_empty(),
+            printer.printed().is_empty(),
             "预检失败后打印机上不得出现任何凭证"
         );
     }
@@ -645,11 +656,7 @@ mod tests {
         printer.state = Some(DeviceStatus::Faulty("缺纸".into()));
         let err = printer.print(&voucher()).unwrap_err();
         assert_not_ready(&err, "打印机", "故障：缺纸");
-        assert_eq!(
-            printer.printed.borrow().len(),
-            1,
-            "故障时的打印不得写入已打印列表"
-        );
+        assert_eq!(printer.printed_count(), 1, "故障时的打印不得写入已打印列表");
 
         printer.state = Some(DeviceStatus::NotConnected);
         let err = printer.print(&voucher()).unwrap_err();
@@ -664,7 +671,7 @@ mod tests {
             "PRINT-2",
             "job_id 由已打印条数派生：故障期间的失败不占号"
         );
-        assert_eq!(printer.printed.borrow().len(), 2);
+        assert_eq!(printer.printed_count(), 2);
     }
 
     // S-02/S-03：pinpad 与读卡器的状态切换同样在下一次调用生效。
@@ -708,7 +715,7 @@ mod tests {
 
         // 作业号用独立计数器，清空记录后不得复用旧号——
         // 否则上层拿 job_id 当对账键就会撞号。
-        printer.printed.borrow_mut().clear();
+        printer.clear_printed();
         assert_eq!(printer.printed_count(), 0);
         assert_eq!(printer.print(&voucher()).unwrap().job_id, "PRINT-4");
     }

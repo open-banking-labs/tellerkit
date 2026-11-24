@@ -14,9 +14,12 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
+import { posix } from "./paths.mjs";
+import { fileURLToPath } from "node:url";
 import { parseTasksFile, TasksParseError } from "./lib/tasks.mjs";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+// Windows 上 URL().pathname 会给出 /C:/...，必须用 fileURLToPath
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const DISPATCH_DIR = join(ROOT, ".agents/dispatches");
 const USAGE = `用法:
   node tools/dispatch.mjs --tasks <tasks.md> --id T-01 [选项]
@@ -168,7 +171,7 @@ function gitSha(ref) {
 
 const opts = parseArgs(process.argv.slice(2));
 const tasksPath = resolve(opts.tasks);
-const tasksRel = relative(ROOT, tasksPath);
+const tasksRel = posix(relative(ROOT, tasksPath));
 
 let tasks;
 try {
@@ -188,7 +191,7 @@ if (!existsSync(presetPath)) {
 }
 
 const specPath = join(dirname(tasksPath), "spec.md");
-const specRel = relative(ROOT, specPath);
+const specRel = posix(relative(ROOT, specPath));
 const scenarios = scenariosFrom(specPath, task.scenarios);
 const missing = task.scenarios.filter((s) => !scenarios.some((b) => b.id === s));
 if (missing.length) {
