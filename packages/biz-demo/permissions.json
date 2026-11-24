@@ -1,0 +1,5 @@
+{
+  "menus": ["biz.demo", "biz.demo.hello"],
+  "actions": ["action.demo.print"],
+  "note": "本包声明的权限码必须存在于服务端权限体系中；否则该菜单对所有人永远不可见。"
+}

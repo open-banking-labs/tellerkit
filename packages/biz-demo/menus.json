@@ -1,0 +1,24 @@
+[
+  {
+    "code": "biz.demo",
+    "parent_code": null,
+    "title": "示例业务",
+    "type": "group",
+    "route": null,
+    "sort": 90,
+    "actions": [],
+    "source": "pkg:biz.demo",
+    "status": "active"
+  },
+  {
+    "code": "biz.demo.hello",
+    "parent_code": "biz.demo",
+    "title": "示例交易",
+    "type": "page",
+    "route": "/biz/demo/hello",
+    "sort": 10,
+    "actions": ["action.demo.print"],
+    "source": "pkg:biz.demo",
+    "status": "active"
+  }
+]

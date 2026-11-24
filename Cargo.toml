@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/tellerkit-core", "crates/mtree-tool", "src-tauri"]
+members = ["apps/shell/src-tauri", "packages/core", "tools/mtree-tool"]
 
 [workspace.package]
 version = "0.1.0"

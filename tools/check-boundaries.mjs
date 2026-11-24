@@ -2,90 +2,75 @@
 /**
  * 门禁 1/3 · 依赖方向与分层
  *
- * 对应宪法第 2 条。检查的是"谁能 import 谁"，这是最容易在 AI 生成时被破坏、
- * 又最难在 code review 里靠肉眼发现的一类问题。
+ * 对应宪法第 2 条。检查"谁能 import 谁"——这是 AI 生成时最容易破坏、
+ * 又最难靠肉眼 code review 发现的一类问题。
  */
-import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import {
+  ROOT,
+  rel,
+  apps,
+  packages,
+  frontendFiles,
+  rustFiles,
+  commandFiles,
+  packageSrcDirs,
+} from "./paths.mjs";
 
-const ROOT = new URL("..", import.meta.url).pathname;
 const errors = [];
-const checked = [];
-
-const rel = (p) => relative(ROOT, p);
 const read = (p) => readFileSync(p, "utf8");
 
-function walk(dir, out = []) {
-  let entries;
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return out;
-  }
-  for (const name of entries) {
-    if (name === "node_modules" || name === "target" || name === ".git" || name === "dist") continue;
-    const p = join(dir, name);
-    if (statSync(p).isDirectory()) walk(p, out);
-    else out.push(p);
-  }
-  return out;
-}
-
-const allFiles = walk(ROOT);
-const srcFiles = allFiles.filter((f) => f.startsWith(join(ROOT, "src")) && /\.(ts|vue)$/.test(f));
-const rsFiles = allFiles.filter((f) => f.endsWith(".rs"));
-const cargoFiles = allFiles.filter((f) => f.endsWith("Cargo.toml"));
-
-// 规则 1：前端不得自己判断权限（唯一例外是 contracts.ts 的类型定义）
+// 规则 1：前端不得自己判断权限（唯一例外是各 app 的 contracts.ts 类型定义）
 const PERM_TOKENS = ["filter_visible", "menu_codes", "action_codes"];
-for (const file of srcFiles) {
-  if (file.endsWith("src/contracts.ts")) continue;
+for (const file of frontendFiles) {
+  if (file.endsWith("/contracts.ts")) continue;
   const text = read(file);
   for (const token of PERM_TOKENS) {
     if (text.includes(token)) {
       errors.push(
-        `${rel(file)} 出现 \`${token}\`：前端不得推导权限。菜单可见性由 Rust 的 filter_visible 决定，前端只渲染结果。（宪法第 2 条）`,
+        `${rel(file)} 出现 \`${token}\`：前端不得推导权限。可见性由 Rust 侧剪枝决定，前端只渲染结果。（宪法第 2 条）`,
       );
     }
   }
-  checked.push(rel(file));
 }
 
-// 规则 2：核心 crate 不得依赖 tauri（否则无法脱离 GUI 测试）
-const coreCargo = join(ROOT, "crates/tellerkit-core/Cargo.toml");
-try {
-  if (/tauri/.test(read(coreCargo))) {
-    errors.push(`${rel(coreCargo)} 依赖了 tauri：核心逻辑必须能独立 cargo test。`);
+// 规则 2：核心包不得依赖 tauri（否则无法脱离 GUI 测试）
+for (const dir of packageSrcDirs) {
+  const pkgRoot = dir.replace(/\/src$/, "");
+  const cargo = join(pkgRoot, "Cargo.toml");
+  try {
+    if (/\btauri\b/.test(read(cargo))) {
+      errors.push(`${rel(cargo)} 依赖了 tauri：核心逻辑必须能独立 cargo test。`);
+    }
+  } catch {
+    /* 不是 Rust 包，跳过 */
   }
-} catch {
-  errors.push("找不到 crates/tellerkit-core/Cargo.toml");
 }
 
-// 规则 3：crates/ 下的代码不得 use tauri 或引用主壳
-for (const file of rsFiles.filter((f) => f.includes("/crates/"))) {
+// 规则 3：packages/ 下的代码不得 use tauri 或引用主壳
+for (const file of rustFiles.filter((f) => packages.some((p) => f.startsWith(p)))) {
   const text = read(file);
   if (/^\s*use\s+tauri(::|\s*;)/m.test(text) || /\btellerkit_lib\b/.test(text)) {
-    errors.push(`${rel(file)} 引用了 tauri 或主壳：core 层不得依赖应用层。`);
+    errors.push(`${rel(file)} 引用了 tauri 或主壳：packages 层不得依赖 apps 层。`);
   }
 }
 
-// 规则 4：crates/ 的 Cargo.toml 不得反向依赖 src-tauri
-for (const file of cargoFiles.filter((f) => f.includes("/crates/"))) {
-  const text = read(file);
-  if (/src-tauri/.test(text)) {
-    errors.push(`${rel(file)} 依赖了 src-tauri：依赖方向反了。`);
+// 规则 4：packages/ 的 Cargo.toml 不得反向依赖 apps/
+for (const pkg of packages) {
+  const cargo = join(pkg, "Cargo.toml");
+  try {
+    if (/apps\//.test(read(cargo))) {
+      errors.push(`${rel(cargo)} 依赖了 apps/：依赖方向反了。`);
+    }
+  } catch {
+    /* 非 Rust 包 */
   }
 }
 
 // 规则 5：命令层不得 panic（会穿透 IPC 让客户端白屏）
-const panicTargets = [join(ROOT, "src-tauri/src/commands.rs")];
-for (const file of panicTargets) {
-  let text;
-  try {
-    text = read(file);
-  } catch {
-    continue;
-  }
+for (const file of commandFiles) {
+  const text = read(file);
   const idx = text.indexOf("#[cfg(test)]");
   const body = idx >= 0 ? text.slice(0, idx) : text;
   body.split("\n").forEach((line, i) => {
@@ -97,12 +82,17 @@ for (const file of panicTargets) {
   });
 }
 
-// 规则 6：前端不得 import 核心库
-for (const file of srcFiles) {
+// 规则 6：前端不得 import Rust 侧代码（跨语言只能走 IPC）
+for (const file of frontendFiles) {
   const text = read(file);
-  if (/from\s+["'][^"']*tellerkit-core/.test(text) || /from\s+["']\.\.\/crates/.test(text)) {
+  if (/from\s+["'][^"']*tellerkit-core/.test(text) || /from\s+["'][^"']*\/packages\//.test(text)) {
     errors.push(`${rel(file)} 直接 import 了 Rust 侧代码：跨语言的边界只能走 IPC。`);
   }
+}
+
+// 规则 7：apps/ 下只允许一个前端入口（防止复制粘贴出第二个 UI）
+if (apps.length !== 1) {
+  errors.push(`apps/ 下有 ${apps.length} 个应用：当前架构只允许一个主壳，新增前先写 ADR。`);
 }
 
 if (errors.length) {
@@ -112,4 +102,6 @@ if (errors.length) {
   process.exit(1);
 }
 
-console.log(`✓ check-boundaries 通过（扫描 ${checked.length} 个前端文件、${rsFiles.length} 个 Rust 文件）`);
+console.log(
+  `✓ check-boundaries 通过（${apps.length} 个 app、${packages.length} 个 package、${frontendFiles.length} 个前端文件、${rustFiles.length} 个 Rust 文件）`,
+);

@@ -2,8 +2,9 @@
 
 柜面终端客户端。目标形态是「主壳 + 基础菜单 + 可插拔业务包 + 服务端授权」。
 
-当前进度：**P0 已完成**（骨架 + 菜单权限闭环，53 个 Rust 测试 + 6 项人工验收）。
-下一步是 P1：交易框架 + 设备抽象 mock。
+当前进度：**P0 已完成**（菜单权限闭环，53 个 Rust 测试 + 6 项人工验收）；
+仓库已迁到生产级团队形态（`apps/` + `packages/` + `contracts/` + `.specify/` + `.agents/`）。
+下一步是 **W2：契约即代码**——由 Rust 生成 TS 类型，消灭手写 `contracts.ts`。
 
 ---
 
@@ -24,43 +25,37 @@ TellerKit 把菜单树做成**本地签名的二进制包**，启动时只做「
 
 ```
 TellerKit/
-├── crates/
-│   ├── tellerkit-core/       # 纯逻辑，无 GUI 依赖，可独立 cargo test
-│   │   ├── model.rs          # MenuNode / MenuTree 契约与结构校验
-│   │   ├── filter.rs         # filter_visible()：权限剪枝（唯一规则）
-│   │   ├── pack.rs           # .mtree 编解码 + Ed25519 签名/验签
-│   │   ├── store.rs          # 本地包仓库：原子替换、版本保留、验签失败检测
-│   │   ├── perm.rs           # PermSnapshot
-│   │   ├── sync.rs           # 启动回退 / 版本探测编排（可测，无 GUI 依赖）
-│   │   └── mock.rs           # mock 服务端：版本探测、下发、三角色、演示树
-│   └── mtree-tool/           # CLI：造包 / 验签 / 查看（模拟服务端构建环节）
-├── src-tauri/                # Tauri 主壳，持有 AppState（唯一真相源）
-│   └── src/
-│       ├── lib.rs            # AppState + 启动装配
-│       └── commands.rs       # boot / login / logout / check_update / dev_*
-├── src/                      # Vue 3 前端，只渲染，不做权限判断
-│   ├── contracts.ts          # 与 Rust serde 逐字段对齐的类型
-│   ├── api.ts                # invoke 薄封装（无 Tauri 时退到 mockBackend）
-│   ├── mockBackend.ts        # 浏览器预览适配层（只搬运 fixture，不重算权限）
-│   ├── fixtures/             # 由 `npm run fixtures` 用真实核心逻辑导出
-│   └── App.vue               # 布局 + 键盘漫游 + 日志
-├── contracts/               # 唯一事实源（只读，AI 不得改）
-│   ├── fields.json          # 机器可读字段集合，门禁数据源
-│   ├── ipc-commands.md      # 命令清单
-│   ├── shell-api.md         # DTO
-│   ├── menu-biz-schema.md   # 菜单/权限/.mtree 布局
-│   ├── error-codes.md       # 错误分类与对外文案
-│   └── lifecycle.md         # 启动/登录/登出/更新/回退时序
-├── .specify/                # 规格层：模板 + 真实 spec（GIVEN/WHEN/THEN）
-├── changes/                 # 契约变更提案（AI 只能往这里写）
-├── tools/                   # 三道门禁
-├── AGENTS.md                # 根规则（另有三份目录级）
+├── apps/
+│   └── shell/                    # 柜面客户端主壳
+│       ├── src/                  # Vue 3，只渲染
+│       ├── src-tauri/            # AppState + IPC 命令
+│       └── dist/                 # 构建产物
+├── packages/
+│   ├── core/                     # 纯 Rust 引擎，无 GUI 依赖，53 个测试
+│   │   ├── model.rs              # 菜单契约与结构校验
+│   │   ├── filter.rs             # filter_visible 递归剪枝
+│   │   ├── pack.rs               # .mtree 编解码 + Ed25519
+│   │   ├── store.rs              # 原子替换 / 版本保留 / 坏包拒绝
+│   │   ├── sync.rs               # 启动回退 / 版本探测
+│   │   └── mock.rs               # mock 服务端：三角色
+│   └── biz-demo/                 # 业务包骨架（P2 加载）
+├── tools/                        # 门禁 + 造包 CLI
+│   ├── paths.mjs                 # 按目录发现，不写死路径
+│   ├── check-boundaries.mjs
+│   ├── check-contracts.mjs
+│   ├── check-ai-rules.mjs
+│   └── mtree-tool/               # 造包 / 验签 / fixtures
+├── contracts/                    # 唯一事实源（只读）
+├── .specify/                     # 规格层
+├── .agents/                      # Agent 角色预设（4 份）
+├── changes/                      # 契约变更提案
 ├── docs/
-│   ├── PLAN.md               # 诉求梳理与路线
-│   ├── constitution.md      # 项目宪法（10 条不可协商原则）
-│   ├── security-boundary.md  # 安全边界（对外统一话术）
-│   └── adr/                  # 5 条架构决策记录
-└── scripts/verify-p0.sh      # P0 自动化验收
+│   ├── PLAN.md                   # 诉求梳理与路线
+│   ├── constitution.md           # 项目宪法（10 条）
+│   ├── team.md                   # 团队分工（AI 主力）
+│   ├── security-boundary.md      # 安全边界与对外话术
+│   └── adr/                      # 6 条架构决策
+└── scripts/verify-p0.sh
 ```
 
 ---
@@ -92,6 +87,7 @@ TellerKit/
 | 目录 | `crates/tellerkit-core/`、`src-tauri/`、`src/` 各一份 | 职责边界、允许依赖、禁止事项、测试命令 |
 | 契约 | [contracts/](contracts/README.md) | 接口/字段/错误码唯一事实源，**只读** |
 | 规格 | [.specify/](.specify/README.md) | 行为规格，AI 可起草不可改验收标准 |
+| 团队 | [docs/team.md](docs/team.md) + [.agents/presets/](.agents/README.md) | 六个角色、四个决策点、每个角色的门禁 |
 
 ### 门禁（唯一裁决入口）
 
@@ -108,12 +104,29 @@ npm run gate
 **三条硬规矩**：AI 不改 `contracts/`（要改先写 `changes/` 提案）；AI 不能自称"测试通过"（只认 exit code）；
 AI 只在 8 步流程的第 3–5 步工作（规格定义和批准合并是人的职责）。
 
+## 团队：AI 主力
+
+六种角色、四个由人保留的决策点，详见 [docs/team.md](docs/team.md)。
+
+| 角色 | 谁 | 产出 | 由谁裁决 |
+|---|---|---|---|
+| 项目负责人 | 人 | 规格、批准契约、合并、发布 | — |
+| Lead Agent | AI | 拆任务、派发、提案 | 人评审 |
+| Schema Agent | AI | 业务包元数据 | `check-ui-schema`（P2） |
+| Engine Agent | AI | Rust/TS 实现 | `check-boundaries` + `cargo test` |
+| Test Agent | AI | 契约测试 | 场景覆盖率 |
+| Review Agent | AI | 评审摘要 | 人 |
+
+角色定义在 [.agents/presets/](.agents/README.md)，W4 接到 DSH 的 subagent preset。
+
 ## 快速开始
 
 ```bash
 npm install
-npm run tauri:dev        # 开发模式（Vite + Tauri）
+npm run tauri:dev        # 开发模式（Vite + Tauri），在 apps/shell 内运行
 ```
+
+根目录是 npm workspaces 的 workspace 根；`npm run <script>` 会转发到 `apps/shell`。
 
 > 裸的 `target/debug/tellerkit` 默认会去找 dev server。要单独运行可执行文件，
 > 需把前端嵌进二进制：`cargo build -p tellerkit --features custom-protocol`。

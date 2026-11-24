@@ -1,4 +1,4 @@
-# crates/tellerkit-core/AGENTS.md
+# packages/core/AGENTS.md
 
 ## 职责
 

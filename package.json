@@ -2,27 +2,18 @@
   "name": "tellerkit",
   "private": true,
   "version": "0.1.0",
-  "type": "module",
+  "description": "柜面终端平台 · monorepo 根",
+  "workspaces": [
+    "apps/shell"
+  ],
   "scripts": {
-    "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build",
-    "preview": "vite preview",
-    "fixtures": "cargo run -q -p mtree-tool -- fixtures src/fixtures",
+    "dev": "npm -w @tellerkit/shell run dev",
+    "build": "npm -w @tellerkit/shell run build",
+    "tauri:dev": "npm -w @tellerkit/shell run tauri:dev",
+    "tauri:build": "npm -w @tellerkit/shell run tauri:build",
+    "fixtures": "cargo run -q -p mtree-tool -- fixtures apps/shell/src/fixtures",
     "test": "cargo test --workspace",
-    "tauri": "tauri",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build",
-    "gate": "node tools/check-boundaries.mjs && node tools/check-contracts.mjs && node tools/check-ai-rules.mjs"
-  },
-  "dependencies": {
-    "@tauri-apps/api": "^2.0.0",
-    "vue": "^3.5.0"
-  },
-  "devDependencies": {
-    "@tauri-apps/cli": "^2.0.0",
-    "@vitejs/plugin-vue": "^5.1.0",
-    "typescript": "^5.6.0",
-    "vite": "^6.0.0",
-    "vue-tsc": "^2.1.0"
+    "gate": "node tools/check-boundaries.mjs && node tools/check-contracts.mjs && node tools/check-ai-rules.mjs",
+    "verify": "npm run gate && cargo test --workspace && npm run build && bash scripts/verify-p0.sh"
   }
 }

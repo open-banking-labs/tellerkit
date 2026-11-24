@@ -1,0 +1,11 @@
+{
+  "id": "biz.demo",
+  "name": "示例业务包",
+  "version": "0.1.0",
+  "minShell": "0.1.0",
+  "maxShell": "0.x",
+  "deps": [],
+  "entry": "ui/entry.ts",
+  "signature": null,
+  "status": "skeleton"
+}

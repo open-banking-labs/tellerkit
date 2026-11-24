@@ -1,0 +1,9 @@
+{
+  "routes": [
+    {
+      "path": "/biz/demo/hello",
+      "module": "ui/entry.ts",
+      "export": "mount"
+    }
+  ]
+}

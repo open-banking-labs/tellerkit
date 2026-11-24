@@ -462,6 +462,8 @@ templates/        # 打印模板（套打）
 | 规格 | ✅ 本次 | `.specify/` 模板 + `000-menu-permission-loop`（补记式） |
 | 提案流程 | ✅ 本次 | `changes/` |
 | CI | ✅ 本次 | `.github/workflows/gate.yml`（与本地同一条命令） |
+| 形态 | ✅ 本次 | monorepo：`apps/shell` + `packages/*` + `tools/`（ADR-0006） |
+| 团队 | ✅ 本次 | `docs/team.md` + `.agents/presets/` 四份角色定义 |
 | 生成层 | ⬜ W2 | 契约→TS 代码生成（`tauri-specta`），消灭手写 `contracts.ts` |
 | 生成层 | ⬜ W3 | spec/tasks → `acceptance_cmd` 绑定与任务派发 |
 | 生成层 | ⬜ W4 | 四个 Subagent Preset：Schema / Engine / Test / Review |
@@ -501,12 +503,17 @@ templates/        # 打印模板（套打）
 **故意只写规则不写字段**：现在加空字段会立刻被门禁当成"契约与实现不一致"，
 反而制造噪音。等 P2 真正加业务包 schema 时一并加。
 
-## 11.7 仓库形态的差距
+## 11.7 仓库形态（已完成迁移）
 
 目标形态（R14/R15）：`apps/shell` + `packages/*` + `contracts/` + `.specify/` + `tools/`。
 
-现状：`src-tauri/` + `src/` + `crates/`，单应用。
+**2026-11-24 已完成迁移**（ADR-0006）：`src/` → `apps/shell/src`、
+`src-tauri/` → `apps/shell/src-tauri`、`crates/tellerkit-core` → `packages/core`、
+`crates/mtree-tool` → `tools/mtree-tool`。
 
-**不现在迁移**：只有一个应用时拆 `apps/` 是纯粹的目录表演。
-触发条件：第一个业务包出现（P2），届时按 `apps/shell` + `packages/<biz>` 重构，
-重构清单写进新的 ADR。
+判断改变了：原计划"等第一个业务包出现再迁"，后来决定**现在迁**，理由是
+门禁作用域写死在旧路径上，新增单位不会被自动覆盖——绿色的可信度会静默下降。
+迁移后门禁改为按目录发现（`tools/paths.mjs`）。
+
+配套产物：`packages/biz-demo/`（`.bizpkg` 形状骨架）、`.agents/presets/`（4 个角色预设）、
+`docs/team.md`（团队分工）。

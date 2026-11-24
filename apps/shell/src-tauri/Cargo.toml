@@ -21,4 +21,4 @@ custom-protocol = ["tauri/custom-protocol"]
 tauri = { version = "2", features = [] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tellerkit-core = { path = "../crates/tellerkit-core" }
+tellerkit-core = { path = "../../../packages/core" }
