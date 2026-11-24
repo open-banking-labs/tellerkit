@@ -20,6 +20,7 @@
     "task": "node tools/run-task.mjs",
     "tasks:check": "node tools/check-tasks.mjs",
     "dispatch": "node tools/dispatch.mjs",
-    "metrics": "node tools/metrics.mjs"
+    "metrics": "node tools/metrics.mjs",
+    "plan": "node tools/plan-parallel.mjs"
   }
 }
