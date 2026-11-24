@@ -465,7 +465,7 @@ templates/        # 打印模板（套打）
 | 形态 | ✅ 本次 | monorepo：`apps/shell` + `packages/*` + `tools/`（ADR-0006） |
 | 团队 | ✅ 本次 | `docs/team.md` + `.agents/presets/` 四份角色定义 |
 | 生成层 | ✅ W2 | ts-rs 生成类型 + 命令名；手写 `contracts.ts` 已删除（ADR-0007） |
-| 生成层 | ⬜ W3 | spec/tasks → `acceptance_cmd` 绑定与任务派发 |
+| 生成层 | ✅ W3 | `tasks.md` 机读格式 + 执行器 + 覆盖率门禁（`001-workbench-task-loop`） |
 | 生成层 | ⬜ W4 | 四个 Subagent Preset：Schema / Engine / Test / Review |
 | 可观测 | ⬜ W5 | 生成追溯 + 轨迹级门禁（谁读了什么、改了什么） |
 
@@ -473,9 +473,9 @@ templates/        # 打印模板（套打）
 
 | 阶段 | 目标 | 完成判据 | 依赖 |
 |---|---|---|---|
-| **W1**（已完成） | 规则 + 契约 + 三道门禁 + CI | `npm run gate` 绿，且能拦住真实违规 | — |
+| **W1**（已完成） | 规则 + 契约 + 门禁 + CI | `npm run gate` 绿，且能拦住真实违规 | — |
 | **W2**（已完成） | 契约即代码：由 Rust 生成 TS 类型与命令名 | 手写类型文件被门禁拦下；拼错命令名编译失败 | W1 |
-| **W3** | 规格即任务：`tasks.md` 每项绑定 `acceptance_cmd` | 派发一个任务能自动跑到裁决 | W2 |
+| **W3**（已完成） | 规格即任务：`tasks.md` 绑定 `acceptance_cmd` 与白名单 | 执行器亲自跑命令、检查越界，三态裁决 | W2 |
 | **W4** | Agent 编排：四个 Preset + 上下文隔离 | 一次生成→裁决→评审闭环 | W3 |
 | **W5** | 可观测：生成追溯 + 质量/成本指标 | 能回答"打回率为什么上升" | W4 |
 

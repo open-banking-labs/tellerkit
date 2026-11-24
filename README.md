@@ -117,6 +117,7 @@ npm run gate
 |---|---|---|
 | `check-boundaries` | 前端推导权限、core 依赖 tauri、命令层 `unwrap()` | `src/mockBackend.ts` 注释里出现 `filter_visible` |
 | `check-contracts` | 契约、Rust、生成物三方不一致；手改生成物 | 手改 `generated/LoginResult.ts`、偷加 `UpdateReport` 字段 |
+| `check-tasks` | `tasks.md` 结构、场景引用、覆盖率 | 引用了不存在的场景、场景无人覆盖 |
 | `check-ai-rules` | 文档缺失、调试残留、端侧 AI 偷偷实现 | `src/App.vue` 里的 `console.log` |
 
 **三条硬规矩**：AI 不改 `contracts/`（要改先写 `changes/` 提案）；AI 不能自称"测试通过"（只认 exit code）；
