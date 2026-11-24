@@ -10,6 +10,7 @@ pub mod pack;
 pub mod perm;
 pub mod store;
 pub mod sync;
+pub mod tx;
 
 pub use filter::MenuView;
 pub use model::{MenuNode, MenuTree, NodeStatus, NodeType};
@@ -17,3 +18,4 @@ pub use pack::{MenuPack, PackError};
 pub use perm::PermSnapshot;
 pub use store::{LoadSource, LoadedMenu, MenuStore, StoreError};
 pub use sync::{boot_load, check_and_update, reload, BootError, BootOutcome, UpdateOutcome};
+pub use tx::{HostError, TxEngine, TxHost, TxRequest, TxResult, TxStatus};
