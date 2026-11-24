@@ -39,10 +39,11 @@
 ## 命令
 
 ```bash
-npm run gate                  # 三道门禁，唯一裁决入口
+npm run gate                  # 四道门禁，唯一裁决入口
 npm run bindings              # 由 Rust 重新生成前端类型（改了 Rust 必须跑）
 npm run test                  # cargo test --workspace
 npm run build                 # 前端类型检查 + 打包（apps/shell）
 bash scripts/verify-p0.sh     # 菜单包端到端验收
+npm run task -- --tasks .specify/specs/<id>/tasks.md --id T-01   # 跑一个任务并裁决
 npm run dev                   # 浏览器预览（无需 Tauri）
 ```

@@ -26,7 +26,7 @@
 ## 验收
 
 ```bash
-npm run gate                       # 三道门禁
+npm run gate                       # 四道门禁
 npm run build                      # vue-tsc + vite（apps/shell 内）
 cargo build -p tellerkit --features custom-protocol
 ```

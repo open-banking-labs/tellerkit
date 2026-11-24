@@ -28,6 +28,17 @@ AI 只在 3–5 步工作。
     tasks.md
 ```
 
+## 执行
+
+```bash
+node tools/check-tasks.mjs                                  # 结构 + 覆盖率
+node tools/run-task.mjs --tasks <tasks.md> --id T-01        # 单任务裁决
+node tools/run-task.mjs --tasks <tasks.md> --all            # 回归（白名单需覆盖整分支）
+```
+
+`run-task` 只认两件事：验收命令的真实 exit code、以及改动是否落在「允许改动」内。
+判定 `OUT_OF_SCOPE` 优先于 `FAIL`——命令跑绿了但改错地方，仍然是失败。
+
 ## 规则
 
 - 每个 scenario 有唯一 ID（`S-01`），`tasks.md` 的每一项必须引用至少一个场景 ID。

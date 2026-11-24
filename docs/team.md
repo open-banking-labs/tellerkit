@@ -51,4 +51,6 @@ AI 主力，人保留四个决策点。这不是"AI 帮忙写代码"，而是按
 
 - 一次一个任务，任务来自 `tasks.md`，每项带 `layer` 与 `acceptance_cmd`。
 - 门禁失败**不自动重试**：一次失败 → 一次分析 → 一次人工决策。
+- 任务验收由 `tools/run-task.mjs` 执行：它亲自跑命令取 exit code，并检查改动是否越出
+  `tasks.md` 的白名单。**AI 的自述不算结论**，`PASS/FAIL/OUT_OF_SCOPE` 三态才算。
 - 新需求写进 TODO，不当场做。

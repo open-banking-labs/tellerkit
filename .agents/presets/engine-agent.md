@@ -38,7 +38,7 @@
 ## 验收
 
 ```bash
-npm run gate          # 三道门禁
+npm run gate          # 四道门禁
 cargo test --workspace
 ```
 
