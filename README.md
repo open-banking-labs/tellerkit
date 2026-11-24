@@ -85,6 +85,10 @@ TellerKit/
 
 ![交易面板](docs/screenshots/tx-panel.png)
 
+**动态水印（P3.3）：网点 + 工号 + 时间铺满可视区，用于拍照溯源**
+
+![水印](docs/screenshots/watermark.png)
+
 ## AI 约束与门禁
 
 这个仓库由人 + AI 共同维护，所以规则必须能被执行，而不只是写在文档里。

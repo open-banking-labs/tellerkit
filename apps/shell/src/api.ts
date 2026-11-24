@@ -16,6 +16,7 @@ import type {
   MenuView,
   PrintReceipt,
   ReloadReport,
+  SessionState,
   TxResult,
   UpdateReport,
 } from "./generated";
@@ -100,6 +101,21 @@ export const api = {
   async txPendingCount(): Promise<number> {
     const m = await mock();
     return m ? m.mockApi.txPendingCount() : call<number>("tx_pending_count");
+  },
+
+  async sessionTouch(): Promise<SessionState> {
+    const m = await mock();
+    return m ? m.mockApi.sessionTouch() : call<SessionState>("session_touch");
+  },
+
+  async sessionTick(): Promise<SessionState> {
+    const m = await mock();
+    return m ? m.mockApi.sessionTick() : call<SessionState>("session_tick");
+  },
+
+  async sessionBlur(): Promise<SessionState> {
+    const m = await mock();
+    return m ? m.mockApi.sessionBlur() : call<SessionState>("session_blur");
   },
 
   async auditTail(limit = 20): Promise<string[]> {

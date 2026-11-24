@@ -16,6 +16,7 @@ use tellerkit_core::device::{PrintReceipt, Voucher};
 use tellerkit_core::filter::{filter_visible, MenuView};
 use tellerkit_core::mock::DemoRole;
 use tellerkit_core::perm::PermSnapshot;
+use tellerkit_core::session::{SessionGuard, SessionPolicy};
 use tellerkit_core::sync;
 use tellerkit_core::tx::{TxHostMode, TxRequest, TxResult};
 use tellerkit_core::LoadSource;
@@ -154,6 +155,88 @@ pub fn audit_tail(limit: usize, state: State<'_, Mutex<AppState>>) -> Result<Vec
         .collect())
 }
 
+/// 会话状态。锁屏是授权状态的一部分，只能由 Rust 持有。
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct SessionState {
+    pub locked: bool,
+    pub reason: Option<String>,
+    #[ts(type = "number")]
+    pub idle_secs: u64,
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn session_state_of(session: &Option<SessionGuard>) -> SessionState {
+    match session {
+        None => SessionState {
+            locked: false,
+            reason: None,
+            idle_secs: 0,
+        },
+        Some(guard) => SessionState {
+            locked: guard.is_locked(),
+            reason: guard.reason().map(|r| r.label().to_string()),
+            idle_secs: guard.idle_secs(now_secs()),
+        },
+    }
+}
+
+/// 记录一次操作。节流由前端做，这里只认最后一次时间。
+#[tauri::command]
+pub fn session_touch(state: State<'_, Mutex<AppState>>) -> Result<SessionState, String> {
+    let mut st = lock(&state)?;
+    if let Some(guard) = st.session.as_mut() {
+        guard.touch(now_secs());
+    }
+    Ok(session_state_of(&st.session))
+}
+
+/// 周期性评估。锁定了就顺手记一条审计——离岗锁定本身也是安全事件。
+#[tauri::command]
+pub fn session_tick(state: State<'_, Mutex<AppState>>) -> Result<SessionState, String> {
+    let mut st = lock(&state)?;
+    let actor = st
+        .snapshot
+        .as_ref()
+        .map(|s| s.teller_no.clone())
+        .unwrap_or_else(|| "unknown".into());
+
+    let locked_reason = st
+        .session
+        .as_mut()
+        .and_then(|guard| guard.evaluate(now_secs()));
+
+    if let Some(reason) = locked_reason {
+        audit(&st, &actor, "session_lock", "", "ok", reason.label());
+    }
+    Ok(session_state_of(&st.session))
+}
+
+/// 窗口失焦。是否锁定由策略决定（`lock_on_blur`）。
+#[tauri::command]
+pub fn session_blur(state: State<'_, Mutex<AppState>>) -> Result<SessionState, String> {
+    let mut st = lock(&state)?;
+    let actor = st
+        .snapshot
+        .as_ref()
+        .map(|s| s.teller_no.clone())
+        .unwrap_or_else(|| "unknown".into());
+    let locked_reason = st
+        .session
+        .as_mut()
+        .and_then(|guard| guard.on_blur(now_secs()));
+    if let Some(reason) = locked_reason {
+        audit(&st, &actor, "session_lock", "", "ok", reason.label());
+    }
+    Ok(session_state_of(&st.session))
+}
+
 fn dev_state_of(st: &AppState) -> DevState {
     DevState {
         offline: st.host.offline,
@@ -244,6 +327,7 @@ pub fn login(role_id: String, state: State<'_, Mutex<AppState>>) -> Result<Login
     let filter_ms = started.elapsed().as_secs_f64() * 1000.0;
 
     st.snapshot = Some(snapshot.clone());
+    st.session = Some(SessionGuard::new(SessionPolicy::default(), now_secs()));
     audit(
         &st,
         &snapshot.teller_no,
@@ -266,6 +350,7 @@ pub fn logout(state: State<'_, Mutex<AppState>>) -> Result<(), String> {
     if let Some(snapshot) = &st.snapshot {
         audit(&st, &snapshot.teller_no, "logout", "", "ok", "");
     }
+    st.session = None;
     st.clear_session();
     Ok(())
 }

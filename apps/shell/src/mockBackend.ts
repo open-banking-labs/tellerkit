@@ -14,6 +14,7 @@ import type {
   MenuView,
   PrintReceipt,
   ReloadReport,
+  SessionState,
   TxResult,
   UpdateReport,
 } from "./generated";
@@ -94,6 +95,19 @@ export const mockApi = {
 
   async txPendingCount(): Promise<number> {
     return 0;
+  },
+
+  /** 浏览器预览不做锁屏：没有真实时钟注入，也不该在预览里演示安全行为。 */
+  async sessionTouch(): Promise<SessionState> {
+    return { locked: false, reason: null, idle_secs: 0 };
+  },
+
+  async sessionTick(): Promise<SessionState> {
+    return { locked: false, reason: null, idle_secs: 0 };
+  },
+
+  async sessionBlur(): Promise<SessionState> {
+    return { locked: false, reason: null, idle_secs: 0 };
   },
 
   async auditTail(_limit = 20): Promise<string[]> {

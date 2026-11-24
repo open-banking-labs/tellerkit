@@ -6,10 +6,12 @@ import { actionLabel, menuNote } from "./labels";
 import type { BootInfo, DevState, LoginResult, MenuView, UpdateReport } from "./generated";
 import type { LogEntry, MenuRow } from "./ui-types";
 import DevPanel from "./components/DevPanel.vue";
+import LockScreen from "./components/LockScreen.vue";
 import LoginView from "./components/LoginView.vue";
 import MenuList from "./components/MenuList.vue";
 import PackageHost from "./components/PackageHost.vue";
 import TxPanel from "./components/TxPanel.vue";
+import Watermark from "./components/Watermark.vue";
 
 type Phase = "booting" | "login" | "ready" | "error";
 
@@ -24,6 +26,10 @@ const busy = ref(false);
 const fatal = ref("");
 const dev = ref<DevState | null>(null);
 const update = ref<UpdateReport | null>(null);
+const locked = ref(false);
+const lockReason = ref<string | null>(null);
+let sessionTimer: number | undefined;
+let lastTouch = 0;
 const expanded = ref<Set<string>>(new Set());
 
 /** 浏览器预览：没有 Tauri 运行时，数据来自 Rust 导出的 fixture。 */
@@ -164,6 +170,8 @@ async function login(roleId: string): Promise<void> {
       `登录 ${res.snapshot.role_label}（${res.snapshot.teller_no}）：可见菜单 ${countMenu(res.menu)} 项，剪枝耗时 ${res.filter_ms.toFixed(3)}ms`,
     );
     scheduleProbe();
+    startSessionWatch();
+    touchSession();
   } catch (err) {
     log("error", `登录失败：${err}`);
   } finally {
@@ -172,6 +180,9 @@ async function login(roleId: string): Promise<void> {
 }
 
 async function logout(): Promise<void> {
+  window.clearInterval(sessionTimer);
+  locked.value = false;
+  lockReason.value = null;
   await api.logout();
   session.value = null;
   selected.value = null;
@@ -386,8 +397,50 @@ function resetLocal(): Promise<void> {
 let uninstallClipboard: (() => void) | null = null;
 let unsubscribeClipboard: (() => void) | null = null;
 
+/** 节流：鼠标移动每秒最多一次 IPC，否则事件比锁屏判定还密。 */
+function touchSession(): void {
+  const now = Date.now();
+  if (now - lastTouch < 1000) return;
+  lastTouch = now;
+  void api.sessionTouch();
+}
+
+/** 每秒评估一次会话状态。锁屏状态由 Rust 持有，前端只负责显示。 */
+function startSessionWatch(): void {
+  window.clearInterval(sessionTimer);
+  sessionTimer = window.setInterval(async () => {
+    try {
+      const state = await api.sessionTick();
+      applySession(state.locked, state.reason);
+    } catch {
+      /* 账本/IPC 抖动不该让界面炸掉，下一拍再试 */
+    }
+  }, 1000);
+}
+
+function applySession(isLocked: boolean, reason: string | null): void {
+  if (isLocked && !locked.value) {
+    log("warn", `会话已锁定：${reason ?? "需要重新验证"}`);
+  }
+  locked.value = isLocked;
+  lockReason.value = reason;
+}
+
+async function onWindowBlur(): Promise<void> {
+  if (!session.value) return;
+  try {
+    const state = await api.sessionBlur();
+    applySession(state.locked, state.reason);
+  } catch {
+    /* 同上 */
+  }
+}
+
 onMounted(() => {
   window.addEventListener("keydown", onKeydown);
+  window.addEventListener("mousemove", touchSession);
+  window.addEventListener("mousedown", touchSession);
+  window.addEventListener("blur", onWindowBlur);
   uninstallClipboard = installClipboardGuard();
   unsubscribeClipboard = onClipboardBlocked((field) => {
     log("warn", `已阻止复制敏感字段：${field}`);
@@ -397,7 +450,11 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.clearTimeout(probeTimer);
+  window.clearInterval(sessionTimer);
   window.removeEventListener("keydown", onKeydown);
+  window.removeEventListener("mousemove", touchSession);
+  window.removeEventListener("mousedown", touchSession);
+  window.removeEventListener("blur", onWindowBlur);
   uninstallClipboard?.();
   unsubscribeClipboard?.();
 });
@@ -522,6 +579,17 @@ onUnmounted(() => {
         @audit="showAudit"
       />
     </div>
+
+    <Watermark
+      v-if="session"
+      :teller-no="session.snapshot.teller_no"
+      :outlet="session.snapshot.outlet_code"
+    />
+    <LockScreen
+      v-if="locked"
+      :reason="lockReason"
+      @reauth="logout"
+    />
 
     <footer class="console">
       <div class="console-head">

@@ -824,3 +824,63 @@ code,
   color: var(--ink);
   margin-bottom: 6px;
 }
+
+/* ---------- 水印与锁屏 ---------- */
+
+.watermark {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 26px 0;
+  padding: 24px;
+  pointer-events: none;
+  overflow: hidden;
+  user-select: none;
+}
+
+.watermark-cell {
+  font-size: 11px;
+  font-family: var(--mono);
+  color: rgba(15, 42, 67, 0.09);
+  transform: rotate(-22deg);
+  white-space: nowrap;
+}
+
+.lockscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(12, 23, 36, 0.92);
+  backdrop-filter: blur(2px);
+}
+
+.lockscreen-card {
+  width: 380px;
+  background: var(--panel);
+  border-radius: 10px;
+  padding: 26px 28px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
+}
+
+.lockscreen-card h1 {
+  margin: 0 0 6px;
+  font-size: 18px;
+}
+
+.lockscreen-reason {
+  margin: 0 0 10px;
+  color: var(--danger);
+  font-size: 12.5px;
+}
+
+.lockscreen-hint {
+  margin: 0 0 18px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}

@@ -82,3 +82,13 @@
 |---|---|---|
 | `job_id` | string | 打印作业号 |
 | `pages` | number | 页数 |
+
+## SessionState
+
+会话锁定状态。前端每秒 tick 一次，靠 `locked` 决定是否盖锁屏。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `locked` | boolean | 是否已锁定 |
+| `reason` | string \| null | 锁定原因的展示文案（未锁时为 null） |
+| `idle_secs` | number | 距上次操作的秒数，用于界面上提示"即将锁定" |
