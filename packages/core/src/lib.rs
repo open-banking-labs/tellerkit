@@ -10,9 +10,11 @@ pub mod model;
 pub mod pack;
 pub mod perm;
 pub mod pkg;
+pub mod reversal;
 pub mod store;
 pub mod sync;
 pub mod tx;
+pub mod update;
 
 pub use device::{
     CardData, DeviceError, DeviceKind, DeviceStatus, Devices, PinBlock, PrintReceipt, Printer,
@@ -23,6 +25,11 @@ pub use model::{MenuNode, MenuTree, NodeStatus, NodeType};
 pub use pack::{MenuPack, PackError};
 pub use perm::PermSnapshot;
 pub use pkg::{BizManifest, BizPackage, LoadPlan, PackageDecision, PkgError, ShellRange, Version};
+pub use reversal::{
+    Authorization, Authorizer, ExceptionKind, ReversalBook, ReversalError, ReversalRecord,
+    ReversalRequest,
+};
 pub use store::{LoadSource, LoadedMenu, MenuStore, StoreError};
 pub use sync::{boot_load, check_and_update, reload, BootError, BootOutcome, UpdateOutcome};
 pub use tx::{DemoTxHost, HostError, TxEngine, TxHost, TxHostMode, TxRequest, TxResult, TxStatus};
+pub use update::{decide, rollout_bucket, Channel, UpdateAction, UpdateCandidate, UpdateDecision};
