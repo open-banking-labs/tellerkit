@@ -6,14 +6,22 @@
 ## 目录
 
 ```
+
 manifest.json       包 ID、版本、兼容范围、依赖、权限声明
 menus.json          菜单增量（挂接到全量树的哪个节点）
 permissions.json    本包声明的权限码（必须与服务端权限体系对齐）
-routes.json         路由 → 前端模块
-transactions.json   交易元数据：交易码、幂等策略、offline_capable、所需设备
+routes.json         路由 → 前端模块（顶层就是一个 map）
+transactions.json   交易元数据数组：交易码、幂等策略、offline_capable、所需设备
 ui/entry.ts         前端入口（ES module）
 templates/          套打模板
 ```
+
+
+## 字段名
+
+所有 JSON 的字段名**与 Rust 结构体的 serde 名一致（snake_case）**：
+`min_shell` / `max_shell` / `offline_capable`，不是 camelCase。
+理由：包格式、契约、IPC 三处用同一套命名，少一次翻译就少一处错。
 
 ## 已经确定的三条约束
 

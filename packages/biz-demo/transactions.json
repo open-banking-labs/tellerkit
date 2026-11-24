@@ -1,13 +1,8 @@
-{
-  "transactions": [
-    {
-      "code": "biz.demo.hello",
-      "name": "示例交易",
-      "idempotency": "client-uuid",
-      "offlineCapable": false,
-      "offlineOverridableBy": "server-only",
-      "devices": [],
-      "authLevel": 0
-    }
-  ]
-}
+[
+  {
+    "code": "biz.demo.hello",
+    "idempotency": "client-uuid",
+    "offline_capable": false,
+    "devices": []
+  }
+]

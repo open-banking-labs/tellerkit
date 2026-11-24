@@ -1,9 +1,3 @@
 {
-  "routes": [
-    {
-      "path": "/biz/demo/hello",
-      "module": "ui/entry.ts",
-      "export": "mount"
-    }
-  ]
+  "/biz/demo/hello": "ui/entry.ts"
 }
