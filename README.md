@@ -213,6 +213,12 @@ cargo run -p mtree-tool -- verify  ~/Library/Application\ Support/com.tellerkit.
 
 ---
 
+## 许可证
+
+[Apache License 2.0](LICENSE) © 2026 Open Banking Labs
+
+含专利授权条款，适合机构与商业场景使用。使用时请保留 `LICENSE` 与版权声明。
+
 ## 文档
 
 - [诉求与计划](docs/PLAN.md)
