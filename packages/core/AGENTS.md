@@ -7,7 +7,7 @@
 
 ## 允许依赖
 
-`serde` · `rmp-serde` · `ed25519-dalek` · `sha2` · `hex` · `thiserror`
+`serde` · `serde_json`（远端报文的 JSON 载荷）· `rmp-serde` · `ed25519-dalek` · `sha2` · `hex` · `thiserror`
 
 ## 禁止
 

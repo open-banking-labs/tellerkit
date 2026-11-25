@@ -1,0 +1,9 @@
+[package]
+name = "tellerkit-transport-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "远端传输适配器：TCP 短连接与最小 HTTP/1.1"
+
+[dependencies]
+tellerkit-core = { path = "../core" }

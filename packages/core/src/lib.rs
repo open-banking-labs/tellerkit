@@ -10,6 +10,7 @@ pub mod model;
 pub mod pack;
 pub mod perm;
 pub mod pkg;
+pub mod remote;
 pub mod replay;
 pub mod reversal;
 pub mod session;
@@ -27,6 +28,10 @@ pub use model::{MenuNode, MenuTree, NodeStatus, NodeType};
 pub use pack::{MenuPack, PackError};
 pub use perm::PermSnapshot;
 pub use pkg::{BizManifest, BizPackage, LoadPlan, PackageDecision, PkgError, ShellRange, Version};
+pub use remote::{
+    Body, Codec, CodecError, Endpoint, EndpointAddr, FieldSpec, FixedWidthCodec, JsonCodec,
+    Request, RouteError, Router, Transport, TransportError, WireMessage,
+};
 pub use replay::{ReplayAttempt, ReplayPolicy, ReplayScheduler};
 pub use reversal::{
     Authorization, Authorizer, ExceptionKind, ReversalBook, ReversalError, ReversalRecord,

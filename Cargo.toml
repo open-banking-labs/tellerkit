@@ -4,6 +4,7 @@ members = [
     "apps/shell/src-tauri",
     "packages/core",
     "packages/journal-sqlite",
+    "packages/transport-net",
     "tools/mtree-tool",
 ]
 
