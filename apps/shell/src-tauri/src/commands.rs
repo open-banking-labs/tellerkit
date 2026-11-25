@@ -16,6 +16,7 @@ use tellerkit_core::tx::{TxRequest, TxResult};
 use tellerkit_core::PermSnapshot;
 
 use crate::app::{LoginOutcome, SessionSlot, ShellApp, SubmitPrep};
+use crate::logging;
 use crate::{AppState, SharedSession};
 
 /// 托管状态的共享句柄。
@@ -42,36 +43,77 @@ fn lock(state: &Mutex<AppState>) -> Result<MutexGuard<'_, AppState>, String> {
 ///
 /// 锁在闭包内部获取、由调用方只拿 `&mut AppState`，是为了让
 /// `MutexGuard` 不可能跨 `await` 存活：跨了就是编译错误，不靠人记。
-async fn with_state<T, F>(state: &State<'_, SharedState>, work: F) -> Result<T, String>
+async fn with_state<T, F>(
+    state: &State<'_, SharedState>,
+    command: &'static str,
+    work: F,
+) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce(&mut AppState) -> Result<T, String> + Send + 'static,
 {
     let shared = Arc::clone(state.inner());
-    blocking(move || {
+    let request_id = logging::new_request_id();
+    let started = std::time::Instant::now();
+    let job_id = request_id.clone();
+    let outcome = blocking(move || {
+        // request_id 放进阻塞池线程的局部作用域：`ShellApp` 里再深的告警日志
+        // 都会自动带上同一个 id，现场按 id 一串就是一次操作的全过程。
+        let _scope = logging::RequestScope::enter(&job_id);
         let mut guard = lock(&shared)?;
         work(&mut guard)
     })
-    .await
+    .await;
+    finish_command(command, &request_id, started, &outcome);
+    outcome
+}
+
+/// 命令收尾日志：失败一律 Warn，慢于阈值记 Info，正常落 Debug（默认不输出）。
+fn finish_command<T>(
+    command: &'static str,
+    request_id: &str,
+    started: std::time::Instant,
+    outcome: &Result<T, String>,
+) {
+    let summary = match outcome {
+        Ok(_) => Ok(()),
+        Err(e) => Err(e.clone()),
+    };
+    logging::command_finished(
+        command,
+        request_id,
+        started.elapsed().as_secs_f64() * 1000.0,
+        &summary,
+    );
 }
 
 /// 会话命令的统一入口：**只锁会话槽**，不碰 `AppState` 锁。
 ///
 /// 这是 P0-10 第 2 步的落点：`session_tick` 每秒一次，如果还要等交易那把锁，
 /// 一笔 3s 的主机调用就能让锁屏判定停摆 3 秒。
-async fn with_session<T, F>(session: &State<'_, SharedSession>, work: F) -> Result<T, String>
+async fn with_session<T, F>(
+    session: &State<'_, SharedSession>,
+    command: &'static str,
+    work: F,
+) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce(&mut SessionSlot) -> T + Send + 'static,
 {
     let shared = Arc::clone(session.inner());
-    blocking(move || {
+    let request_id = logging::new_request_id();
+    let started = std::time::Instant::now();
+    let job_id = request_id.clone();
+    let outcome = blocking(move || {
+        let _scope = logging::RequestScope::enter(&job_id);
         let mut slot = shared
             .lock()
             .map_err(|_| "会话状态已损坏，请重启客户端".to_string())?;
         Ok(work(&mut slot))
     })
-    .await
+    .await;
+    finish_command(command, &request_id, started, &outcome);
+    outcome
 }
 
 /// 把阻塞工作交给 Tokio 阻塞线程池，结果搬回异步上下文。
@@ -185,7 +227,7 @@ pub struct TxException {
 
 #[tauri::command]
 pub async fn tx_exceptions(state: State<'_, SharedState>) -> Result<Vec<TxException>, String> {
-    with_state(&state, |app| {
+    with_state(&state, "tx_exceptions", |app| {
         Ok(ShellApp::new(app)
             .tx_exceptions()
             .into_iter()
@@ -208,7 +250,11 @@ pub async fn request_reversal(
     state: State<'_, SharedState>,
 ) -> Result<String, String> {
     let shared = Arc::clone(state.inner());
-    blocking(move || {
+    let request_id = logging::new_request_id();
+    let started = std::time::Instant::now();
+    let job_id = request_id.clone();
+    let outcome = blocking(move || {
+        let _scope = logging::RequestScope::enter(&job_id);
         // 阶段一（锁内）：会话闸门、写前审计、回捞原交易要素、本地授权并落盘。
         let prepared = {
             let mut guard = lock(&shared)?;
@@ -224,7 +270,9 @@ pub async fn request_reversal(
             lock(&shared).map_err(|e| format!("{e}；主机可能已受理冲正，请立即查账确认"))?;
         ShellApp::new(&mut guard).complete_reversal(&prepared, &host_reference)
     })
-    .await
+    .await;
+    finish_command("request_reversal", &request_id, started, &outcome);
+    outcome
 }
 
 /// 对账聚合行。
@@ -261,7 +309,7 @@ pub struct Reconciliation {
 /// 日终对账：只读本地账本，不打主机。
 #[tauri::command]
 pub async fn tx_reconciliation(state: State<'_, SharedState>) -> Result<Reconciliation, String> {
-    with_state(&state, |app| {
+    with_state(&state, "tx_reconciliation", |app| {
         let view = ShellApp::new(app).reconciliation()?;
         Ok(Reconciliation {
             since: view.since,
@@ -321,7 +369,7 @@ fn mock_handle(st: &AppState) -> Result<&Arc<crate::ports::MockRemote>, String> 
 
 #[tauri::command]
 pub async fn boot(state: State<'_, SharedState>) -> Result<BootInfo, String> {
-    with_state(&state, |app| {
+    with_state(&state, "boot", |app| {
         let summary = ShellApp::new(app).boot()?;
         Ok(BootInfo {
             shell_version: summary.shell_version,
@@ -344,7 +392,7 @@ pub async fn boot(state: State<'_, SharedState>) -> Result<BootInfo, String> {
 
 #[tauri::command]
 pub async fn login(role_id: String, state: State<'_, SharedState>) -> Result<LoginResult, String> {
-    with_state(&state, move |app| {
+    with_state(&state, "login", move |app| {
         let LoginOutcome {
             snapshot,
             menu,
@@ -361,19 +409,26 @@ pub async fn login(role_id: String, state: State<'_, SharedState>) -> Result<Log
 
 #[tauri::command]
 pub async fn logout(state: State<'_, SharedState>) -> Result<(), String> {
-    with_state(&state, |app| ShellApp::new(app).logout()).await
+    with_state(&state, "logout", |app| ShellApp::new(app).logout()).await
 }
 
 #[tauri::command]
 pub async fn current_menu(state: State<'_, SharedState>) -> Result<Vec<MenuView>, String> {
-    with_state(&state, |app| ShellApp::new(app).current_menu()).await
+    with_state(&state, "current_menu", |app| {
+        ShellApp::new(app).current_menu()
+    })
+    .await
 }
 
 /// 后台版本探测：探测 + 按需下载装包那一段不持锁。
 #[tauri::command]
 pub async fn check_update(state: State<'_, SharedState>) -> Result<UpdateReport, String> {
     let shared = Arc::clone(state.inner());
-    blocking(move || {
+    let request_id = logging::new_request_id();
+    let started = std::time::Instant::now();
+    let job_id = request_id.clone();
+    let outcome = blocking(move || {
+        let _scope = logging::RequestScope::enter(&job_id);
         // 阶段一（锁内）：占住"正在检查"标记，交出端口与仓库句柄。
         let prepared = {
             let mut guard = lock(&shared)?;
@@ -395,12 +450,14 @@ pub async fn check_update(state: State<'_, SharedState>) -> Result<UpdateReport,
             note: outcome.note,
         })
     })
-    .await
+    .await;
+    finish_command("check_update", &request_id, started, &outcome);
+    outcome
 }
 
 #[tauri::command]
 pub async fn reload_from_disk(state: State<'_, SharedState>) -> Result<ReloadReport, String> {
-    with_state(&state, |app| {
+    with_state(&state, "reload_from_disk", |app| {
         let outcome = ShellApp::new(app).reload_from_disk()?;
         Ok(ReloadReport {
             menu_version: outcome.menu_version,
@@ -426,7 +483,11 @@ pub async fn submit_transaction(
     state: State<'_, SharedState>,
 ) -> Result<TxResult, String> {
     let shared = Arc::clone(state.inner());
-    blocking(move || {
+    let request_id = logging::new_request_id();
+    let started = std::time::Instant::now();
+    let job_id = request_id.clone();
+    let outcome = blocking(move || {
+        let _scope = logging::RequestScope::enter(&job_id);
         let request = TxRequest {
             tx_code,
             idempotency_key,
@@ -457,7 +518,9 @@ pub async fn submit_transaction(
             .map_err(|e| format!("{e}；主机调用可能已经受理，请立即查账确认，不要重复提交"))?;
         ShellApp::new(&mut guard).complete_submit(prepared, outcome)
     })
-    .await
+    .await;
+    finish_command("submit_transaction", &request_id, started, &outcome);
+    outcome
 }
 
 #[tauri::command]
@@ -468,7 +531,7 @@ pub async fn print_voucher(
     fields: BTreeMap<String, String>,
     state: State<'_, SharedState>,
 ) -> Result<PrintReceipt, String> {
-    with_state(&state, move |app| {
+    with_state(&state, "print_voucher", move |app| {
         let mut voucher = Voucher::new(&template, &tx_code);
         voucher.reference = reference;
         voucher.fields = fields;
@@ -482,7 +545,11 @@ pub async fn print_voucher(
 #[tauri::command]
 pub async fn replay_pending(state: State<'_, SharedState>) -> Result<String, String> {
     let shared = Arc::clone(state.inner());
-    blocking(move || {
+    let request_id = logging::new_request_id();
+    let started = std::time::Instant::now();
+    let job_id = request_id.clone();
+    let outcome = blocking(move || {
+        let _scope = logging::RequestScope::enter(&job_id);
         let prepared = {
             let mut guard = lock(&shared)?;
             ShellApp::new(&mut guard).prepare_replay()?
@@ -493,12 +560,17 @@ pub async fn replay_pending(state: State<'_, SharedState>) -> Result<String, Str
             lock(&shared).map_err(|e| format!("{e}；重放可能已部分提交，请查账确认"))?;
         ShellApp::new(&mut guard).complete_replay(prepared, outcomes)
     })
-    .await
+    .await;
+    finish_command("replay_pending", &request_id, started, &outcome);
+    outcome
 }
 
 #[tauri::command]
 pub async fn tx_pending_count(state: State<'_, SharedState>) -> Result<usize, String> {
-    with_state(&state, |app| Ok(ShellApp::new(app).tx_pending_count())).await
+    with_state(&state, "tx_pending_count", |app| {
+        Ok(ShellApp::new(app).tx_pending_count())
+    })
+    .await
 }
 
 #[tauri::command]
@@ -506,7 +578,10 @@ pub async fn package_module(
     route: String,
     state: State<'_, SharedState>,
 ) -> Result<String, String> {
-    with_state(&state, move |app| ShellApp::new(app).package_module(&route)).await
+    with_state(&state, "package_module", move |app| {
+        ShellApp::new(app).package_module(&route)
+    })
+    .await
 }
 
 // ---------------- 审计与会话 ----------------
@@ -516,22 +591,25 @@ pub async fn audit_tail(
     limit: usize,
     state: State<'_, SharedState>,
 ) -> Result<Vec<String>, String> {
-    with_state(&state, move |app| ShellApp::new(app).audit_tail(limit)).await
+    with_state(&state, "audit_tail", move |app| {
+        ShellApp::new(app).audit_tail(limit)
+    })
+    .await
 }
 
 #[tauri::command]
 pub async fn session_touch(session: State<'_, SharedSession>) -> Result<SessionState, String> {
-    with_session(&session, |slot| slot.touch().into()).await
+    with_session(&session, "session_touch", |slot| slot.touch().into()).await
 }
 
 #[tauri::command]
 pub async fn session_tick(session: State<'_, SharedSession>) -> Result<SessionState, String> {
-    with_session(&session, |slot| slot.tick().into()).await
+    with_session(&session, "session_tick", |slot| slot.tick().into()).await
 }
 
 #[tauri::command]
 pub async fn session_blur(session: State<'_, SharedSession>) -> Result<SessionState, String> {
-    with_session(&session, |slot| slot.blur().into()).await
+    with_session(&session, "session_blur", |slot| slot.blur().into()).await
 }
 
 // ---------------- 演示开关（不发生在真实逻辑里） ----------------
@@ -542,7 +620,7 @@ pub async fn dev_set_offline(
     state: State<'_, SharedState>,
 ) -> Result<DevState, String> {
     dev_only()?;
-    with_state(&state, move |app| {
+    with_state(&state, "dev_set_offline", move |app| {
         mock_handle(app)?.set_offline(offline);
         Ok(dev_state_of(app))
     })
@@ -555,7 +633,7 @@ pub async fn dev_set_tampered(
     state: State<'_, SharedState>,
 ) -> Result<DevState, String> {
     dev_only()?;
-    with_state(&state, move |app| {
+    with_state(&state, "dev_set_tampered", move |app| {
         mock_handle(app)?.set_tampered(tampered);
         Ok(dev_state_of(app))
     })
@@ -565,7 +643,7 @@ pub async fn dev_set_tampered(
 #[tauri::command]
 pub async fn dev_bump_server_version(state: State<'_, SharedState>) -> Result<DevState, String> {
     dev_only()?;
-    with_state(&state, |app| {
+    with_state(&state, "dev_bump_server_version", |app| {
         mock_handle(app)?.bump_menu_version();
         Ok(dev_state_of(app))
     })
@@ -575,7 +653,7 @@ pub async fn dev_bump_server_version(state: State<'_, SharedState>) -> Result<De
 #[tauri::command]
 pub async fn dev_corrupt_local(state: State<'_, SharedState>) -> Result<String, String> {
     dev_only()?;
-    with_state(&state, |app| {
+    with_state(&state, "dev_corrupt_local", |app| {
         let version = app.store.current_version().ok_or("本地没有菜单包可篡改")?;
         let path = app.store.pack_path(version);
         let mut raw = std::fs::read(&path).map_err(|e| format!("读取失败：{e}"))?;
@@ -597,7 +675,7 @@ pub async fn dev_corrupt_local(state: State<'_, SharedState>) -> Result<String, 
 #[tauri::command]
 pub async fn dev_reset_local(state: State<'_, SharedState>) -> Result<DevState, String> {
     dev_only()?;
-    with_state(&state, |app| {
+    with_state(&state, "dev_reset_local", |app| {
         for version in app.store.list_versions() {
             let _ = std::fs::remove_file(app.store.pack_path(version));
         }
