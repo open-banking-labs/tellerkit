@@ -604,7 +604,9 @@ impl<'a> ShellApp<'a> {
     // ---------- 交易 ----------
 
     /// 状态不明的交易：标记待冲正。这是超时后的**唯一**正确处置。
-    fn mark_if_uncertain(&mut self, key: &str, result: &TxResult) {
+    /// `actor` 由调用方传入而不是这里读 `self.actor()`：提交路径的两阶段之间锁是放开的，
+    /// 期间可能换了柜员，用当前身份会把"落盘失败"记到别人头上。
+    fn mark_if_uncertain(&mut self, key: &str, result: &TxResult, actor: &str) {
         if result.status != TxStatus::MarkedForReversal {
             return;
         }
@@ -613,7 +615,7 @@ impl<'a> ShellApp<'a> {
         // 状态不明跨重启必须还在：标记内存成功但落盘失败时，也要让柜员看见告警。
         if let Some(journal) = self.state.audit.as_deref() {
             if let Err(e) = journal.save_exception(key, exception_kind_str(kind)) {
-                self.audit(&self.actor(), "exception", key, "failed", &e);
+                self.audit(actor, "exception", key, "failed", &e);
             }
         }
     }
@@ -783,7 +785,7 @@ impl<'a> ShellApp<'a> {
     ///
     /// 短路路径与走完主机的路径共用这里，避免两条路写出不同的审计口径。
     fn conclude(&mut self, context: &SubmitContext, result: TxResult) -> Result<TxResult, String> {
-        self.mark_if_uncertain(&context.key, &result);
+        self.mark_if_uncertain(&context.key, &result, &context.actor);
         let detail = format!(
             "{}status={:?} amount_cents={}",
             context.origin, result.status, context.amount_cents
