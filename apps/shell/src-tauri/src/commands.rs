@@ -463,9 +463,23 @@ pub async fn print_voucher(
     .await
 }
 
+/// 手动重放一轮：同样是三段式——重放是"多笔 × 3s 超时"，
+/// 整段持锁会把柜员操作挡住 N×3 秒。
 #[tauri::command]
 pub async fn replay_pending(state: State<'_, SharedState>) -> Result<String, String> {
-    with_state(&state, |app| ShellApp::new(app).replay_pending()).await
+    let shared = Arc::clone(state.inner());
+    blocking(move || {
+        let prepared = {
+            let mut guard = lock(&shared)?;
+            ShellApp::new(&mut guard).prepare_replay()?
+        };
+        // 阶段二（不持锁）：逐笔打主机。
+        let outcomes = prepared.call_hosts();
+        let mut guard =
+            lock(&shared).map_err(|e| format!("{e}；重放可能已部分提交，请查账确认"))?;
+        ShellApp::new(&mut guard).complete_replay(prepared, outcomes)
+    })
+    .await
 }
 
 #[tauri::command]

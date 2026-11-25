@@ -220,18 +220,34 @@ fn spawn_replay_worker(handle: tauri::AppHandle) {
 
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(secs));
-        let state = handle.state::<Arc<Mutex<AppState>>>();
-        let Ok(mut guard) = state.lock() else {
+        let shared = Arc::clone(handle.state::<Arc<Mutex<AppState>>>().inner());
+
+        // 阶段一（锁内）：算出本轮到期清单，并把请求取出队列占位。
+        let prepared = {
+            let Ok(mut guard) = shared.lock() else {
+                continue;
+            };
+            // 启动被拒绝时绝不重放：兜底的演示远端不能碰任何挂起交易。
+            if guard.startup_fatal.check().is_err() {
+                continue;
+            }
+            // 会话校验统一走 prepare_replay 里的 require_unlocked：
+            // 未登录/锁定时它会拒绝并写审计，后台线程吞掉 Err 即可（skip 已留痕）。
+            match app::ShellApp::new(&mut guard).prepare_replay() {
+                Ok(prepared) => prepared,
+                Err(_) => continue,
+            }
+        };
+
+        // 阶段二（**不持锁**）：逐笔打主机。重放可能是"多笔 × 3s 超时"，
+        // 整段持锁会让柜员操作、锁屏判定都排在后面。
+        let outcomes = prepared.call_hosts();
+
+        // 阶段三（锁内）：落回执、推进调度表。
+        let Ok(mut guard) = shared.lock() else {
             continue;
         };
-        // 启动被拒绝时绝不重放：兜底的演示远端不能碰任何挂起交易。
-        if guard.startup_fatal.check().is_err() {
-            continue;
-        }
-        // 会话校验统一走 replay_pending 里的 require_unlocked：
-        // 未登录/锁定时它会拒绝并写审计，后台线程吞掉 Err 即可（skip 已留痕）。
-        let mut app = app::ShellApp::new(&mut guard);
-        let _ = app.replay_pending();
+        let _ = app::ShellApp::new(&mut guard).complete_replay(prepared, outcomes);
     });
 }
 

@@ -18,6 +18,7 @@ use tellerkit_core::model::MenuTree;
 use tellerkit_core::pack::pubkey_to_hex;
 use tellerkit_core::pkg;
 use tellerkit_core::recovery::{exception_kind_str, RecoveryJournal};
+use tellerkit_core::replay::ReplayPlan;
 use tellerkit_core::reversal::{Authorization, Authorizer, ExceptionKind, ReversalRequest};
 use tellerkit_core::session::{LockReason, SessionGuard, SessionPolicy};
 use tellerkit_core::sync;
@@ -363,6 +364,27 @@ impl PreparedReversal {
         self.remote
             .reverse(&self.key, &self.reason)
             .map_err(|e| e.to_string())
+    }
+}
+
+/// 重放阶段一的产物：本轮计划 + 主机句柄，只带值。
+pub struct PreparedReplay {
+    plan: ReplayPlan,
+    remote: Arc<dyn RemoteBanking>,
+    now_secs: u64,
+}
+
+impl PreparedReplay {
+    /// 阶段二：逐笔打主机，**不持锁**。
+    ///
+    /// 顺序必须与 `plan.in_flight()` 一致——`apply_once` 按这个顺序对回执。
+    pub fn call_hosts(&self) -> Vec<Result<String, HostError>> {
+        let host: &dyn TxHost = self.remote.as_ref();
+        self.plan
+            .in_flight()
+            .iter()
+            .map(|ticket| host.submit(ticket.request()))
+            .collect()
     }
 }
 
@@ -904,15 +926,34 @@ impl<'a> ShellApp<'a> {
         }
     }
 
-    pub fn replay_pending(&mut self) -> Result<String, String> {
+    /// 重放阶段一（锁内）：会话闸门 + 算出到期清单并把请求**取出**队列（在途占位）。
+    ///
+    /// 取出即占位：这期间后台 worker 或另一次手动重放拿到的是空清单，
+    /// 同一笔不会被两轮重放同时打主机。
+    pub fn prepare_replay(&mut self) -> Result<PreparedReplay, String> {
         self.require_unlocked("replay")?;
-        let remote = Arc::clone(&self.remote);
         let now = self.clock.now_secs();
-        let run = tellerkit_core::replay::run_once(
+        let plan =
+            tellerkit_core::replay::plan_once(&mut self.state.tx, &mut self.state.replay, now);
+        Ok(PreparedReplay {
+            plan,
+            remote: Arc::clone(&self.remote),
+            now_secs: now,
+        })
+    }
+
+    /// 重放阶段三（锁内）：按主机回执落账、推进调度表、落盘进度、写审计。
+    pub fn complete_replay(
+        &mut self,
+        prepared: PreparedReplay,
+        outcomes: Vec<Result<String, HostError>>,
+    ) -> Result<String, String> {
+        let run = tellerkit_core::replay::apply_once(
             &mut self.state.tx,
             &mut self.state.replay,
-            remote.as_ref(),
-            now,
+            prepared.now_secs,
+            prepared.plan,
+            outcomes,
         );
         self.persist_replay_attempts();
         let journal_error = self.state.tx.take_journal_error();
@@ -948,6 +989,16 @@ impl<'a> ShellApp<'a> {
                 format!("，{} 笔已放弃自动重试，需人工处理", run.gave_up.len())
             }
         ))
+    }
+
+    /// 锁内一次做完一轮重放（测试与旧调用点用）。
+    ///
+    /// 命令层与后台 worker 都走三段式：重放是"多笔 × 3s 超时"，
+    /// 整段持锁会把柜员操作挡住 N×3 秒。
+    pub fn replay_pending(&mut self) -> Result<String, String> {
+        let prepared = self.prepare_replay()?;
+        let outcomes = prepared.call_hosts();
+        self.complete_replay(prepared, outcomes)
     }
 
     pub fn tx_pending_count(&self) -> usize {
@@ -1425,6 +1476,51 @@ mod tests {
             guard.reversal.is_confirmed(key),
             "主机回执必须让该笔离开待处置清单"
         );
+    }
+
+    /// P0-10 第 2b-2 步之二：重放的主机调用也发生在锁外。
+    ///
+    /// 后台 worker 每 60 秒跑一轮重放，整轮持锁 = N 笔 × 3s 内柜员操作全排队。
+    #[test]
+    fn replay_host_calls_between_phases_do_not_hold_the_app_state_lock() {
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let mut state = state_with(clock);
+
+        // 先断网挂起一笔（离线可重放），再恢复在线准备重放。
+        let mock = state.mock.as_ref().expect("测试用 mock").clone();
+        mock.set_offline(true);
+        let mut request = TxRequest::new("account.deposit", "k-replay-out-of-lock");
+        request.offline_capable = true;
+        ShellApp::new(&mut state)
+            .submit_transaction(request)
+            .expect("离线应挂起而不是失败");
+        assert_eq!(state.tx.pending_requests().len(), 1, "应有一笔待重放");
+        mock.set_offline(false);
+
+        let shared = std::sync::Mutex::new(state);
+
+        let prepared = {
+            let mut guard = shared.lock().expect("测试里 AppState 锁不应中毒");
+            ShellApp::new(&mut guard)
+                .prepare_replay()
+                .expect("阶段一应成功")
+        };
+
+        // 阶段一结束后锁已释放：逐笔打主机期间别的命令能正常拿锁。
+        assert!(
+            shared.try_lock().is_ok(),
+            "重放的主机调用期间不能还握着 AppState 锁"
+        );
+
+        let outcomes = prepared.call_hosts();
+        assert_eq!(outcomes.len(), 1, "应有一笔要打主机");
+
+        let mut guard = shared.lock().expect("测试里 AppState 锁不应中毒");
+        let summary = ShellApp::new(&mut guard)
+            .complete_replay(prepared, outcomes)
+            .expect("阶段三应成功");
+        assert!(summary.contains("成功 1 笔"), "实际：{summary}");
+        assert_eq!(guard.tx.pending_requests().len(), 0, "成功后应清空队列");
     }
 
     #[test]
