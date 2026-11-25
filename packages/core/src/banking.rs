@@ -32,13 +32,19 @@ pub enum RemoteError {
     Unauthorized,
 }
 
+/// 菜单来源：启动与版本探测只依赖这两件事。
+///
+/// 单独拆出来是因为 `sync` 只需要它——不必把整个 `RemoteBanking` 传进去。
+pub trait MenuSource: Send + Sync {
+    fn probe_menu(&self) -> Result<MenuVersionProbe, RemoteError>;
+    fn download_menu(&self) -> Result<Vec<u8>, RemoteError>;
+}
+
 /// ③ 边界：桌面应用看到的"银行后台"。
 ///
 /// 继承 [`TxHost`]：交易提交与菜单/登录走同一套远端，
 /// 分成两个对象只会让应用层多持有一个引用，没有收益。
-pub trait RemoteBanking: TxHost + Send + Sync {
-    fn probe_menu(&self) -> Result<MenuVersionProbe, RemoteError>;
-    fn download_menu(&self) -> Result<Vec<u8>, RemoteError>;
+pub trait RemoteBanking: MenuSource + TxHost + Send + Sync {
     fn login(&self, role_id: &str, perm_version: u64) -> Result<PermSnapshot, RemoteError>;
 }
 
@@ -125,7 +131,7 @@ fn remote_err(e: RouteError) -> RemoteError {
     }
 }
 
-impl RemoteBanking for RoutedBanking {
+impl MenuSource for RoutedBanking {
     fn probe_menu(&self) -> Result<MenuVersionProbe, RemoteError> {
         let value = self.call_json(&self.services.menu, "probe_menu", serde_json::json!({}))?;
         serde_json::from_value(value)
@@ -146,7 +152,9 @@ impl RemoteBanking for RoutedBanking {
             _ => Err(RemoteError::Rejected("菜单包响应不是二进制".to_string())),
         }
     }
+}
 
+impl RemoteBanking for RoutedBanking {
     fn login(&self, role_id: &str, perm_version: u64) -> Result<PermSnapshot, RemoteError> {
         let value = self.call_json(
             &self.services.auth,

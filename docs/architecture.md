@@ -213,7 +213,8 @@ RoutedBanking → Router → TcpTransport → 假后台（真 socket）
 | 前端门面 | ✅ `platform/client.ts` 接口 + `tauri.ts`/`mock.ts` 两个实现；`check-boundaries` 强制"只有 tauri.ts 能碰 invoke" | — | 完成 |
 | IPC DTO 与领域类型 | ⚠️ 混用 | 保留混用但**记录理由**：DTO 已由 ts-rs 生成并门禁，加映射层会多一层无收益转换 | 低 |
 | 远端契约 | ✅ `contracts/remote-api.md`（含幂等、504 状态不明、错误模型、端点绑定表） | 补 OpenAPI 生成（可选） | 完成 |
-| 远端三层 | ✅ `remote.rs`（Router/Codec/Transport）+ `transport-net`（TCP / 最小 HTTP）+ `banking.rs`（`RoutedBanking`） | TLS、连接池、真实端点配置 | 中 |
+| 远端三层 | ✅ `remote.rs` + `transport-net` + `banking.rs`（`RoutedBanking`） | TLS、连接池 | 中 |
+| 端点配置 | ✅ `endpoint_config.rs`（`TK_ENDPOINTS` / `endpoints.json` → Router），非法配置回退 mock | 配置签名校验（P4） | 完成 |
 
 ## 8. 可检查的规则（要加进门禁）
 

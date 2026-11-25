@@ -117,11 +117,18 @@ impl From<crate::app::SessionView> for SessionState {
 
 fn dev_state_of(st: &AppState) -> DevState {
     DevState {
-        offline: st.remote.offline(),
-        tampered: st.remote.tampered(),
-        server_version: st.remote.menu_version(),
+        offline: st.mock.as_ref().map(|m| m.offline()).unwrap_or(false),
+        tampered: st.mock.as_ref().map(|m| m.tampered()).unwrap_or(false),
+        server_version: st.mock.as_ref().map(|m| m.menu_version()).unwrap_or(0),
         local_versions: st.store.list_versions(),
     }
+}
+
+/// 演示开关只在 mock 模式下有意义：接入真实端点后没有"离线开关"。
+fn mock_handle(st: &AppState) -> Result<&std::sync::Arc<crate::ports::MockRemote>, String> {
+    st.mock
+        .as_ref()
+        .ok_or_else(|| "当前已接入真实端点，演示开关不可用".to_string())
 }
 
 // ---------------- 启动与菜单 ----------------
@@ -289,7 +296,7 @@ pub fn dev_set_offline(
     state: State<'_, Mutex<AppState>>,
 ) -> Result<DevState, String> {
     let st = lock(&state)?;
-    st.remote.set_offline(offline);
+    mock_handle(&st)?.set_offline(offline);
     Ok(dev_state_of(&st))
 }
 
@@ -299,14 +306,14 @@ pub fn dev_set_tampered(
     state: State<'_, Mutex<AppState>>,
 ) -> Result<DevState, String> {
     let st = lock(&state)?;
-    st.remote.set_tampered(tampered);
+    mock_handle(&st)?.set_tampered(tampered);
     Ok(dev_state_of(&st))
 }
 
 #[tauri::command]
 pub fn dev_bump_server_version(state: State<'_, Mutex<AppState>>) -> Result<DevState, String> {
     let st = lock(&state)?;
-    st.remote.bump_menu_version();
+    mock_handle(&st)?.bump_menu_version();
     Ok(dev_state_of(&st))
 }
 

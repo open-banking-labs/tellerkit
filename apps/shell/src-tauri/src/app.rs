@@ -73,7 +73,7 @@ pub struct ShellApp<'a> {
 
 impl<'a> ShellApp<'a> {
     pub fn new(state: &'a mut AppState) -> Self {
-        let remote = Arc::clone(&state.remote) as Arc<dyn RemoteBanking>;
+        let remote = Arc::clone(&state.remote);
         let clock = Arc::clone(&state.clock);
         Self {
             state,
@@ -89,8 +89,8 @@ impl<'a> ShellApp<'a> {
         self.state.store.clean_tmp();
 
         let started = std::time::Instant::now();
-        let menu_host = self.state.remote.menu_host();
-        let outcome = sync::boot_load(&menu_host, &self.state.store).map_err(|e| e.to_string())?;
+        let outcome = sync::boot_load(self.state.remote.as_ref(), &self.state.store)
+            .map_err(|e| e.to_string())?;
         let load_ms = started.elapsed().as_secs_f64() * 1000.0;
 
         let mut tree: MenuTree = outcome.loaded.tree;
@@ -135,7 +135,7 @@ impl<'a> ShellApp<'a> {
             shell_version: env!("CARGO_PKG_VERSION").to_string(),
             pubkey_hex: tellerkit_core::mock::demo_pubkey_hex(),
             appdata_dir: self.state.appdata_dir.clone(),
-            offline: self.state.remote.offline(),
+            offline: self.mock_offline(),
             local_versions: self.state.store.list_versions(),
             menu_version,
             source,
@@ -150,7 +150,7 @@ impl<'a> ShellApp<'a> {
     pub fn login(&mut self, role_id: &str) -> Result<LoginOutcome, String> {
         let role = DemoRole::from_id(role_id).ok_or("未知角色")?;
         let role_index = DemoRole::ALL.iter().position(|r| *r == role).unwrap_or(0) as u64;
-        let perm_version = self.state.remote.menu_version() * 100 + role_index;
+        let perm_version = self.mock_menu_version() * 100 + role_index;
 
         let snapshot = self
             .remote
@@ -203,8 +203,7 @@ impl<'a> ShellApp<'a> {
 
     /// 后台版本探测。菜单版本更新不重置权限快照——两者独立演进。
     pub fn check_update(&mut self) -> Result<sync::UpdateOutcome, String> {
-        let menu_host = self.state.remote.menu_host();
-        let outcome = sync::check_and_update(&menu_host, &self.state.store);
+        let outcome = sync::check_and_update(self.state.remote.as_ref(), &self.state.store);
         if outcome.updated {
             if let Ok(loaded) = self.state.store.load_latest() {
                 self.state.menu = Some(loaded.tree);
@@ -215,8 +214,8 @@ impl<'a> ShellApp<'a> {
 
     /// 演示"本地包被篡改"后的回退：验签失败 → 服务端救回。
     pub fn reload_from_disk(&mut self) -> Result<ReloadOutcome, String> {
-        let menu_host = self.state.remote.menu_host();
-        let outcome = sync::reload(&menu_host, &self.state.store).map_err(|e| e.to_string())?;
+        let outcome = sync::reload(self.state.remote.as_ref(), &self.state.store)
+            .map_err(|e| e.to_string())?;
         let note = outcome.notes.join("；");
         let menu = self
             .state
@@ -449,6 +448,23 @@ impl<'a> ShellApp<'a> {
         }
     }
 
+    /// mock 专属观测：接入真实端点后没有"离线开关"这个概念。
+    fn mock_offline(&self) -> bool {
+        self.state
+            .mock
+            .as_ref()
+            .map(|m| m.offline())
+            .unwrap_or(false)
+    }
+
+    fn mock_menu_version(&self) -> u64 {
+        self.state
+            .mock
+            .as_ref()
+            .map(|m| m.menu_version())
+            .unwrap_or(0)
+    }
+
     fn actor(&self) -> String {
         self.state
             .snapshot
@@ -482,7 +498,16 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tk-app-test-{}", std::process::id()));
         let store =
             tellerkit_core::store::MenuStore::new(dir, tellerkit_core::mock::demo_verifying_key());
-        let mut state = AppState::new(store, "unused".into(), TxEngine::new(), None, None);
+        let mock = Arc::new(crate::ports::MockRemote::default());
+        let mut state = AppState::new(
+            store,
+            "unused".into(),
+            TxEngine::new(),
+            None,
+            None,
+            Arc::clone(&mock) as Arc<dyn RemoteBanking>,
+            Some(mock),
+        );
         state.clock = clock;
         state.session = Some(SessionGuard::new(SessionPolicy::default(), 0));
         state

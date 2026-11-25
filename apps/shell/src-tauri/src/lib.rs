@@ -8,6 +8,7 @@
 
 pub mod app;
 pub mod commands;
+pub mod endpoint_config;
 pub mod ports;
 
 use std::sync::Mutex;
@@ -15,6 +16,7 @@ use std::sync::Mutex;
 use std::sync::Arc;
 
 use std::sync::Arc as StdArc;
+use tellerkit_core::banking::RemoteBanking;
 use tellerkit_core::device::{mock_devices, DevicePolicy, Devices};
 use tellerkit_core::mock::demo_verifying_key;
 use tellerkit_core::model::MenuTree;
@@ -32,7 +34,11 @@ use tauri::Manager;
 /// 应用状态。所有命令都通过 `Mutex<AppState>` 访问，避免 Rust/前端各持一份真相。
 pub struct AppState {
     /// ③ 边界：远端后台。菜单、登录、交易都走这一个端口。
-    pub remote: Arc<ports::MockRemote>,
+    ///
+    /// 默认是内置 mock；配置了 `endpoints.json` 时换成 `RoutedBanking`。
+    pub remote: Arc<dyn RemoteBanking>,
+    /// 演示开关句柄。只有 mock 模式存在；接入真实端点后为 None。
+    pub mock: Option<Arc<ports::MockRemote>>,
     pub store: MenuStore,
     /// 当前登录用户的权限快照。登出/切号必须置空。
     pub snapshot: Option<PermSnapshot>,
@@ -66,9 +72,12 @@ impl AppState {
         tx: TxEngine,
         journal_warning: Option<String>,
         audit: Option<Arc<SqliteJournal>>,
+        remote: Arc<dyn RemoteBanking>,
+        mock: Option<Arc<ports::MockRemote>>,
     ) -> Self {
         Self {
-            remote: Arc::new(ports::MockRemote::default()),
+            remote,
+            mock,
             store,
             snapshot: None,
             menu: None,
@@ -89,6 +98,49 @@ impl AppState {
     pub fn clear_session(&mut self) {
         self.snapshot = None;
     }
+}
+
+/// 选择远端实现：配置了端点就用 `RoutedBanking`，否则回退内置 mock。
+///
+/// 配置非法时**回退而不是崩溃**——柜面宁可跑在演示模式，也不能白屏。
+fn build_remote(
+    appdata: &std::path::Path,
+) -> (
+    Arc<dyn RemoteBanking>,
+    Option<Arc<ports::MockRemote>>,
+    Option<String>,
+) {
+    let path = std::env::var("TK_ENDPOINTS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| appdata.join("endpoints.json"));
+
+    if path.exists() {
+        match endpoint_config::load_router(&path) {
+            Ok(router) => {
+                return (
+                    Arc::new(tellerkit_core::banking::RoutedBanking::new(router)),
+                    None,
+                    Some(format!("已按 {} 接入真实端点", path.display())),
+                )
+            }
+            Err(e) => {
+                eprintln!("端点配置不可用，回退内置 mock：{e}");
+                let mock = Arc::new(ports::MockRemote::default());
+                return (
+                    Arc::clone(&mock) as Arc<dyn RemoteBanking>,
+                    Some(mock),
+                    Some(format!("端点配置无效（{e}），已回退内置 mock")),
+                );
+            }
+        }
+    }
+
+    let mock = Arc::new(ports::MockRemote::default());
+    (
+        Arc::clone(&mock) as Arc<dyn RemoteBanking>,
+        Some(mock),
+        None,
+    )
 }
 
 /// 让同一个 SQLite 连接既做交易账本、又做审计查询。
@@ -135,13 +187,20 @@ pub fn run() {
                     None,
                 ),
             };
+            // 端点配置（changes/008）：有配置就用真实路由，否则回退内置 mock
+            let (remote, mock, remote_note) = build_remote(&appdata);
             let state = AppState::new(
                 store,
                 appdata.display().to_string(),
                 tx,
                 journal_warning,
                 audit,
+                remote,
+                mock,
             );
+            if let Some(note) = remote_note {
+                eprintln!("{note}");
+            }
             app.manage(Mutex::new(state));
             Ok(())
         })
