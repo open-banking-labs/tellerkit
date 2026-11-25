@@ -12,6 +12,7 @@ pub mod commands;
 pub mod config_sig;
 pub mod endpoint_config;
 pub mod instance;
+pub mod logging;
 pub mod ports;
 
 use std::sync::{Arc, Mutex};
@@ -201,7 +202,7 @@ fn build_remote(appdata: &std::path::Path) -> (ports::RemoteChoice, Option<Strin
         Err(reason) => {
             // 进程还要起来：只有起来，才能把"为什么被拒绝"显示成人能读的页面。
             // 业务命令一律先过 `StartupFatal::check`，所以演示远端不会被真正使用。
-            eprintln!("启动被拒绝：{reason}");
+            logging::error("startup", &format!("启动被拒绝：{reason}"));
             let mock = Arc::new(ports::MockRemote::default());
             (
                 ports::RemoteChoice {
@@ -288,6 +289,14 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let appdata = app.path().app_data_dir()?;
+            // 日志尽量早初始化：越早，启动期的问题越有据可查。
+            let log_path = match logging::init(&appdata) {
+                Ok(path) => Some(path),
+                Err(e) => {
+                    eprintln!("日志不可用（{e}）：本会话只能靠 stderr");
+                    None
+                }
+            };
             let menu_dir = appdata.join("menu");
             // P0：公钥内置在客户端；生产环境由构建配置注入，私钥永不进客户端。
             // 注入缺失/非法时直接拒绝启动，不允许静默回退到演示公钥。
@@ -385,7 +394,7 @@ pub fn run() {
                     Some(old) => format!("{old}；{note}"),
                     None => note,
                 });
-                eprintln!("{}", state.journal_warning.as_deref().unwrap_or(""));
+                logging::warn("startup", state.journal_warning.as_deref().unwrap_or(""));
             }
             // 写前意图已落盘但主机结论未记的交易，只能按"状态不明"处置：
             // 标记待冲正并提示查账，绝不自动重发（可能重复入账）。
@@ -401,19 +410,46 @@ pub fn run() {
                             ExceptionKind::MarkedForReversal,
                         ),
                     ) {
-                        eprintln!("遗留意图标记落盘失败：{e}");
+                        logging::warn("startup", &format!("遗留意图标记落盘失败：{e}"));
                     }
                 }
             }
             if !recovered.is_empty() {
-                eprintln!(
-                    "发现 {} 笔在途交易（结论未记），已转入待冲正，请查账确认",
-                    recovered.len()
+                logging::warn(
+                    "startup",
+                    &format!(
+                        "发现 {} 笔在途交易（结论未记），已转入待冲正，请查账确认",
+                        recovered.len()
+                    ),
                 );
             }
             if let Some(note) = remote_note {
-                eprintln!("{note}");
+                logging::info("startup", &note);
             }
+            // 启动摘要：现场第一眼看这一条就知道"哪个版本、连的谁、账本好不好"。
+            logging::info(
+                "startup",
+                &format!(
+                    "客户端启动 version={:?} pubkey={} 账本={} 实例锁={} 数据目录={} 日志={}",
+                    ports::shell_version(),
+                    hex::encode(verifying_key.to_bytes()),
+                    if state.audit.is_some() {
+                        "ok"
+                    } else {
+                        "degraded"
+                    },
+                    if state.instance_lock.is_some() {
+                        "held"
+                    } else {
+                        "not-held"
+                    },
+                    state.appdata_dir,
+                    log_path
+                        .as_deref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "stderr".to_string()),
+                ),
+            );
             // 会话槽单独托管一份：`session_*` 命令按类型直接取，不经过 AppState 锁。
             // 托管的是同一个 Arc（不是副本），所以 require_unlocked 看到的仍是同一份状态。
             app.manage(Arc::clone(&state.session));

@@ -26,6 +26,7 @@ use tellerkit_core::tx::{HostError, SubmitStart, TxHost, TxRequest, TxResult, Tx
 use tellerkit_core::{filter, LoadSource};
 use tellerkit_journal_sqlite::{AuditEvent, SqliteJournal};
 
+use crate::logging;
 use crate::ports::{Clock, RemoteBanking};
 use crate::AppState;
 
@@ -242,7 +243,7 @@ impl SessionSlot {
             at: String::new(),
         };
         if let Err(e) = journal.audit(&event) {
-            eprintln!("审计写入失败：{e}");
+            crate::logging::warn("audit", &format!("锁屏审计写入失败：{e}"));
         }
     }
 }
@@ -1309,7 +1310,7 @@ impl<'a> ShellApp<'a> {
     /// 记一条审计。写不进去不影响业务，但要暴露出来（审计坏了不能静默）。
     fn audit(&self, actor: &str, action: &str, target: &str, result: &str, detail: &str) {
         if let Err(e) = self.audit_write(actor, action, target, result, detail) {
-            eprintln!("审计写入失败：{e}");
+            logging::warn("audit", &format!("审计写入失败（{action}）：{e}"));
         }
     }
 
