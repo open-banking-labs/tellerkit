@@ -37,6 +37,24 @@ for (const file of frontendFiles) {
   }
 }
 
+// 规则 1.5：边界 ① ——只有 platform/tauri.ts 可以接触 Tauri API
+const TAURI_ALLOWED = ["/platform/tauri.ts"];
+for (const file of frontendFiles) {
+  const relPath = posix(file);
+  if (TAURI_ALLOWED.some((suffix) => relPath.endsWith(suffix))) continue;
+  const text = read(file);
+  if (text.includes("@tauri-apps/api")) {
+    errors.push(
+      `${rel(file)} 直接 import 了 @tauri-apps/api：组件只能依赖 platform/client.ts 的 ShellClient 接口。（docs/architecture.md §2）`,
+    );
+  }
+  if (/\binvoke\s*[<(]/.test(text)) {
+    errors.push(
+      `${rel(file)} 直接调用 invoke：IPC 调用只能出现在 platform/tauri.ts 里。`,
+    );
+  }
+}
+
 // 规则 2：核心包不得依赖 tauri（否则无法脱离 GUI 测试）
 for (const dir of packageSrcDirs) {
   const pkgRoot = dir.replace(/\/src$/, "");

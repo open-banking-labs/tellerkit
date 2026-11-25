@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use serde::Serialize;
@@ -18,10 +18,11 @@ use tellerkit_core::mock::DemoRole;
 use tellerkit_core::perm::PermSnapshot;
 use tellerkit_core::session::{SessionGuard, SessionPolicy};
 use tellerkit_core::sync;
-use tellerkit_core::tx::{TxHostMode, TxRequest, TxResult};
+use tellerkit_core::tx::{TxRequest, TxResult};
 use tellerkit_core::LoadSource;
 use tellerkit_journal_sqlite::AuditEvent;
 
+use crate::ports::RemoteBanking;
 use crate::AppState;
 
 fn lock<'a>(
@@ -238,9 +239,9 @@ pub fn session_blur(state: State<'_, Mutex<AppState>>) -> Result<SessionState, S
 
 fn dev_state_of(st: &AppState) -> DevState {
     DevState {
-        offline: st.host.offline,
-        tampered: st.host.serve_tampered,
-        server_version: st.host.menu_version,
+        offline: st.remote.offline(),
+        tampered: st.remote.tampered(),
+        server_version: st.remote.menu_version(),
         local_versions: st.store.list_versions(),
     }
 }
@@ -252,7 +253,7 @@ pub fn boot(state: State<'_, Mutex<AppState>>) -> Result<BootInfo, String> {
     st.store.clean_tmp();
 
     let started = Instant::now();
-    let outcome = sync::boot_load(&st.host, &st.store).map_err(|e| e.to_string())?;
+    let outcome = sync::boot_load(&st.remote.menu_host(), &st.store).map_err(|e| e.to_string())?;
     let load_ms = started.elapsed().as_secs_f64() * 1000.0;
 
     let report = LoadReport {
@@ -300,7 +301,7 @@ pub fn boot(state: State<'_, Mutex<AppState>>) -> Result<BootInfo, String> {
         shell_version: env!("CARGO_PKG_VERSION").to_string(),
         pubkey_hex: tellerkit_core::mock::demo_pubkey_hex(),
         appdata_dir: st.appdata_dir.clone(),
-        offline: st.host.offline,
+        offline: st.remote.offline(),
         local_versions: st.store.list_versions(),
         load: report,
         notes,
@@ -314,11 +315,11 @@ pub fn login(role_id: String, state: State<'_, Mutex<AppState>>) -> Result<Login
     let role = DemoRole::from_id(&role_id).ok_or("未知角色")?;
     // 权限版本与菜单版本独立演进：这里用角色序号造一个稳定值。
     let role_index = DemoRole::ALL.iter().position(|r| *r == role).unwrap_or(0) as u64;
-    let perm_version = st.host.menu_version * 100 + role_index;
+    let perm_version = st.remote.menu_version() * 100 + role_index;
     let snapshot = st
-        .host
+        .remote
         .login(&role_id, perm_version)
-        .ok_or("服务端拒绝了该角色的登录")?;
+        .map_err(|e| e.to_string())?;
 
     let menu = st.menu.as_ref().ok_or("菜单尚未加载，请先完成启动流程")?;
     let started = Instant::now();
@@ -367,7 +368,7 @@ pub fn current_menu(state: State<'_, Mutex<AppState>>) -> Result<Vec<MenuView>, 
 #[tauri::command]
 pub fn check_update(state: State<'_, Mutex<AppState>>) -> Result<UpdateReport, String> {
     let mut st = lock(&state)?;
-    let outcome = sync::check_and_update(&st.host, &st.store);
+    let outcome = sync::check_and_update(&st.remote.menu_host(), &st.store);
 
     if outcome.updated {
         if let Ok(loaded) = st.store.load_latest() {
@@ -388,7 +389,7 @@ pub fn check_update(state: State<'_, Mutex<AppState>>) -> Result<UpdateReport, S
 #[tauri::command]
 pub fn reload_from_disk(state: State<'_, Mutex<AppState>>) -> Result<ReloadReport, String> {
     let mut st = lock(&state)?;
-    let outcome = sync::reload(&st.host, &st.store).map_err(|e| e.to_string())?;
+    let outcome = sync::reload(&st.remote.menu_host(), &st.store).map_err(|e| e.to_string())?;
     let note = outcome.notes.join("；");
     let menu = st
         .snapshot
@@ -438,9 +439,10 @@ pub fn submit_transaction(
     let code = request.tx_code.clone();
 
     let result = {
-        // 拆分借用：引擎要 &mut，主机要 &，两者是同一结构体的不同字段
-        let AppState { tx, tx_host, .. } = &mut *guard;
-        tx.submit(tx_host, request)
+        // 先克隆端口的 Arc，再可变借用状态：两者不能同时借同一个 guard
+        let remote = Arc::clone(&guard.remote);
+        let AppState { tx, .. } = &mut *guard;
+        tx.submit(remote.as_ref(), request)
     };
 
     let detail = format!("status={:?} amount_cents={amount_cents}", result.status);
@@ -530,13 +532,9 @@ pub fn replay_pending(state: State<'_, Mutex<AppState>>) -> Result<String, Strin
         .unwrap_or_else(|| "system".into());
 
     let (run, journal_error) = {
-        let AppState {
-            tx,
-            tx_host,
-            replay,
-            ..
-        } = &mut *guard;
-        let run = tellerkit_core::replay::run_once(tx, replay, tx_host, now_secs());
+        let remote = Arc::clone(&guard.remote);
+        let AppState { tx, replay, .. } = &mut *guard;
+        let run = tellerkit_core::replay::run_once(tx, replay, remote.as_ref(), now_secs());
         (run, tx.take_journal_error())
     };
 
@@ -585,14 +583,8 @@ pub fn dev_set_offline(
     offline: bool,
     state: State<'_, Mutex<AppState>>,
 ) -> Result<DevState, String> {
-    let mut st = lock(&state)?;
-    st.host.offline = offline;
-    // 一个开关同时控制菜单探测与交易主机，演示时不用来回切两处
-    st.tx_host.set_mode(if offline {
-        TxHostMode::Offline
-    } else {
-        TxHostMode::Online
-    });
+    let st = lock(&state)?;
+    st.remote.set_offline(offline);
     Ok(dev_state_of(&st))
 }
 
@@ -601,15 +593,15 @@ pub fn dev_set_tampered(
     tampered: bool,
     state: State<'_, Mutex<AppState>>,
 ) -> Result<DevState, String> {
-    let mut st = lock(&state)?;
-    st.host.serve_tampered = tampered;
+    let st = lock(&state)?;
+    st.remote.set_tampered(tampered);
     Ok(dev_state_of(&st))
 }
 
 #[tauri::command]
 pub fn dev_bump_server_version(state: State<'_, Mutex<AppState>>) -> Result<DevState, String> {
-    let mut st = lock(&state)?;
-    st.host.menu_version += 1;
+    let st = lock(&state)?;
+    st.remote.bump_menu_version();
     Ok(dev_state_of(&st))
 }
 

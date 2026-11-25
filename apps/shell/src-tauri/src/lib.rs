@@ -7,6 +7,7 @@
 //!   版本探测是渲染之后的独立调用。
 
 pub mod commands;
+pub mod ports;
 
 use std::sync::Mutex;
 
@@ -14,14 +15,13 @@ use std::sync::Arc;
 
 use tellerkit_core::device::{mock_devices, DevicePolicy, Devices};
 use tellerkit_core::mock::demo_verifying_key;
-use tellerkit_core::mock::MockHost;
 use tellerkit_core::model::MenuTree;
 use tellerkit_core::perm::PermSnapshot;
 use tellerkit_core::pkg::BizPackage;
 use tellerkit_core::replay::{ReplayPolicy, ReplayScheduler};
 use tellerkit_core::session::SessionGuard;
 use tellerkit_core::store::MenuStore;
-use tellerkit_core::tx::{DemoTxHost, TxEngine};
+use tellerkit_core::tx::TxEngine;
 use tellerkit_core::tx::{TxJournal, TxRequest, TxResult};
 use tellerkit_journal_sqlite::SqliteJournal;
 
@@ -29,7 +29,8 @@ use tauri::Manager;
 
 /// 应用状态。所有命令都通过 `Mutex<AppState>` 访问，避免 Rust/前端各持一份真相。
 pub struct AppState {
-    pub host: MockHost,
+    /// ③ 边界：远端后台。菜单、登录、交易都走这一个端口。
+    pub remote: Arc<ports::MockRemote>,
     pub store: MenuStore,
     /// 当前登录用户的权限快照。登出/切号必须置空。
     pub snapshot: Option<PermSnapshot>,
@@ -41,8 +42,6 @@ pub struct AppState {
     pub journal_warning: Option<String>,
     /// 交易引擎：幂等索引 + 待重放队列（P1.4 会落盘）。
     pub tx: TxEngine,
-    /// 演示主机：可切换在线/离线/业务拒绝。
-    pub tx_host: DemoTxHost,
     /// 设备集合：P1.2 的 mock 适配器，P3 换真机只换这一处构造。
     pub devices: Devices,
     /// 已加载的业务包（按依赖拓扑序）。前端按 route 找模块。
@@ -66,7 +65,7 @@ impl AppState {
         audit: Option<Arc<SqliteJournal>>,
     ) -> Self {
         Self {
-            host: MockHost::default(),
+            remote: Arc::new(ports::MockRemote::default()),
             store,
             snapshot: None,
             menu: None,
@@ -74,7 +73,6 @@ impl AppState {
             appdata_dir,
             journal_warning,
             tx,
-            tx_host: DemoTxHost::default(),
             devices: mock_devices(),
             packages: Vec::new(),
             audit,
