@@ -41,7 +41,7 @@
 | P0-8 | 写前意图与恢复 | A-04 | 先记 intent 再发远端；崩溃后 `in_flight` 转异常；两条自动提交路径都有事务 | ✅ 已完成（结论单事务收口；P0-9 的幂等落盘另计） |
 | P0-9 | 幂等、待冲正、重放落盘 | 规模 P0-02/P0-03 安全 P1-8 B-03 B-02 | 重启后同键拒绝异内容；待冲正清单不丢；重放次数不重置；冲正带原交易要素 | ✅ 已完成（幂等索引/异常/冲正记录/重放 attempts/原交易要素全部落盘并启动读回；PR #42） |
 | P0-10 | IPC 并发 | A-03 规模 P0-01 | 网络调用不持全局锁；锁屏 tick 不被交易阻塞；单飞防重复提交 | 2 |
-| P0-11 | 审计不可抵赖 | B-07 安全 P1-6 规模 P0-10 | 哈希链 + 单调序号；审计失败阻断资金操作；安全事件必审计 | 部分完成（哈希链 + 全表校验已落；审计失败阻断与必审计待集成；外部锚定留批次 4） |
+| P0-11 | 审计不可抵赖 | B-07 安全 P1-6 规模 P0-10 | 哈希链 + 单调序号；审计失败阻断资金操作；安全事件必审计 | ✅ 已完成（哈希链+篡改校验 PR #38；写前闸门+结论审计可失败+登录失败/包加载必留痕 PR #43；外部锚定/服务端存证与配置变更审计留批次 4） |
 | P1-1 | 交付链 | A-05 | 正式 identifier、可安装包、签名、更新器、SBOM、release 流程 | 3 |
 | P1-2 | 单实例与账本排他 | A-07 规模 P0-11 | 第二个实例被拒；同一账本不能被两个进程写 | 3 |
 | P1-3 | 可观测性与灰度 | B-08 规模 P1 | tracing/轮转/诊断包；灰度急停与版本差分可用 | 3 |
@@ -70,6 +70,7 @@ P0-1 命名门禁 + 本台账 + 评审/待办入库。
 - P0-8 依赖 P0-9 的账本表结构，先定“写什么”，再定“怎么恢复”。
 - P0-10 会改所有命令签名，放在状态模型稳定之后，避免返工。
 - P0-11 最后做：审计要记录前面引入的 intent、冲正、包身份，否则链上缺字段。
+- 排序偏离说明（维护规则要求写理由）：实际把 P0-11 拆成两段（PR #38 哈希链、PR #43 收尾）提前到 P0-10 之前完成。理由是两段与状态模型正交、文件集独立且可并行验证；P0-10 要改全部 23 条命令签名，留到最后统一做可避免与 P0-7/P0-8/P0-9 反复冲突返工。P0-11 收尾只依赖 P0-9 的 `RecoveryJournal` 接线，已满足。
 
 ### 批次 3：能交付、能运维
 `P1-1 → P1-2 → P1-3`
@@ -110,6 +111,7 @@ P0-1 命名门禁 + 本台账 + 评审/待办入库。
 12. P0-11 审计哈希链：`seq` 单调 + `prev_hash` + `hash`，链头单独存表以防尾部删行；域分隔长度前缀 SHA256；单事务推进；旧库 ALTER TABLE 迁移保留 legacy 行；`audit_verify()` 可检出字段篡改、删行、重排、链头不符。远端 27 passed / clippy 干净。417 行超阈值按「同一控制点不可拆」裁决接受。
 13. P0-8 写前意图：`TxJournal` 增 `record_intent`/`settle`/`in_flight_intents`；提交前先落意图，失败即拒绝且不触主机；结论单事务写日志 + 清意图 + 入/出队；启动把遗留意图转 `MarkedForReversal` 提示查账，不自动重发。远端 176（core）+ 29（ledger）passed，clippy 干净。经验：`rsync -az` 保留 mtime，切 worktree 后须先 touch 源文件，否则 cargo 误判为最新。
 14. P0-9 状态跨重启持久化：`TxJournal` 增 `load_idempotent`/`save_idempotent`，`cache_result` 统一三处写入；新建 `packages/core/src/recovery.rs`（`RecoveryJournal` 端口 + 异常种类稳定字符串 + 解析），`ReversalBook::restore` / `ReplayScheduler::restore/snapshot`；账本新增 5 张表（tx_idempotent/tx_exception/tx_reversal/replay_attempt/tx_request_elements，要素加密），`record_intent` 单事务同写原交易要素供冲正回捞；主壳启动读回异常/冲正/重放进度，冲正从账本取 `tx_code`/`amount_cents`（查不到即拒绝「请先查账」），重放后落盘 attempts。远端 clippy 干净、54+177+6+32+10 passed / 0 failed；本地 `npm run gate` exit 0。8 文件 662 行超 300 阈值，按「同一控制点不可拆（拆出中间态无法自洽）」裁决接受，PR 描述写明按三段评审。修过的坑：`tx_request` 返回 `Result<Option<TxRequest>, String>`，误写 `Ok(request) => (Some(request), None)` 造成 `Option<Option<TxRequest>>` 双重包装，clippy 报 `no field tx_code on type Option<TxRequest>`。
+15. P0-11 收尾（S-09/S-15，PR #43，单文件 +168/-10）：`apps/shell/src-tauri/src/app.rs` 新增 `require_auditable()` 前置闸门——账本不可用或 `audit_write("attempt","写前留痕")` 失败即在**触达主机之前**拒绝；新增 `audit_write()`/`audit_checked()`，资金类操作结尾不再用吞错的 `audit()`，写失败返回「业务已发生，请立即查账，不要重复提交」。只 gate `submit_transaction` 与 `request_reversal`（S-09 GIVEN 原话）；`replay_pending` 由后台 worker 周期调用不能 gate，`print_voucher`/`package_module` 本期不 gate。闸门**不跑 `audit_verify()`**（全表 O(n) 扫描放热路径会退化成 O(n²)，架构评审 C 类已点名），链头一致性由 `journal.audit()` 写事务内读 `audit_chain_state` 保证。`login()` 包装 `try_login()`，未知角色/主机拒绝/菜单未就绪全部记审计，累计次数取自 `audit_tail` 而非进程内计数；`boot()` 包加载与跳过记 `package_load`；`audit=None` 不再静默。远端 clippy -D warnings + 全量测试 exit 0（57+177+6+32+10 passed），3 个新测试全绿；本地 `npm run gate` exit 0。范围外：配置变更审计（app.rs 无入口，需契约）、`audit_verify()` 接启动自检、打印/包模块/后台重放的闸门、外部锚定与服务端存证。
 
 ## 7. 维护方式
 
