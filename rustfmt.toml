@@ -1,0 +1,2 @@
+# 与 Google Rust Style Guide 一致；rustfmt 默认就是 100，这里显式声明意图。
+max_width = 100

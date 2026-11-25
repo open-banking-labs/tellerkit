@@ -195,6 +195,7 @@ impl TxHost for DemoTxHost {
 }
 
 /// 交易引擎。幂等索引常驻内存；待重放队列可选持久化。
+#[derive(Default)]
 pub struct TxEngine {
     /// 幂等键 -> (载荷签名, 首次结果)。
     ///
@@ -207,17 +208,6 @@ pub struct TxEngine {
     journal: Option<Box<dyn TxJournal>>,
     /// 最近一次记账失败。不改变交易结论，但必须能被上层看见。
     journal_error: Option<String>,
-}
-
-impl Default for TxEngine {
-    fn default() -> Self {
-        Self {
-            idempotent: HashMap::new(),
-            pending: Vec::new(),
-            journal: None,
-            journal_error: None,
-        }
-    }
 }
 
 impl std::fmt::Debug for TxEngine {

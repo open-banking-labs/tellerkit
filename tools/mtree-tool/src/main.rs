@@ -204,7 +204,7 @@ fn render(tmpl: &str, id: &str) -> String {
         let mut earliest: Option<(usize, &str, &str)> = None;
         for (token, value) in &pairs {
             if let Some(pos) = rest.find(*token) {
-                if earliest.map_or(true, |(p, _, _)| pos < p) {
+                if earliest.is_none_or(|(p, _, _)| pos < p) {
                     earliest = Some((pos, *token, value.as_str()));
                 }
             }

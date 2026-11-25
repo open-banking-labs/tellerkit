@@ -579,11 +579,12 @@ mod tests {
     fn wildcard_max_shell_accepts_same_major() {
         let range = ShellRange::parse("0.1.0", "0.x").unwrap();
         assert!(
-            range.accepts(Version {
+            !range.accepts(Version {
                 major: 1,
                 minor: 0,
                 patch: 0
-            }) == false
+            }),
+            "主版本 1 不在 0.x 区间内"
         );
         assert!(range.accepts(Version {
             major: 0,

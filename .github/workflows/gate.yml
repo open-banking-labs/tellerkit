@@ -33,6 +33,9 @@ jobs:
       - name: 核心逻辑测试
         run: cargo test --workspace
 
+      - name: Clippy（-D warnings）
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
       - name: 生成物必须与源码同步
         run: |
           npm run bindings
