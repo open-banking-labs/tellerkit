@@ -85,7 +85,8 @@
 - [ ] 生产代码不 `unwrap()`；必要时 `expect("说明为什么不可能失败")`
 - [ ] 不用 `is_some()` + `unwrap()` 的组合，改用 `if let` / `let else`
 - [ ] 不在 mutex 中毒后 `into_inner()` 取内部数据（**明令禁止**）
-- [ ] 无 `async`（当前架构全同步，引入前须立 ADR）
+- [ ] 无 `async`（架构全同步；**唯一例外是 IPC 命令层**——Tauri 同步命令跑主线程会冻界面，
+      见 [`changes/018`](../changes/018-ipc-async-threading.md)。其余任何一层引入 `async` 前须立 ADR）
 
 ### 4.4 命名与文档
 

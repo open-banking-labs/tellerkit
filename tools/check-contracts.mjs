@@ -162,7 +162,8 @@ for (const t of actualTypes) {
 const declared = [];
 for (const file of rustFiles) {
   const text = read(file);
-  const re = /#\[tauri::command\][\s\S]{0,120}?pub fn (\w+)/g;
+  // 命令可以是同步 `pub fn`，也可以是 `pub async fn`（IPC 阻塞工作要搬出主线程）。
+  const re = /#\[tauri::command\][\s\S]{0,120}?pub (?:async )?fn (\w+)/g;
   let m;
   while ((m = re.exec(text)) !== null) declared.push(m[1]);
 }

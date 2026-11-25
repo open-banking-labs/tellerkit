@@ -1,10 +1,10 @@
-//! L2 IPC 边界：**只做三件事**——加锁、调用例、映射成 DTO。
+//! L2 IPC 边界：**只做四件事**——搬参数、把阻塞工作挪出主线程、调用例、映射成 DTO。
 //!
 //! 编排在 [`crate::app::ShellApp`]；决策在 `tellerkit-core`。
 //! 这里出现 `if 断网 { ... }` 之类的分支就是分层被破坏（docs/architecture.md §9）。
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::Serialize;
 use tauri::State;
@@ -18,9 +18,13 @@ use tellerkit_core::PermSnapshot;
 use crate::app::{LoginOutcome, ShellApp};
 use crate::AppState;
 
-fn lock<'a>(
-    state: &'a State<'_, Mutex<AppState>>,
-) -> Result<std::sync::MutexGuard<'a, AppState>, String> {
+/// 托管状态的共享句柄。
+///
+/// 命令是 `async` 的，阻塞工作要搬进 `spawn_blocking`，而闭包必须 `'static`：
+/// `State<'_, T>` 借的是 `AppHandle`，搬不进闭包，所以先克隆一个 `Arc` 再 move。
+type SharedState = Arc<Mutex<AppState>>;
+
+fn lock(state: &Mutex<AppState>) -> Result<MutexGuard<'_, AppState>, String> {
     let guard = state
         .lock()
         .map_err(|_| "应用状态已损坏，请重启客户端".to_string())?;
@@ -28,6 +32,28 @@ fn lock<'a>(
     // 不能让"降级成功的演示远端"被当成真实通道用。
     guard.startup_fatal.check()?;
     Ok(guard)
+}
+
+/// 在阻塞线程池里持锁执行一段编排，结果搬回异步上下文。
+///
+/// 为什么必须这样：Tauri 2 的**同步**命令在主线程执行，而这里每条命令都可能
+/// 读账本、验签菜单包、或按 3s 超时打主机——放在主线程就是界面冻结
+/// （架构评审 A-03）。改成 `async` 后主线程只做参数搬运与错误文案翻译。
+///
+/// 锁在闭包内部获取、由调用方只拿 `&mut AppState`，是为了让
+/// `MutexGuard` 不可能跨 `await` 存活：跨了就是编译错误，不靠人记。
+async fn with_state<T, F>(state: &State<'_, SharedState>, work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&mut AppState) -> Result<T, String> + Send + 'static,
+{
+    let shared = Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = lock(&shared)?;
+        work(&mut guard)
+    })
+    .await
+    .map_err(|e| format!("后台任务异常退出：{e}"))?
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -129,27 +155,31 @@ pub struct TxException {
 }
 
 #[tauri::command]
-pub fn tx_exceptions(state: State<'_, Mutex<AppState>>) -> Result<Vec<TxException>, String> {
-    let mut guard = lock(&state)?;
-    Ok(ShellApp::new(&mut guard)
-        .tx_exceptions()
-        .into_iter()
-        .map(|v| TxException {
-            key: v.key,
-            kind: v.kind,
-        })
-        .collect())
+pub async fn tx_exceptions(state: State<'_, SharedState>) -> Result<Vec<TxException>, String> {
+    with_state(&state, |app| {
+        Ok(ShellApp::new(app)
+            .tx_exceptions()
+            .into_iter()
+            .map(|v| TxException {
+                key: v.key,
+                kind: v.kind,
+            })
+            .collect())
+    })
+    .await
 }
 
 /// 申请冲正：本地授权 → 主机受理 → 返回主机流水号。
 #[tauri::command]
-pub fn request_reversal(
+pub async fn request_reversal(
     key: String,
     reason: String,
-    state: State<'_, Mutex<AppState>>,
+    state: State<'_, SharedState>,
 ) -> Result<String, String> {
-    let mut guard = lock(&state)?;
-    ShellApp::new(&mut guard).request_reversal(&key, &reason)
+    with_state(&state, move |app| {
+        ShellApp::new(app).request_reversal(&key, &reason)
+    })
+    .await
 }
 
 /// 对账聚合行。
@@ -185,32 +215,34 @@ pub struct Reconciliation {
 
 /// 日终对账：只读本地账本，不打主机。
 #[tauri::command]
-pub fn tx_reconciliation(state: State<'_, Mutex<AppState>>) -> Result<Reconciliation, String> {
-    let mut guard = lock(&state)?;
-    let view = ShellApp::new(&mut guard).reconciliation()?;
-    Ok(Reconciliation {
-        since: view.since,
-        summary: view
-            .summary
-            .into_iter()
-            .map(|r| StatusRow {
-                status: r.status,
-                count: r.count,
-                amount_cents: r.amount_cents,
-            })
-            .collect(),
-        recent: view
-            .recent
-            .into_iter()
-            .map(|r| RecentTx {
-                key: r.key,
-                tx_code: r.tx_code,
-                amount_cents: r.amount_cents,
-                status: r.status,
-                reference: r.reference,
-            })
-            .collect(),
+pub async fn tx_reconciliation(state: State<'_, SharedState>) -> Result<Reconciliation, String> {
+    with_state(&state, |app| {
+        let view = ShellApp::new(app).reconciliation()?;
+        Ok(Reconciliation {
+            since: view.since,
+            summary: view
+                .summary
+                .into_iter()
+                .map(|r| StatusRow {
+                    status: r.status,
+                    count: r.count,
+                    amount_cents: r.amount_cents,
+                })
+                .collect(),
+            recent: view
+                .recent
+                .into_iter()
+                .map(|r| RecentTx {
+                    key: r.key,
+                    tx_code: r.tx_code,
+                    amount_cents: r.amount_cents,
+                    status: r.status,
+                    reference: r.reference,
+                })
+                .collect(),
+        })
     })
+    .await
 }
 
 fn dev_state_of(st: &AppState) -> DevState {
@@ -234,7 +266,7 @@ fn dev_only() -> Result<(), String> {
     }
 }
 
-fn mock_handle(st: &AppState) -> Result<&std::sync::Arc<crate::ports::MockRemote>, String> {
+fn mock_handle(st: &AppState) -> Result<&Arc<crate::ports::MockRemote>, String> {
     st.mock
         .as_ref()
         .ok_or_else(|| "当前已接入真实端点，演示开关不可用".to_string())
@@ -243,230 +275,237 @@ fn mock_handle(st: &AppState) -> Result<&std::sync::Arc<crate::ports::MockRemote
 // ---------------- 启动与菜单 ----------------
 
 #[tauri::command]
-pub fn boot(state: State<'_, Mutex<AppState>>) -> Result<BootInfo, String> {
-    let mut guard = lock(&state)?;
-    let summary = ShellApp::new(&mut guard).boot()?;
-    Ok(BootInfo {
-        shell_version: summary.shell_version,
-        pubkey_hex: summary.pubkey_hex,
-        appdata_dir: summary.appdata_dir,
-        offline: summary.offline,
-        local_versions: summary.local_versions,
-        load: LoadReport {
-            menu_version: summary.menu_version,
-            source: summary.source,
-            menu_nodes: summary.menu_nodes,
-            pack_bytes: summary.pack_bytes,
-            load_ms: summary.load_ms,
-        },
-        notes: summary.notes,
+pub async fn boot(state: State<'_, SharedState>) -> Result<BootInfo, String> {
+    with_state(&state, |app| {
+        let summary = ShellApp::new(app).boot()?;
+        Ok(BootInfo {
+            shell_version: summary.shell_version,
+            pubkey_hex: summary.pubkey_hex,
+            appdata_dir: summary.appdata_dir,
+            offline: summary.offline,
+            local_versions: summary.local_versions,
+            load: LoadReport {
+                menu_version: summary.menu_version,
+                source: summary.source,
+                menu_nodes: summary.menu_nodes,
+                pack_bytes: summary.pack_bytes,
+                load_ms: summary.load_ms,
+            },
+            notes: summary.notes,
+        })
     })
+    .await
 }
 
 #[tauri::command]
-pub fn login(role_id: String, state: State<'_, Mutex<AppState>>) -> Result<LoginResult, String> {
-    let mut guard = lock(&state)?;
-    let LoginOutcome {
-        snapshot,
-        menu,
-        filter_ms,
-    } = ShellApp::new(&mut guard).login(&role_id)?;
-    Ok(LoginResult {
-        snapshot,
-        menu,
-        filter_ms,
+pub async fn login(role_id: String, state: State<'_, SharedState>) -> Result<LoginResult, String> {
+    with_state(&state, move |app| {
+        let LoginOutcome {
+            snapshot,
+            menu,
+            filter_ms,
+        } = ShellApp::new(app).login(&role_id)?;
+        Ok(LoginResult {
+            snapshot,
+            menu,
+            filter_ms,
+        })
     })
+    .await
 }
 
 #[tauri::command]
-pub fn logout(state: State<'_, Mutex<AppState>>) -> Result<(), String> {
-    let mut guard = lock(&state)?;
-    ShellApp::new(&mut guard).logout()
+pub async fn logout(state: State<'_, SharedState>) -> Result<(), String> {
+    with_state(&state, |app| ShellApp::new(app).logout()).await
 }
 
 #[tauri::command]
-pub fn current_menu(state: State<'_, Mutex<AppState>>) -> Result<Vec<MenuView>, String> {
-    let mut guard = lock(&state)?;
-    ShellApp::new(&mut guard).current_menu()
+pub async fn current_menu(state: State<'_, SharedState>) -> Result<Vec<MenuView>, String> {
+    with_state(&state, |app| ShellApp::new(app).current_menu()).await
 }
 
 #[tauri::command]
-pub fn check_update(state: State<'_, Mutex<AppState>>) -> Result<UpdateReport, String> {
-    let mut guard = lock(&state)?;
-    let outcome = ShellApp::new(&mut guard).check_update()?;
-    Ok(UpdateReport {
-        checked: outcome.checked,
-        local: outcome.local.unwrap_or(0),
-        latest: outcome.latest.unwrap_or(0),
-        updated: outcome.updated,
-        note: outcome.note,
+pub async fn check_update(state: State<'_, SharedState>) -> Result<UpdateReport, String> {
+    with_state(&state, |app| {
+        let outcome = ShellApp::new(app).check_update()?;
+        Ok(UpdateReport {
+            checked: outcome.checked,
+            local: outcome.local.unwrap_or(0),
+            latest: outcome.latest.unwrap_or(0),
+            updated: outcome.updated,
+            note: outcome.note,
+        })
     })
+    .await
 }
 
 #[tauri::command]
-pub fn reload_from_disk(state: State<'_, Mutex<AppState>>) -> Result<ReloadReport, String> {
-    let mut guard = lock(&state)?;
-    let outcome = ShellApp::new(&mut guard).reload_from_disk()?;
-    Ok(ReloadReport {
-        menu_version: outcome.menu_version,
-        source: outcome.source,
-        recovered: outcome.verify_failed,
-        verify_failed: outcome.verify_failed,
-        note: outcome.note,
-        menu: outcome.menu,
+pub async fn reload_from_disk(state: State<'_, SharedState>) -> Result<ReloadReport, String> {
+    with_state(&state, |app| {
+        let outcome = ShellApp::new(app).reload_from_disk()?;
+        Ok(ReloadReport {
+            menu_version: outcome.menu_version,
+            source: outcome.source,
+            recovered: outcome.verify_failed,
+            verify_failed: outcome.verify_failed,
+            note: outcome.note,
+            menu: outcome.menu,
+        })
     })
+    .await
 }
 
 // ---------------- 交易 ----------------
 
 #[tauri::command]
-pub fn submit_transaction(
+pub async fn submit_transaction(
     tx_code: String,
     idempotency_key: String,
     amount_cents: i64,
     elements: BTreeMap<String, String>,
     offline_capable: bool,
-    state: State<'_, Mutex<AppState>>,
+    state: State<'_, SharedState>,
 ) -> Result<TxResult, String> {
-    let mut guard = lock(&state)?;
-    ShellApp::new(&mut guard).submit_transaction(TxRequest {
-        tx_code,
-        idempotency_key,
-        amount_cents,
-        elements,
-        offline_capable,
+    with_state(&state, move |app| {
+        ShellApp::new(app).submit_transaction(TxRequest {
+            tx_code,
+            idempotency_key,
+            amount_cents,
+            elements,
+            offline_capable,
+        })
     })
+    .await
 }
 
 #[tauri::command]
-pub fn print_voucher(
+pub async fn print_voucher(
     template: String,
     tx_code: String,
     reference: Option<String>,
     fields: BTreeMap<String, String>,
-    state: State<'_, Mutex<AppState>>,
+    state: State<'_, SharedState>,
 ) -> Result<PrintReceipt, String> {
-    let mut guard = lock(&state)?;
-    let mut voucher = Voucher::new(&template, &tx_code);
-    voucher.reference = reference;
-    voucher.fields = fields;
-    ShellApp::new(&mut guard).print_voucher(voucher)
+    with_state(&state, move |app| {
+        let mut voucher = Voucher::new(&template, &tx_code);
+        voucher.reference = reference;
+        voucher.fields = fields;
+        ShellApp::new(app).print_voucher(voucher)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn replay_pending(state: State<'_, Mutex<AppState>>) -> Result<String, String> {
-    let mut guard = lock(&state)?;
-    ShellApp::new(&mut guard).replay_pending()
+pub async fn replay_pending(state: State<'_, SharedState>) -> Result<String, String> {
+    with_state(&state, |app| ShellApp::new(app).replay_pending()).await
 }
 
 #[tauri::command]
-pub fn tx_pending_count(state: State<'_, Mutex<AppState>>) -> Result<usize, String> {
-    let mut guard = lock(&state)?;
-    Ok(ShellApp::new(&mut guard).tx_pending_count())
+pub async fn tx_pending_count(state: State<'_, SharedState>) -> Result<usize, String> {
+    with_state(&state, |app| Ok(ShellApp::new(app).tx_pending_count())).await
 }
 
 #[tauri::command]
-pub fn package_module(route: String, state: State<'_, Mutex<AppState>>) -> Result<String, String> {
-    let mut guard = lock(&state)?;
-    ShellApp::new(&mut guard).package_module(&route)
+pub async fn package_module(
+    route: String,
+    state: State<'_, SharedState>,
+) -> Result<String, String> {
+    with_state(&state, move |app| ShellApp::new(app).package_module(&route)).await
 }
 
 // ---------------- 审计与会话 ----------------
 
 #[tauri::command]
-pub fn audit_tail(limit: usize, state: State<'_, Mutex<AppState>>) -> Result<Vec<String>, String> {
-    let mut guard = lock(&state)?;
-    ShellApp::new(&mut guard).audit_tail(limit)
+pub async fn audit_tail(
+    limit: usize,
+    state: State<'_, SharedState>,
+) -> Result<Vec<String>, String> {
+    with_state(&state, move |app| ShellApp::new(app).audit_tail(limit)).await
 }
 
 #[tauri::command]
-pub fn session_touch(state: State<'_, Mutex<AppState>>) -> Result<SessionState, String> {
-    let mut guard = lock(&state)?;
-    Ok(ShellApp::new(&mut guard).session_touch().into())
+pub async fn session_touch(state: State<'_, SharedState>) -> Result<SessionState, String> {
+    with_state(&state, |app| Ok(ShellApp::new(app).session_touch().into())).await
 }
 
 #[tauri::command]
-pub fn session_tick(state: State<'_, Mutex<AppState>>) -> Result<SessionState, String> {
-    let mut guard = lock(&state)?;
-    Ok(ShellApp::new(&mut guard).session_tick().into())
+pub async fn session_tick(state: State<'_, SharedState>) -> Result<SessionState, String> {
+    with_state(&state, |app| Ok(ShellApp::new(app).session_tick().into())).await
 }
 
 #[tauri::command]
-pub fn session_blur(state: State<'_, Mutex<AppState>>) -> Result<SessionState, String> {
-    let mut guard = lock(&state)?;
-    Ok(ShellApp::new(&mut guard).session_blur().into())
+pub async fn session_blur(state: State<'_, SharedState>) -> Result<SessionState, String> {
+    with_state(&state, |app| Ok(ShellApp::new(app).session_blur().into())).await
 }
 
 // ---------------- 演示开关（不发生在真实逻辑里） ----------------
 
 #[tauri::command]
-pub fn dev_set_offline(
+pub async fn dev_set_offline(
     offline: bool,
-    state: State<'_, Mutex<AppState>>,
+    state: State<'_, SharedState>,
 ) -> Result<DevState, String> {
     dev_only()?;
-    dev_only()?;
-    dev_only()?;
-    dev_only()?;
-    dev_only()?;
-    let st = lock(&state)?;
-    mock_handle(&st)?.set_offline(offline);
-    Ok(dev_state_of(&st))
+    with_state(&state, move |app| {
+        mock_handle(app)?.set_offline(offline);
+        Ok(dev_state_of(app))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn dev_set_tampered(
+pub async fn dev_set_tampered(
     tampered: bool,
-    state: State<'_, Mutex<AppState>>,
+    state: State<'_, SharedState>,
 ) -> Result<DevState, String> {
     dev_only()?;
-    dev_only()?;
-    dev_only()?;
-    dev_only()?;
-    dev_only()?;
-    let st = lock(&state)?;
-    mock_handle(&st)?.set_tampered(tampered);
-    Ok(dev_state_of(&st))
+    with_state(&state, move |app| {
+        mock_handle(app)?.set_tampered(tampered);
+        Ok(dev_state_of(app))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn dev_bump_server_version(state: State<'_, Mutex<AppState>>) -> Result<DevState, String> {
+pub async fn dev_bump_server_version(state: State<'_, SharedState>) -> Result<DevState, String> {
     dev_only()?;
-    dev_only()?;
-    dev_only()?;
-    dev_only()?;
-    dev_only()?;
-    let st = lock(&state)?;
-    mock_handle(&st)?.bump_menu_version();
-    Ok(dev_state_of(&st))
+    with_state(&state, |app| {
+        mock_handle(app)?.bump_menu_version();
+        Ok(dev_state_of(app))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn dev_corrupt_local(state: State<'_, Mutex<AppState>>) -> Result<String, String> {
+pub async fn dev_corrupt_local(state: State<'_, SharedState>) -> Result<String, String> {
     dev_only()?;
-    let st = lock(&state)?;
-    let version = st.store.current_version().ok_or("本地没有菜单包可篡改")?;
-    let path = st.store.pack_path(version);
-    let mut raw = std::fs::read(&path).map_err(|e| format!("读取失败：{e}"))?;
-    if raw.len() < 8 {
-        return Err("文件太小".into());
-    }
-    let idx = raw.len() / 2;
-    raw[idx] ^= 0xFF;
-    std::fs::write(&path, &raw).map_err(|e| format!("写入失败：{e}"))?;
-    Ok(format!(
-        "已篡改 {}（翻转第 {} 字节），下次加载应验签失败",
-        path.display(),
-        idx
-    ))
+    with_state(&state, |app| {
+        let version = app.store.current_version().ok_or("本地没有菜单包可篡改")?;
+        let path = app.store.pack_path(version);
+        let mut raw = std::fs::read(&path).map_err(|e| format!("读取失败：{e}"))?;
+        if raw.len() < 8 {
+            return Err("文件太小".into());
+        }
+        let idx = raw.len() / 2;
+        raw[idx] ^= 0xFF;
+        std::fs::write(&path, &raw).map_err(|e| format!("写入失败：{e}"))?;
+        Ok(format!(
+            "已篡改 {}（翻转第 {} 字节），下次加载应验签失败",
+            path.display(),
+            idx
+        ))
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn dev_reset_local(state: State<'_, Mutex<AppState>>) -> Result<DevState, String> {
+pub async fn dev_reset_local(state: State<'_, SharedState>) -> Result<DevState, String> {
     dev_only()?;
-    let st = lock(&state)?;
-    for version in st.store.list_versions() {
-        let _ = std::fs::remove_file(st.store.pack_path(version));
-    }
-    Ok(dev_state_of(&st))
+    with_state(&state, |app| {
+        for version in app.store.list_versions() {
+            let _ = std::fs::remove_file(app.store.pack_path(version));
+        }
+        Ok(dev_state_of(app))
+    })
+    .await
 }

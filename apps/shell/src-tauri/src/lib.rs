@@ -13,11 +13,8 @@ pub mod config_sig;
 pub mod endpoint_config;
 pub mod ports;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use std::sync::Arc;
-
-use std::sync::Arc as StdArc;
 use tellerkit_core::banking::RemoteBanking;
 use tellerkit_core::device::{mock_devices, DevicePolicy, Devices};
 use tellerkit_core::mock::demo_verifying_key;
@@ -38,7 +35,10 @@ use bootstrap::StartupFatal;
 use ed25519_dalek::VerifyingKey;
 use tauri::Manager;
 
-/// 应用状态。所有命令都通过 `Mutex<AppState>` 访问，避免 Rust/前端各持一份真相。
+/// 应用状态。所有命令都通过 `Arc<Mutex<AppState>>` 访问，避免 Rust/前端各持一份真相。
+///
+/// 用 `Arc` 而不是裸 `Mutex`：命令是 `async` 的，阻塞工作要搬进
+/// `spawn_blocking`，闭包必须 `'static`，只能先克隆句柄再 move 进去。
 pub struct AppState {
     /// ③ 边界：远端后台。菜单、登录、交易都走这一个端口。
     ///
@@ -72,7 +72,7 @@ pub struct AppState {
     /// 会话锁屏状态。`None` 表示未登录。
     pub session: Option<SessionGuard>,
     /// 时钟端口。锁屏/退避/审计都靠它，注入才能在测试里控制时间。
-    pub clock: StdArc<dyn ports::Clock>,
+    pub clock: Arc<dyn ports::Clock>,
     /// 自动重放调度。挂起交易按退避节奏逐笔重试，不再一次全推。
     pub replay: ReplayScheduler,
     /// 冲正账本：记录"状态不明"的交易与冲正申请。
@@ -109,7 +109,7 @@ impl AppState {
             audit,
             policy: DevicePolicy::allow_mocks(),
             session: None,
-            clock: StdArc::new(ports::SystemClock),
+            clock: Arc::new(ports::SystemClock),
             replay: ReplayScheduler::new(ReplayPolicy::default()),
             reversal: ReversalBook::new(),
             verifying_key,
@@ -194,7 +194,7 @@ fn spawn_replay_worker(handle: tauri::AppHandle) {
 
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(secs));
-        let state = handle.state::<Mutex<AppState>>();
+        let state = handle.state::<Arc<Mutex<AppState>>>();
         let Ok(mut guard) = state.lock() else {
             continue;
         };
@@ -329,7 +329,7 @@ pub fn run() {
             if let Some(note) = remote_note {
                 eprintln!("{note}");
             }
-            app.manage(Mutex::new(state));
+            app.manage(Arc::new(Mutex::new(state)));
             // 必须在 manage 之后：线程的第一次 tick 要能拿到状态
             spawn_replay_worker(app_handle);
             Ok(())
