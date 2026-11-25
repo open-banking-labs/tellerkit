@@ -266,6 +266,39 @@ mod tests {
         (port, handle)
     }
 
+    /// 完整读一个 HTTP 请求：读到头部结束，再按 Content-Length 读满 body。
+    ///
+    /// 只读一次就回包会让客户端在 Windows 上收到 RST（还有未读数据），
+    /// 表现是 "读响应失败" 而不是预期的状态码——测试必须把请求读完。
+    fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            let n = stream.read(&mut chunk).unwrap_or(0);
+            if n == 0 {
+                return buf;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head_end = pos + 4;
+                let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                let content_len = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("Content-Length: "))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                while buf.len() < head_end + content_len {
+                    let n = stream.read(&mut chunk).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+                return buf;
+            }
+        }
+    }
+
     fn tcp_addr(port: u16) -> EndpointAddr {
         EndpointAddr::Tcp {
             host: "127.0.0.1".into(),
@@ -341,33 +374,11 @@ mod tests {
     #[test]
     fn http_transport_sends_post_and_parses_json_reply() {
         let (port, handle) = serve_once(|mut stream| {
-            let mut buf = Vec::new();
-            let mut chunk = [0u8; 1024];
-            // 读到头部结束
-            loop {
-                let n = stream.read(&mut chunk).unwrap();
-                if n == 0 {
-                    break;
-                }
-                buf.extend_from_slice(&chunk[..n]);
-                if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                    let head_end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
-                    let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
-                    let content_len = head
-                        .lines()
-                        .find_map(|l| l.strip_prefix("Content-Length: "))
-                        .and_then(|v| v.trim().parse::<usize>().ok())
-                        .unwrap_or(0);
-                    while buf.len() < head_end + content_len {
-                        let n = stream.read(&mut chunk).unwrap();
-                        if n == 0 {
-                            break;
-                        }
-                        buf.extend_from_slice(&chunk[..n]);
-                    }
-                    break;
-                }
-            }
+            let request = read_http_request(&mut stream);
+            assert!(
+                String::from_utf8_lossy(&request).starts_with("POST /v1/ping HTTP/1.1"),
+                "应把 op 拼进路径"
+            );
             let reply = b"{\"payload\":{\"ok\":true}}";
             let head = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
@@ -403,8 +414,7 @@ mod tests {
     #[test]
     fn http_transport_surfaces_error_status() {
         let (port, handle) = serve_once(|mut stream| {
-            let mut buf = [0u8; 512];
-            let _ = stream.read(&mut buf);
+            let _ = read_http_request(&mut stream);
             let reply = b"{\"code\":\"TX_REJECTED\"}";
             let head = format!(
                 "HTTP/1.1 422 Unprocessable Entity\r\nContent-Length: {}\r\n\r\n",
