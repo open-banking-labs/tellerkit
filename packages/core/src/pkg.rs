@@ -96,6 +96,18 @@ pub enum PkgError {
     InvalidTree(#[from] TreeError),
     #[error("业务包菜单节点必须声明 parent_code 或使用命名空间前缀: {0}")]
     UnnamespacedMenu(String),
+    #[error("业务包 {package} 未声明交易码 {code}，拒绝调用")]
+    UndeclaredTransaction { package: String, code: String },
+    #[error("业务包 {package} 的交易码 {code} 未声明设备能力 {device}")]
+    UndeclaredDevice {
+        package: String,
+        code: String,
+        device: String,
+    },
+    #[error("业务包 {package} 的交易码 {code} 未声明离线能力")]
+    UndeclaredOffline { package: String, code: String },
+    #[error("调用方身份与业务包 {expected} 不匹配（实际 {actual}）")]
+    IdentityMismatch { expected: String, actual: String },
 }
 
 // ---------------- 版本 ----------------
@@ -175,6 +187,55 @@ impl ShellRange {
 // ---------------- 容器 ----------------
 
 impl BizPackage {
+    /// 执行路径上的一次调用鉴权：只放行**包清单声明过**的交易码与设备能力。
+    ///
+    /// 这不是服务端授权：菜单可见性仍由服务端的权限快照决定；这里拦的是
+    /// "包自称能调用清单外的交易码/外设"，因此失败必须是硬错误而不是隐藏菜单。
+    /// `source` 形如 `pkg:<id>`，`menu_code` 是本包命名空间下的菜单 code。
+    pub fn authorize_call(
+        &self,
+        source: &str,
+        menu_code: &str,
+        tx_code: &str,
+        device: Option<&str>,
+        offline_capable: bool,
+    ) -> Result<&TxMeta, PkgError> {
+        let expected_source = format!("pkg:{}", self.manifest.id);
+        let prefix = format!("{}.", self.manifest.id);
+        if source != expected_source
+            || (menu_code != self.manifest.id && !menu_code.starts_with(&prefix))
+        {
+            return Err(PkgError::IdentityMismatch {
+                expected: expected_source,
+                actual: format!("{source} / {menu_code}"),
+            });
+        }
+        let meta = self
+            .transactions
+            .iter()
+            .find(|tx| tx.code == tx_code)
+            .ok_or_else(|| PkgError::UndeclaredTransaction {
+                package: self.manifest.id.clone(),
+                code: tx_code.to_string(),
+            })?;
+        if offline_capable && !meta.offline_capable {
+            return Err(PkgError::UndeclaredOffline {
+                package: self.manifest.id.clone(),
+                code: tx_code.to_string(),
+            });
+        }
+        if let Some(device) = device {
+            if !meta.devices.iter().any(|declared| declared == device) {
+                return Err(PkgError::UndeclaredDevice {
+                    package: self.manifest.id.clone(),
+                    code: tx_code.to_string(),
+                    device: device.to_string(),
+                });
+            }
+        }
+        Ok(meta)
+    }
+
     /// 打包成带签名的 `.bizpkg` 字节流。
     pub fn encode(&self, signing_key: &SigningKey) -> Result<Vec<u8>, PkgError> {
         validate_manifest(&self.manifest)?;
@@ -738,5 +799,78 @@ mod tests {
         let depth = dependency_depth(&plan.ordered);
         assert_eq!(depth["biz.a"], 0);
         assert_eq!(depth["biz.b"], 1);
+    }
+
+    #[test]
+    fn authorize_call_enforces_manifest_declarations() {
+        let mut package = pkg("biz.demo", &[]);
+        package.transactions.push(TxMeta {
+            code: "biz.demo.hello".into(),
+            idempotency: String::new(),
+            offline_capable: false,
+            devices: vec!["printer".into()],
+        });
+        let menu = "biz.demo.home";
+
+        assert!(package
+            .authorize_call(
+                "pkg:biz.demo",
+                menu,
+                "biz.demo.hello",
+                Some("printer"),
+                false
+            )
+            .is_ok());
+        assert!(matches!(
+            package.authorize_call("pkg:biz.demo", menu, "other.code", Some("printer"), false),
+            Err(PkgError::UndeclaredTransaction { .. })
+        ));
+        assert!(matches!(
+            package.authorize_call(
+                "pkg:biz.demo",
+                menu,
+                "biz.demo.hello",
+                Some("card_reader"),
+                false
+            ),
+            Err(PkgError::UndeclaredDevice { .. })
+        ));
+        assert!(matches!(
+            package.authorize_call(
+                "pkg:biz.demo",
+                menu,
+                "biz.demo.hello",
+                Some("printer"),
+                true
+            ),
+            Err(PkgError::UndeclaredOffline { .. })
+        ));
+        assert!(matches!(
+            package.authorize_call("pkg:other", menu, "biz.demo.hello", Some("printer"), false),
+            Err(PkgError::IdentityMismatch { .. })
+        ));
+        assert!(matches!(
+            package.authorize_call(
+                "pkg:biz.demo",
+                "other.home",
+                "biz.demo.hello",
+                Some("printer"),
+                false
+            ),
+            Err(PkgError::IdentityMismatch { .. })
+        ));
+
+        // 设备声明为空时默认拒绝：清单没写的能力不能靠调用方补上。
+        package.transactions[0].devices.clear();
+        assert!(matches!(
+            package.authorize_call(
+                "pkg:biz.demo",
+                menu,
+                "biz.demo.hello",
+                Some("printer"),
+                false
+            ),
+            Err(PkgError::UndeclaredDevice { .. })
+        ));
     }
 }

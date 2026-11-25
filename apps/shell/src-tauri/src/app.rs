@@ -8,6 +8,7 @@
 //! 为什么不用"一个用例一个 struct"：没有第二个实现，结构体只是把函数换了个形状
 //! （见 §6 的三问结论）。
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use tellerkit_core::device::{PrintReceipt, Voucher};
@@ -25,6 +26,50 @@ use tellerkit_journal_sqlite::AuditEvent;
 
 use crate::ports::{Clock, RemoteBanking};
 use crate::AppState;
+
+/// 包身份借用既有 IPC 参数 map 的保留键，不新增契约字段。
+const PKG_IDENTITY_SOURCE_KEY: &str = "__pkg_source";
+const PKG_IDENTITY_CODE_KEY: &str = "__pkg_code";
+/// 打印凭证需要的设备能力；对应 `DeviceKind::Printer` 的 serde 值。
+const PKG_DEVICE_PRINTER: &str = "printer";
+/// 模块源码首行的身份注释，由 `package_module` 写在包代码之前。
+const PKG_IDENTITY_HEADER: &str = "// @tk-package-identity ";
+
+/// 一次包调用的身份：由 Rust 注入、随 IPC 回到 Rust，前端不判定权限。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PackageCall {
+    source: String,
+    code: String,
+    id: String,
+}
+
+impl PackageCall {
+    /// 取出并移除身份键。身份缺失视为普通主壳调用；格式不完整/非法一律拒绝，
+    /// 防止包伪造一个坏 source 来绕过能力校验。
+    fn take_from(fields: &mut BTreeMap<String, String>) -> Result<Option<Self>, String> {
+        let source = fields.remove(PKG_IDENTITY_SOURCE_KEY);
+        let code = fields.remove(PKG_IDENTITY_CODE_KEY);
+        match (source, code) {
+            (None, None) => Ok(None),
+            (Some(source), Some(code)) => {
+                if source.starts_with("pkg:") && source.len() > 4 {
+                    Ok(Some(Self {
+                        id: source[4..].to_string(),
+                        source,
+                        code,
+                    }))
+                } else {
+                    Err(format!("业务包身份格式非法：source={source}"))
+                }
+            }
+            _ => Err("业务包身份不完整：source 与 code 必须同时提供".to_string()),
+        }
+    }
+
+    fn label(&self) -> String {
+        format!("{} / {}", self.source, self.code)
+    }
+}
 
 /// 启动结果。命令层据此拼 `BootInfo`。
 #[derive(Debug, Clone)]
@@ -381,8 +426,24 @@ impl<'a> ShellApp<'a> {
         Ok(host_reference)
     }
 
-    pub fn submit_transaction(&mut self, request: TxRequest) -> Result<TxResult, String> {
+    pub fn submit_transaction(&mut self, mut request: TxRequest) -> Result<TxResult, String> {
         self.require_unlocked("submit_tx")?;
+        let identity = match PackageCall::take_from(&mut request.elements) {
+            Ok(identity) => identity,
+            Err(message) => {
+                self.audit(
+                    &self.actor(),
+                    "package_capability",
+                    &request.tx_code,
+                    "denied",
+                    &message,
+                );
+                return Err(message);
+            }
+        };
+        if let Some(call) = &identity {
+            self.authorize_package_call(call, &request.tx_code, None, request.offline_capable)?;
+        }
         // 契约 lifecycle.md 不变量 7：主机没声明幂等，就不许离线挂起。
         // 挂起意味着"以后一定会重发"，而重发只有服务端按幂等键去重才不会重复入账。
         if request.offline_capable && !self.remote.supports_idempotency() {
@@ -407,7 +468,14 @@ impl<'a> ShellApp<'a> {
         let result = self.state.tx.submit(self.remote.as_ref(), request);
         self.mark_if_uncertain(&key, &result);
 
-        let detail = format!("status={:?} amount_cents={amount_cents}", result.status);
+        let origin = identity
+            .as_ref()
+            .map(|call| format!("pkg={} ", call.label()))
+            .unwrap_or_default();
+        let detail = format!(
+            "{origin}status={:?} amount_cents={amount_cents}",
+            result.status
+        );
         self.audit(
             &actor,
             "submit_tx",
@@ -473,8 +541,24 @@ impl<'a> ShellApp<'a> {
 
     // ---------- 设备 ----------
 
-    pub fn print_voucher(&mut self, voucher: Voucher) -> Result<PrintReceipt, String> {
+    pub fn print_voucher(&mut self, mut voucher: Voucher) -> Result<PrintReceipt, String> {
         self.require_unlocked("print_voucher")?;
+        let identity = match PackageCall::take_from(&mut voucher.fields) {
+            Ok(identity) => identity,
+            Err(message) => {
+                self.audit(
+                    &self.actor(),
+                    "package_capability",
+                    &voucher.tx_code,
+                    "denied",
+                    &message,
+                );
+                return Err(message);
+            }
+        };
+        if let Some(call) = &identity {
+            self.authorize_package_call(call, &voucher.tx_code, Some(PKG_DEVICE_PRINTER), false)?;
+        }
         // 白名单先于动作：未登记的型号连纸都不该动
         self.state
             .devices
@@ -489,12 +573,16 @@ impl<'a> ShellApp<'a> {
             .print(&voucher)
             .map_err(|e| e.to_string());
         let actor = self.actor();
+        let detail = match &identity {
+            Some(call) => format!("pkg={} · {template}", call.label()),
+            None => template.clone(),
+        };
         self.audit(
             &actor,
             "print",
             &tx_code,
             if outcome.is_ok() { "ok" } else { "failed" },
-            &template,
+            &detail,
         );
         outcome
     }
@@ -554,13 +642,70 @@ impl<'a> ShellApp<'a> {
 
     // ---------- 业务包 ----------
 
+    /// 所有包调用的真实放行点：先认包，再按清单校验交易码/设备/离线能力。
+    /// 拒绝一律走既有审计通道，`detail` 里带包身份，便于事后追溯"谁发起的"。
+    fn authorize_package_call(
+        &self,
+        call: &PackageCall,
+        tx_code: &str,
+        device: Option<&str>,
+        offline_capable: bool,
+    ) -> Result<(), String> {
+        let package = match self
+            .state
+            .packages
+            .iter()
+            .find(|p| p.manifest.id == call.id)
+        {
+            Some(package) => package,
+            None => {
+                let detail = format!("来源 {} 的包未加载或验签未通过", call.label());
+                self.audit(
+                    &self.actor(),
+                    "package_capability",
+                    tx_code,
+                    "denied",
+                    &detail,
+                );
+                return Err(format!("{detail}，拒绝调用"));
+            }
+        };
+        match package.authorize_call(&call.source, &call.code, tx_code, device, offline_capable) {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                let detail = format!("{} 调用 {}：{}", call.label(), tx_code, err);
+                self.audit(
+                    &self.actor(),
+                    "package_capability",
+                    tx_code,
+                    "denied",
+                    &detail,
+                );
+                Err(format!("业务包能力校验未通过：{detail}"))
+            }
+        }
+    }
+
+    /// 返回模块源码，并在最前面写入由 Rust 生成的身份注释。
+    /// 包代码自身无法伪造这一行：它在包代码之前，而且是 JS 注释。
     pub fn package_module(&self, route: &str) -> Result<String, String> {
         self.require_unlocked("package_module")?;
         for package in &self.state.packages {
             if let Some(module) = package.routes.get(route) {
-                return package.assets.get(module).cloned().ok_or_else(|| {
+                let source = package.assets.get(module).cloned().ok_or_else(|| {
                     format!("包 {} 的模块 {module} 未随包提供", package.manifest.id)
+                })?;
+                let menu_code = package
+                    .menus
+                    .iter()
+                    .find(|node| node.route.as_deref() == Some(route))
+                    .map(|node| node.code.clone())
+                    .unwrap_or_else(|| package.manifest.id.clone());
+                let identity = serde_json::json!({
+                    "source": format!("pkg:{}", package.manifest.id),
+                    "code": menu_code,
                 });
+                return Ok(format!("{PKG_IDENTITY_HEADER}{identity}\n{source}"));
             }
         }
         Err("该路由不是业务包提供的".to_string())
@@ -848,5 +993,126 @@ mod tests {
             .submit_transaction(TxRequest::new("account.deposit", "k-ok"))
             .expect("解锁后应放行到主机");
         assert_eq!(result.status, TxStatus::Committed);
+    }
+
+    fn identity_fields() -> BTreeMap<String, String> {
+        let mut fields = BTreeMap::new();
+        fields.insert(PKG_IDENTITY_SOURCE_KEY.into(), "pkg:biz.demo".into());
+        fields.insert(PKG_IDENTITY_CODE_KEY.into(), "biz.demo.home".into());
+        fields
+    }
+
+    fn demo_package_with(devices: Vec<String>) -> tellerkit_core::BizPackage {
+        tellerkit_core::BizPackage {
+            manifest: tellerkit_core::BizManifest {
+                id: "biz.demo".into(),
+                name: "示例包".into(),
+                version: "0.1.0".into(),
+                min_shell: "0.1.0".into(),
+                max_shell: "0.x".into(),
+                deps: vec![],
+                entry: "ui/entry.js".into(),
+            },
+            menus: vec![tellerkit_core::MenuNode::page(
+                "biz.demo.home",
+                None,
+                "示例",
+                0,
+            )],
+            permissions: tellerkit_core::pkg::Permissions::default(),
+            routes: BTreeMap::new(),
+            transactions: vec![tellerkit_core::pkg::TxMeta {
+                code: "biz.demo.hello".into(),
+                idempotency: String::new(),
+                offline_capable: false,
+                devices,
+            }],
+            assets: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn package_call_checks_manifest_declared_capability() {
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let mut state = state_with(clock);
+        state
+            .packages
+            .push(demo_package_with(vec!["printer".into()]));
+
+        let mut allowed = TxRequest::new("biz.demo.hello", "k-pkg-ok");
+        allowed.elements = identity_fields();
+        assert!(ShellApp::new(&mut state)
+            .submit_transaction(allowed)
+            .is_ok());
+
+        let mut undeclared = TxRequest::new("biz.other.pay", "k-pkg-bad");
+        undeclared.elements = identity_fields();
+        let err = ShellApp::new(&mut state)
+            .submit_transaction(undeclared)
+            .unwrap_err();
+        assert!(err.contains("未声明交易码"), "实际：{err}");
+
+        let mut offline = TxRequest::new("biz.demo.hello", "k-pkg-offline");
+        offline.elements = identity_fields();
+        offline.offline_capable = true;
+        let err = ShellApp::new(&mut state)
+            .submit_transaction(offline)
+            .unwrap_err();
+        assert!(err.contains("未声明离线能力"), "实际：{err}");
+
+        let mut voucher = Voucher::new("voucher", "biz.demo.hello");
+        voucher.fields = identity_fields();
+        assert!(ShellApp::new(&mut state).print_voucher(voucher).is_ok());
+
+        // 设备声明为空时打印被默认拒绝：清单没写的能力不能靠调用方补上。
+        let mut no_device = demo_package_with(vec![]);
+        no_device.transactions[0].code = "biz.demo.print".into();
+        state.packages.clear();
+        state.packages.push(no_device);
+        let mut voucher = Voucher::new("voucher", "biz.demo.print");
+        voucher.fields = identity_fields();
+        let err = ShellApp::new(&mut state)
+            .print_voucher(voucher)
+            .unwrap_err();
+        assert!(err.contains("未声明设备能力"), "实际：{err}");
+    }
+
+    #[test]
+    fn package_identity_is_validated_before_dispatch() {
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let mut state = state_with(clock);
+
+        let mut missing = TxRequest::new("biz.demo.hello", "k-no-package");
+        missing
+            .elements
+            .insert(PKG_IDENTITY_SOURCE_KEY.into(), "pkg:biz.missing".into());
+        missing
+            .elements
+            .insert(PKG_IDENTITY_CODE_KEY.into(), "biz.missing.home".into());
+        let err = ShellApp::new(&mut state)
+            .submit_transaction(missing)
+            .unwrap_err();
+        assert!(err.contains("未加载或验签未通过"), "实际：{err}");
+
+        let mut partial = TxRequest::new("biz.demo.hello", "k-partial");
+        partial
+            .elements
+            .insert(PKG_IDENTITY_SOURCE_KEY.into(), "pkg:biz.demo".into());
+        let err = ShellApp::new(&mut state)
+            .submit_transaction(partial)
+            .unwrap_err();
+        assert!(err.contains("身份不完整"), "实际：{err}");
+
+        let mut malformed = TxRequest::new("biz.demo.hello", "k-malformed");
+        malformed
+            .elements
+            .insert(PKG_IDENTITY_SOURCE_KEY.into(), "biz.demo".into());
+        malformed
+            .elements
+            .insert(PKG_IDENTITY_CODE_KEY.into(), "biz.demo.home".into());
+        let err = ShellApp::new(&mut state)
+            .submit_transaction(malformed)
+            .unwrap_err();
+        assert!(err.contains("身份格式非法"), "实际：{err}");
     }
 }

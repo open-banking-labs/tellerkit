@@ -2,7 +2,16 @@
 import { onBeforeUnmount, onMounted, ref } from "vue";
 import { api } from "../api";
 import type { MenuView } from "../generated";
-import { mountSandboxed, type SandboxHandle } from "../platform/sandbox";
+import {
+  mountSandboxed,
+  parsePackageIdentity,
+  PKG_IDENTITY_CODE_KEY,
+  PKG_IDENTITY_SOURCE_KEY,
+  type PackageIdentity,
+  type PackageTxArgs,
+  type PackageVoucherArgs,
+  type SandboxHandle,
+} from "../platform/sandbox";
 
 const props = defineProps<{ node: MenuView }>();
 
@@ -14,23 +23,35 @@ let sandbox: SandboxHandle | null = null;
 /**
  * 交给业务包的能力白名单。
  *
- * 沙箱（`platform/sandbox.ts`）负责隔离：包拿不到父页面 DOM、拿不到
- * `localStorage`、发不出网络请求。这里只决定"允许它做什么"。
+ * 沙箱（`platform/sandbox.ts`）负责隔离；包能调用哪些交易码/设备由 Rust 侧
+ * 按清单裁决。这里仅把 Rust 注入的`包身份`转录到既有 IPC 参数 map，
+ * 不自己决定能否提交。
  */
+const identityFields = (
+  fields: Record<string, string> | undefined,
+  identity: PackageIdentity,
+): Record<string, string> => ({
+  ...(fields && typeof fields === "object" ? fields : {}),
+  [PKG_IDENTITY_SOURCE_KEY]: identity.source,
+  [PKG_IDENTITY_CODE_KEY]: identity.code,
+});
+
 const shellApi = {
-  printVoucher: (args: {
-    template: string;
-    txCode: string;
-    reference: string | null;
-    fields: Record<string, string>;
-  }) => api.printVoucher(args),
-  submitTransaction: (args: {
-    txCode: string;
-    idempotencyKey: string;
-    amountCents: number;
-    elements: Record<string, string>;
-    offlineCapable: boolean;
-  }) => api.submitTransaction(args),
+  printVoucher: (args: PackageVoucherArgs | undefined, identity: PackageIdentity) =>
+    api.printVoucher({
+      template: args?.template ?? "",
+      txCode: args?.txCode ?? "",
+      reference: args?.reference ?? null,
+      fields: identityFields(args?.fields, identity),
+    }),
+  submitTransaction: (args: PackageTxArgs | undefined, identity: PackageIdentity) =>
+    api.submitTransaction({
+      txCode: args?.txCode ?? "",
+      idempotencyKey: args?.idempotencyKey ?? "",
+      amountCents: args?.amountCents ?? 0,
+      elements: identityFields(args?.elements, identity),
+      offlineCapable: args?.offlineCapable ?? false,
+    }),
   log: (message: string) => console.info("[pkg]", message),
 };
 
@@ -39,7 +60,12 @@ onMounted(async () => {
     const route = props.node.route ?? "";
     const source = await api.packageModule(route);
     if (!host.value) return;
-    sandbox = mountSandboxed(host.value, source, shellApi);
+    // 真实包身份来自 Rust 写在模块首行的注释；预览 mock 没有注释时退回菜单节点。
+    const identity: PackageIdentity = parsePackageIdentity(source) ?? {
+      source: props.node.source,
+      code: props.node.code,
+    };
+    sandbox = mountSandboxed(host.value, source, shellApi, identity);
     await sandbox.done;
     loaded.value = true;
   } catch (err) {
