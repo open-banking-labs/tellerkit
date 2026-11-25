@@ -34,7 +34,7 @@
 | P0-1 | 命名与提交门禁 | 本轮新增 | `npm run gate` 含银行名检查；pre-commit 同规则；全仓 0 命中 | ✅ 已完成 |
 | P0-2 | 裁决链可信 | C-01 C-02 C-05 | 故意让一条测试红，CI 必红；`--locked` 构建通过；门禁负向用例可复算 | 1 |
 | P0-3 | 文档与事实一致 | C-07 D-02 D-05 D-06 | README 不再声称未实现的能力；伪门禁删除或接真数据；版本单一来源 | 1 |
-| P0-4 | 信任根：生产公钥 | A-01 安全 P0-1 | release 缺 `TK_MENU_PUBKEY_HEX` 构建失败；启动摘要显示实际 key_id；演示公钥不进发布产物 | 1（本轮已做注入，待验证） |
+| P0-4 | 信任根：生产公钥 | A-01 安全 P0-1 | release 缺 `TK_MENU_PUBKEY_HEX` 构建失败（已验证）；启动摘要显示实际公钥指纹；演示公钥不进发布产物（随 P0-5 完成） | 1（注入完成，待 P0-5） |
 | P0-5 | 启动/配置 fail-closed | A-06 安全 P0-2 规模 P0-09 | 配置非法不得回退 mock；release 强制 TLS/签名；致命错误有可读页面 | 1 |
 | P0-6 | 会话与锁屏真门 | A-02 安全 P0-3 | 命令层统一 `require_unlocked`；锁定时资金/打印/冲正/重放调用次数为 0；卸载包宿主 | 1 |
 | P0-7 | 业务包能力执行 | 安全 P0-4 | 未声明的交易码被拒绝；包身份进审计；能力白名单按包而非方法名 | 2 |
@@ -100,7 +100,8 @@ P0-1 命名门禁 + 本台账 + 评审/待办入库。
 2. 新增 `tools/check-bank-names.mjs` + `tools/bank-names.json`，接入 `npm run gate` 与 `.githooks/pre-commit`；锁文件/生成物/哈希行不误伤。
 3. 修复 `check-ai-rules.mjs` 扫描 `.agents/worktrees` 的误报（此前会把别的分支的调试残留算到本仓库）。
 4. 建立本台账；把四份评审/待办纳入版本控制。
-5. 启动 P0-4 第一步：菜单包/业务包验签公钥改为构建期注入，启动摘要报告实际公钥，调试构建才允许演示公钥回退。
+5. P0-4 注入完成：`lib.rs` 增加 `resolve_menu_verifying_key`，release 缺 `TK_MENU_PUBKEY_HEX` 时 `build.rs` 直接 panic；启动摘要报告实际公钥指纹。远端验收：无 key `cargo check --release` exit 101 + 预期文案；带 key 同一命令 exit 0；`cargo test --workspace --locked` 251 passed。
+6. P0-2 锁文件先行：远端解析出的 21 个缺失依赖已固化，CI/verify/远端构建统一 `--locked`；本轮 `--locked` 全量测试通过。
 
 ## 7. 维护方式
 

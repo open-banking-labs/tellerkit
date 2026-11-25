@@ -14,6 +14,7 @@ use tellerkit_core::device::{PrintReceipt, Voucher};
 use tellerkit_core::filter::MenuView;
 use tellerkit_core::mock::DemoRole;
 use tellerkit_core::model::MenuTree;
+use tellerkit_core::pack::pubkey_to_hex;
 use tellerkit_core::pkg;
 use tellerkit_core::reversal::{Authorization, Authorizer, ExceptionKind, ReversalRequest};
 use tellerkit_core::session::{SessionGuard, SessionPolicy};
@@ -161,7 +162,7 @@ impl<'a> ShellApp<'a> {
         let pkg_dir = std::path::Path::new(&self.state.appdata_dir).join("packages");
         let (plan, failures) = pkg::scan_dir(
             &pkg_dir,
-            &tellerkit_core::mock::demo_verifying_key(),
+            &self.state.verifying_key,
             crate::ports::shell_version(),
         );
         let conflicts = pkg::merge_packages(&mut tree, &plan.ordered);
@@ -188,7 +189,7 @@ impl<'a> ShellApp<'a> {
 
         Ok(BootSummary {
             shell_version: env!("CARGO_PKG_VERSION").to_string(),
-            pubkey_hex: tellerkit_core::mock::demo_pubkey_hex(),
+            pubkey_hex: pubkey_to_hex(&self.state.verifying_key),
             appdata_dir: self.state.appdata_dir.clone(),
             offline: self.mock_offline(),
             local_versions: self.state.store.list_versions(),
@@ -672,8 +673,11 @@ mod tests {
             TxEngine::new(),
             None,
             None,
-            Arc::clone(&mock) as Arc<dyn RemoteBanking>,
-            Some(mock),
+            crate::ports::RemoteChoice {
+                remote: Arc::clone(&mock) as Arc<dyn RemoteBanking>,
+                mock: Some(mock),
+            },
+            tellerkit_core::mock::demo_verifying_key(),
         );
         state.clock = clock;
         state.session = Some(SessionGuard::new(SessionPolicy::default(), 0));

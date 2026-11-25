@@ -21,6 +21,7 @@ use tellerkit_core::banking::RemoteBanking;
 use tellerkit_core::device::{mock_devices, DevicePolicy, Devices};
 use tellerkit_core::mock::demo_verifying_key;
 use tellerkit_core::model::MenuTree;
+use tellerkit_core::pack::pubkey_from_hex;
 use tellerkit_core::perm::PermSnapshot;
 use tellerkit_core::pkg::BizPackage;
 use tellerkit_core::replay::{ReplayPolicy, ReplayScheduler};
@@ -31,6 +32,7 @@ use tellerkit_core::tx::TxEngine;
 use tellerkit_core::tx::{TxJournal, TxRequest, TxResult};
 use tellerkit_journal_sqlite::SqliteJournal;
 
+use ed25519_dalek::VerifyingKey;
 use tauri::Manager;
 
 /// 应用状态。所有命令都通过 `Mutex<AppState>` 访问，避免 Rust/前端各持一份真相。
@@ -67,6 +69,10 @@ pub struct AppState {
     pub replay: ReplayScheduler,
     /// 冲正账本：记录"状态不明"的交易与冲正申请。
     pub reversal: ReversalBook,
+    /// 菜单包 / 业务包的验签公钥。
+    ///
+    /// 生产由构建期 `TK_MENU_PUBKEY_HEX` 注入；调试构建没有注入时才回退演示公钥。
+    pub verifying_key: VerifyingKey,
 }
 
 impl AppState {
@@ -76,9 +82,10 @@ impl AppState {
         tx: TxEngine,
         journal_warning: Option<String>,
         audit: Option<Arc<SqliteJournal>>,
-        remote: Arc<dyn RemoteBanking>,
-        mock: Option<Arc<ports::MockRemote>>,
+        remote: ports::RemoteChoice,
+        verifying_key: VerifyingKey,
     ) -> Self {
+        let ports::RemoteChoice { remote, mock } = remote;
         Self {
             remote,
             mock,
@@ -96,6 +103,7 @@ impl AppState {
             clock: StdArc::new(ports::SystemClock),
             replay: ReplayScheduler::new(ReplayPolicy::default()),
             reversal: ReversalBook::new(),
+            verifying_key,
         }
     }
 
@@ -105,16 +113,33 @@ impl AppState {
     }
 }
 
+/// 解析构建期注入的菜单包验签公钥。
+///
+/// 生产：`build.rs` 要求 release 构建必须提供 `TK_MENU_PUBKEY_HEX`，并把它注入编译环境；
+/// 调试：没有注入时回退演示公钥，保证 `cargo run` 开箱可用。该回退在 release 不存在。
+fn resolve_menu_verifying_key(injected: Option<&str>, debug: bool) -> Result<VerifyingKey, String> {
+    if let Some(hex) = injected {
+        if hex.trim().is_empty() {
+            return Err("TK_MENU_PUBKEY_HEX 为空：拒绝用空公钥启动".into());
+        }
+        return pubkey_from_hex(hex)
+            .map_err(|e| format!("TK_MENU_PUBKEY_HEX 不是合法 Ed25519 公钥：{e}"));
+    }
+    if debug {
+        Ok(demo_verifying_key())
+    } else {
+        Err("release 构建缺少 TK_MENU_PUBKEY_HEX：拒绝使用演示公钥启动".into())
+    }
+}
+
+fn menu_verifying_key() -> Result<VerifyingKey, String> {
+    resolve_menu_verifying_key(option_env!("TK_MENU_PUBKEY_HEX"), cfg!(debug_assertions))
+}
+
 /// 选择远端实现：配置了端点就用 `RoutedBanking`，否则回退内置 mock。
 ///
 /// 配置非法时**回退而不是崩溃**——柜面宁可跑在演示模式，也不能白屏。
-fn build_remote(
-    appdata: &std::path::Path,
-) -> (
-    Arc<dyn RemoteBanking>,
-    Option<Arc<ports::MockRemote>>,
-    Option<String>,
-) {
+fn build_remote(appdata: &std::path::Path) -> (ports::RemoteChoice, Option<String>) {
     let path = std::env::var("TK_ENDPOINTS")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| appdata.join("endpoints.json"));
@@ -126,11 +151,13 @@ fn build_remote(
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                     .unwrap_or(false);
                 return (
-                    Arc::new(
-                        tellerkit_core::banking::RoutedBanking::new(loaded.router)
-                            .with_idempotency(loaded.idempotent_tx),
-                    ),
-                    None,
+                    ports::RemoteChoice {
+                        remote: Arc::new(
+                            tellerkit_core::banking::RoutedBanking::new(loaded.router)
+                                .with_idempotency(loaded.idempotent_tx),
+                        ),
+                        mock: None,
+                    },
                     Some(format!(
                         "已按 {} 接入真实端点{}",
                         path.display(),
@@ -146,8 +173,10 @@ fn build_remote(
                 eprintln!("端点配置不可用，回退内置 mock：{e}");
                 let mock = Arc::new(ports::MockRemote::default());
                 return (
-                    Arc::clone(&mock) as Arc<dyn RemoteBanking>,
-                    Some(mock),
+                    ports::RemoteChoice {
+                        remote: Arc::clone(&mock) as Arc<dyn RemoteBanking>,
+                        mock: Some(mock),
+                    },
                     Some(format!("端点配置无效（{e}），已回退内置 mock")),
                 );
             }
@@ -156,8 +185,10 @@ fn build_remote(
 
     let mock = Arc::new(ports::MockRemote::default());
     (
-        Arc::clone(&mock) as Arc<dyn RemoteBanking>,
-        Some(mock),
+        ports::RemoteChoice {
+            remote: Arc::clone(&mock) as Arc<dyn RemoteBanking>,
+            mock: Some(mock),
+        },
         None,
     )
 }
@@ -219,7 +250,10 @@ pub fn run() {
             let appdata = app.path().app_data_dir()?;
             let menu_dir = appdata.join("menu");
             // P0：公钥内置在客户端；生产环境由构建配置注入，私钥永不进客户端。
-            let store = MenuStore::new(menu_dir, demo_verifying_key());
+            // 注入缺失/非法时直接拒绝启动，不允许静默回退到演示公钥。
+            let verifying_key = menu_verifying_key()
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+            let store = MenuStore::new(menu_dir, verifying_key);
 
             // 交易账本：打不开也不阻断启动，但要留下告警让上层显示。
             // 同一个连接既做交易账本又做审计查询，所以用 Arc 共享。
@@ -237,7 +271,7 @@ pub fn run() {
                 ),
             };
             // 端点配置（changes/008）：有配置就用真实路由，否则回退内置 mock
-            let (remote, mock, remote_note) = build_remote(&appdata);
+            let (remote, remote_note) = build_remote(&appdata);
             let app_handle = app.handle().clone();
             let state = AppState::new(
                 store,
@@ -246,7 +280,7 @@ pub fn run() {
                 journal_warning,
                 audit,
                 remote,
-                mock,
+                verifying_key,
             );
             if let Some(note) = remote_note {
                 eprintln!("{note}");
@@ -283,4 +317,45 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("TellerKit 启动失败");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn injected_key_wins_over_demo() {
+        let hex = tellerkit_core::mock::demo_pubkey_hex();
+        let key = resolve_menu_verifying_key(Some(&hex), true).expect("演示公钥十六进制必须可解析");
+        assert_eq!(key, demo_verifying_key());
+    }
+
+    #[test]
+    fn invalid_injected_key_is_rejected_even_in_debug() {
+        let err = resolve_menu_verifying_key(Some("not-hex"), true).unwrap_err();
+        assert!(
+            err.contains("TK_MENU_PUBKEY_HEX"),
+            "错误信息要指向配置项：{err}"
+        );
+    }
+
+    #[test]
+    fn empty_injected_key_is_rejected() {
+        let err = resolve_menu_verifying_key(Some("  "), true).unwrap_err();
+        assert!(err.contains("为空"), "空值不能被当作未配置：{err}");
+    }
+
+    #[test]
+    fn debug_without_injection_falls_back_to_demo() {
+        assert_eq!(
+            resolve_menu_verifying_key(None, true).unwrap(),
+            demo_verifying_key()
+        );
+    }
+
+    #[test]
+    fn release_without_injection_refuses_to_start() {
+        let err = resolve_menu_verifying_key(None, false).unwrap_err();
+        assert!(err.contains("release"), "错误信息要说明是发布构建：{err}");
+    }
 }

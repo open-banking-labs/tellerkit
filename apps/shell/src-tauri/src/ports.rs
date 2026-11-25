@@ -13,6 +13,7 @@
 //! 违反它，这层抽象就白抽了。
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -41,6 +42,15 @@ impl Clock for SystemClock {
             .map(|d| d.as_secs())
             .unwrap_or(0)
     }
+}
+
+/// 一次远端选择的结果：真实路由或演示远端，二选一。
+///
+/// 把 `remote` 与 `mock` 绑在一起传，避免 `AppState::new` 为演示开关单独加一个参数；
+/// 将来去掉演示远端时，这里就是唯一需要改的构造点。
+pub struct RemoteChoice {
+    pub remote: Arc<dyn RemoteBanking>,
+    pub mock: Option<Arc<MockRemote>>,
 }
 
 /// 演示用远端：把"在线 / 离线 / 坏包 / 业务拒绝"做成可切换的开关。
