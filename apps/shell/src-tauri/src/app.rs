@@ -19,11 +19,11 @@ use tellerkit_core::pack::pubkey_to_hex;
 use tellerkit_core::pkg;
 use tellerkit_core::recovery::{exception_kind_str, RecoveryJournal};
 use tellerkit_core::reversal::{Authorization, Authorizer, ExceptionKind, ReversalRequest};
-use tellerkit_core::session::{SessionGuard, SessionPolicy};
+use tellerkit_core::session::{LockReason, SessionGuard, SessionPolicy};
 use tellerkit_core::sync;
 use tellerkit_core::tx::{TxRequest, TxResult, TxStatus};
 use tellerkit_core::{filter, LoadSource};
-use tellerkit_journal_sqlite::AuditEvent;
+use tellerkit_journal_sqlite::{AuditEvent, SqliteJournal};
 
 use crate::ports::{Clock, RemoteBanking};
 use crate::AppState;
@@ -112,6 +112,151 @@ pub struct SessionView {
     pub idle_secs: u64,
 }
 
+/// 会话状态的独立锁（P0-10 第 2 步）。
+///
+/// 为什么单独一把锁：锁屏 tick 每秒一次，而交易要持 `AppState` 锁打主机
+/// （默认 3s 超时、按优先级切端点更久）。共用一把锁时，一笔慢交易会让锁屏判定
+/// 停摆同样的秒数——那是安全检查停摆，不是体验问题。所以 tick/touch/blur
+/// 只碰这把锁，完全不碰 `AppState`。
+///
+/// **锁序约定**：`AppState` → `SessionSlot`，任何路径都不许反向加锁。
+/// 反向（先会话后状态）会在"交易持状态锁等会话锁、tick 持会话锁等状态锁"时死锁。
+///
+/// `clock` / `audit` 与 `AppState` 里的必须是**同一份**（`AppState::new` 保证）；
+/// 复制一份句柄是为了让 tick 不必回头去拿状态锁。
+pub struct SessionSlot {
+    guard: Option<SessionGuard>,
+    /// 当前柜员号。锁屏审计要用；登录成功写入、登出清空。
+    teller_no: Option<String>,
+    clock: Arc<dyn Clock>,
+    audit: Option<Arc<SqliteJournal>>,
+}
+
+impl SessionSlot {
+    pub fn new(clock: Arc<dyn Clock>, audit: Option<Arc<SqliteJournal>>) -> Self {
+        Self {
+            guard: None,
+            teller_no: None,
+            clock,
+            audit,
+        }
+    }
+
+    /// 测试用：换时钟。锁屏判定必须用注入的时钟，只换 `AppState.clock` 不够。
+    #[cfg(test)]
+    pub fn set_clock(&mut self, clock: Arc<dyn Clock>) {
+        self.clock = clock;
+    }
+
+    /// 登录成功：开一段新会话，计时从此刻起算。
+    pub fn begin(&mut self, teller_no: &str) {
+        self.guard = Some(SessionGuard::new(
+            SessionPolicy::default(),
+            self.clock.now_secs(),
+        ));
+        self.teller_no = Some(teller_no.to_string());
+    }
+
+    /// 登出：身份与会话一起清。先清身份，避免登出后的审计还记到上一个人头上。
+    pub fn end(&mut self) {
+        self.guard = None;
+        self.teller_no = None;
+    }
+
+    /// 资金类命令的会话判定。`None` 表示放行，`Some((原因, 细节))` 表示拒绝。
+    ///
+    /// 只读判定、不写审计：调用方（`ShellApp::require_unlocked`）还要拼柜员号，
+    /// 并且不能持着会话锁去写账本。
+    pub fn denial(&self) -> Option<(&'static str, String)> {
+        match &self.guard {
+            Some(g) if !g.is_locked() => None,
+            None => Some(("尚未登录", "未登录即调用受保护命令".to_string())),
+            Some(g) => Some((
+                "会话已锁定",
+                g.reason()
+                    .map(|r| r.label())
+                    .unwrap_or("会话已锁定")
+                    .to_string(),
+            )),
+        }
+    }
+
+    pub fn view(&self) -> SessionView {
+        match &self.guard {
+            None => SessionView {
+                locked: false,
+                reason: None,
+                idle_secs: 0,
+            },
+            Some(guard) => SessionView {
+                locked: guard.is_locked(),
+                reason: guard.reason().map(|r| r.label().to_string()),
+                idle_secs: guard.idle_secs(self.clock.now_secs()),
+            },
+        }
+    }
+
+    /// 记录一次操作。锁定期间不续命由 `SessionGuard` 保证。
+    pub fn touch(&mut self) -> SessionView {
+        let now = self.clock.now_secs();
+        if let Some(guard) = self.guard.as_mut() {
+            guard.touch(now);
+        }
+        self.view()
+    }
+
+    /// 周期性评估：新进入锁定时写一条 `session_lock` 审计。
+    pub fn tick(&mut self) -> SessionView {
+        let now = self.clock.now_secs();
+        let newly_locked = self.guard.as_mut().and_then(|guard| guard.evaluate(now));
+        let view = self.view();
+        self.audit_lock(newly_locked);
+        view
+    }
+
+    /// 窗口失焦：按策略锁定，新进入锁定时写审计。
+    pub fn blur(&mut self) -> SessionView {
+        let now = self.clock.now_secs();
+        let newly_locked = self.guard.as_mut().and_then(|guard| guard.on_blur(now));
+        let view = self.view();
+        self.audit_lock(newly_locked);
+        view
+    }
+
+    /// 锁屏事件留痕。持锁期间只做一条 INSERT（亚毫秒级）；真正的长阻塞是主机调用，
+    /// 已经不在会话锁里了。写不进去只告警：锁屏是安全动作，不能因为账本坏就不锁。
+    fn audit_lock(&self, reason: Option<LockReason>) {
+        let Some(reason) = reason else {
+            return;
+        };
+        let Some(journal) = self.audit.as_ref() else {
+            return;
+        };
+        let event = AuditEvent {
+            actor: self.teller_no.clone().unwrap_or_else(|| "unknown".into()),
+            action: "session_lock".to_string(),
+            target: String::new(),
+            result: "ok".to_string(),
+            detail: reason.label().to_string(),
+            at: String::new(),
+        };
+        if let Err(e) = journal.audit(&event) {
+            eprintln!("审计写入失败：{e}");
+        }
+    }
+}
+
+/// 会话锁中毒时的兜底视图：按**已锁定**处理。
+///
+/// 读不到会话状态就想放行资金操作，是最不该有的降级方向。
+fn poisoned_session_view() -> SessionView {
+    SessionView {
+        locked: true,
+        reason: Some("会话状态异常".into()),
+        idle_secs: 0,
+    }
+}
+
 /// 对账视图：聚合 + 最近明细。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reconciliation {
@@ -192,18 +337,17 @@ impl<'a> ShellApp<'a> {
     /// 覆盖层下的 iframe 也能发 postMessage，只有这里是唯一真相。
     /// 判定失败即写审计（拒绝原因），且绝不触达主机。
     fn require_unlocked(&self, action: &str) -> Result<(), String> {
-        match &self.state.session {
-            Some(g) if !g.is_locked() => Ok(()),
-            other => {
-                let (reason, detail) = match other {
-                    None => ("尚未登录", "未登录即调用受保护命令"),
-                    Some(g) => {
-                        let why = g.reason().map(|r| r.label()).unwrap_or("会话已锁定");
-                        ("会话已锁定", why)
-                    }
-                };
+        // 会话锁只短暂持有：审计要拿柜员号、要写账本，这两件事都不能在持锁时做，
+        // 否则交易会和每秒一次的锁屏 tick 互相等。
+        let denial = match self.state.session.lock() {
+            Ok(slot) => slot.denial(),
+            Err(_) => Some(("会话状态异常", "会话锁已损坏，请重启客户端".to_string())),
+        };
+        match denial {
+            None => Ok(()),
+            Some((reason, detail)) => {
                 let actor = self.actor();
-                self.audit(&actor, action, "", "denied", detail);
+                self.audit(&actor, action, "", "denied", &detail);
                 Err(format!("{reason}：{detail}。请回到锁屏界面解锁后再试"))
             }
         }
@@ -343,10 +487,11 @@ impl<'a> ShellApp<'a> {
         let filter_ms = started.elapsed().as_secs_f64() * 1000.0;
 
         self.state.snapshot = Some(snapshot.clone());
-        self.state.session = Some(SessionGuard::new(
-            SessionPolicy::default(),
-            self.clock.now_secs(),
-        ));
+        self.state
+            .session
+            .lock()
+            .map_err(|_| "会话状态已损坏，请重启客户端".to_string())?
+            .begin(&snapshot.teller_no);
         self.audit(
             &snapshot.teller_no,
             "login",
@@ -366,7 +511,9 @@ impl<'a> ShellApp<'a> {
         if let Some(snapshot) = self.state.snapshot.clone() {
             self.audit(&snapshot.teller_no, "logout", "", "ok", "");
         }
-        self.state.session = None;
+        if let Ok(mut slot) = self.state.session.lock() {
+            slot.end();
+        }
         self.state.clear_session();
         Ok(())
     }
@@ -707,55 +854,28 @@ impl<'a> ShellApp<'a> {
     }
 
     // ---------- 会话 ----------
+    //
+    // 这三个方法是"用例视角"的薄包装，供本文件测试与内部复用；真正的 IPC 入口
+    // 不经过 `AppState` 锁（见 `commands::session_*`），否则慢交易会拖住锁屏判定。
 
     pub fn session_touch(&mut self) -> SessionView {
-        let now = self.clock.now_secs();
-        if let Some(guard) = self.state.session.as_mut() {
-            guard.touch(now);
+        match self.state.session.lock() {
+            Ok(mut slot) => slot.touch(),
+            Err(_) => poisoned_session_view(),
         }
-        self.session_view()
     }
 
     pub fn session_tick(&mut self) -> SessionView {
-        let now = self.clock.now_secs();
-        let actor = self.actor();
-        let locked = self
-            .state
-            .session
-            .as_mut()
-            .and_then(|guard| guard.evaluate(now));
-        if let Some(reason) = locked {
-            self.audit(&actor, "session_lock", "", "ok", reason.label());
+        match self.state.session.lock() {
+            Ok(mut slot) => slot.tick(),
+            Err(_) => poisoned_session_view(),
         }
-        self.session_view()
     }
 
     pub fn session_blur(&mut self) -> SessionView {
-        let now = self.clock.now_secs();
-        let actor = self.actor();
-        let locked = self
-            .state
-            .session
-            .as_mut()
-            .and_then(|guard| guard.on_blur(now));
-        if let Some(reason) = locked {
-            self.audit(&actor, "session_lock", "", "ok", reason.label());
-        }
-        self.session_view()
-    }
-
-    fn session_view(&self) -> SessionView {
-        match &self.state.session {
-            None => SessionView {
-                locked: false,
-                reason: None,
-                idle_secs: 0,
-            },
-            Some(guard) => SessionView {
-                locked: guard.is_locked(),
-                reason: guard.reason().map(|r| r.label().to_string()),
-                idle_secs: guard.idle_secs(self.clock.now_secs()),
-            },
+        match self.state.session.lock() {
+            Ok(mut slot) => slot.blur(),
+            Err(_) => poisoned_session_view(),
         }
     }
 
@@ -1016,8 +1136,13 @@ mod tests {
             },
             tellerkit_core::mock::demo_verifying_key(),
         );
-        state.clock = clock;
-        state.session = Some(SessionGuard::new(SessionPolicy::default(), 0));
+        // 时钟要同时注入 AppState 与会话槽：锁屏判定用的是会话槽那一份。
+        state.set_clock(clock);
+        state
+            .session
+            .lock()
+            .expect("测试里会话锁不应中毒")
+            .begin("T0000");
         state
     }
 
@@ -1042,6 +1167,33 @@ mod tests {
             ShellApp::new(&mut state).session_tick().locked,
             "锁定状态应持续到显式解锁"
         );
+    }
+
+    /// P0-10 第 2 步的验收点：锁屏判定不能排在交易后面。
+    ///
+    /// 这里模拟"交易正持着 AppState 锁打主机"——`held` 就是那把锁。若会话仍是
+    /// AppState 的字段，下面的 `try_lock` 必然 WouldBlock；拆成独立锁后两把锁互不相干。
+    /// 用 `try_lock` 而不是 `lock`：真回归时测试要报错，而不是把 CI 挂死。
+    #[test]
+    fn session_tick_does_not_wait_for_app_state_lock() {
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let state = state_with(Arc::clone(&clock));
+        let session = Arc::clone(&state.session);
+        let shared = std::sync::Mutex::new(state);
+
+        // 交易侧：持 AppState 锁不放（相当于一笔 3s 的主机调用）。
+        let held = shared.lock().expect("测试里 AppState 锁不应中毒");
+        clock.set(180);
+
+        let mut slot = session
+            .try_lock()
+            .expect("会话槽必须与 AppState 分开，否则锁屏 tick 会排在交易后面");
+        let view = slot.tick();
+        assert!(view.locked, "注入 180 秒后应锁定");
+        assert_eq!(view.reason.as_deref(), Some("无操作超时"));
+
+        drop(slot);
+        drop(held);
     }
 
     #[test]
@@ -1130,7 +1282,7 @@ mod tests {
     fn missing_session_refuses_protected_commands() {
         let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
         let mut state = state_with(clock);
-        state.session = None;
+        state.session.lock().expect("测试里会话锁不应中毒").end();
 
         let err = ShellApp::new(&mut state)
             .submit_transaction(TxRequest::new("account.deposit", "k-none"))

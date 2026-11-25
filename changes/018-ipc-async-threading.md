@@ -50,17 +50,38 @@
   实现必须在 `generate_handler!` 注册"。放宽前后都用负向用例确认过会红。
 - `docs/rust-style.md` §4.3：条款改为 IPC 边界可用 `async`，其余代码保持全同步。
 
+## 第 2a 步（本分支追加）：会话拆独立锁
+
+第 1 步只把阻塞工作搬走了，`session_tick` 仍要和交易抢同一把 `AppState` 锁——
+一笔 3s 的主机调用照样能让锁屏判定停摆 3 秒。所以追加 2a：
+
+| 项 | 现在 | 改为 |
+|---|---|---|
+| 会话状态 | `AppState.session: Option<SessionGuard>` | 独立托管的 `Arc<Mutex<SessionSlot>>` |
+| `session_touch/tick/blur` | 锁 `AppState` | **只**锁 `SessionSlot` |
+| 资金命令的会话判定 | 读 `AppState.session` 字段 | 短暂锁 `SessionSlot` 读判定 |
+| 锁序 | 只有一把锁 | `AppState` → `SessionSlot`，禁止反向（反向必死锁） |
+
+- `apps/shell/src-tauri/src/app.rs`：新增 `SessionSlot`（guard + 柜员号 + clock + 审计句柄）。
+  会话锁中毒时按**已锁定**处理（`poisoned_session_view`），不放行。
+  登录 `begin()`、登出 `end()`；锁屏事件仍写 `session_lock` 审计，字段与原来一致。
+- `apps/shell/src-tauri/src/lib.rs`：`AppState` 持有 `SharedSession`，并把同一个 `Arc`
+  **单独托管**一份，供 `session_*` 命令按类型取；`clock`/`audit` 与会话槽共用同一批 `Arc`，
+  不再有两份时间/两份账本。
+
 ## 不做什么（这是第 1 步，不是 P0-10 的全部）
 
 P0-10 的验收是「网络调用不持全局锁 / 锁屏 tick 不被交易阻塞 / 单飞防重复提交」。
-本提案只解决第一条的前提——**把阻塞工作搬离主线程**：
 
-1. 本轮：命令异步化 + 阻塞池。界面不再被主机调用冻住。
-2. 待做：把 `session` 从 `AppState` 拆成独立锁，让 `session_tick`/`session_touch`/`session_blur`
-   不再排在同一把锁后面；网络调用移出临界区。
-3. 待做：`submit_transaction` 按幂等键做 in-flight 单飞去重。
+1. ✅ 第 1 步（PR #44）：命令异步化 + 阻塞池。界面不再被主机调用冻住。
+2. 🟡 第 2 步按风险拆成两半：
+   - ✅ **2a**（本分支）：会话拆独立锁，tick/touch/blur 完全不碰 `AppState`。
+   - ⏳ **2b**：交易路径的网络调用移出临界区。要重排
+     「写前意图 → 打主机 → 落结论」三段并与 P0-8/P0-11 的审计顺序绑定，
+     单独一个 PR 评审更安全，也避免把 2a 的可验证性拖下水。
+3. ⏳ 第 3 步：`submit_transaction` 按幂等键做 in-flight 单飞去重。
 
-因此本改动**不能**把 P0-10 标完成。
+因此本改动链**不能**把 P0-10 标完成。
 
 ## 风险
 

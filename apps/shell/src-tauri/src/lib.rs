@@ -25,7 +25,6 @@ use tellerkit_core::pkg::BizPackage;
 use tellerkit_core::recovery::{parse_exception_kind, RecoveryJournal};
 use tellerkit_core::replay::{ReplayPolicy, ReplayScheduler};
 use tellerkit_core::reversal::{ExceptionKind, ReversalBook};
-use tellerkit_core::session::SessionGuard;
 use tellerkit_core::store::MenuStore;
 use tellerkit_core::tx::TxEngine;
 use tellerkit_core::tx::{TxJournal, TxRequest, TxResult};
@@ -34,6 +33,12 @@ use tellerkit_journal_sqlite::SqliteJournal;
 use bootstrap::StartupFatal;
 use ed25519_dalek::VerifyingKey;
 use tauri::Manager;
+
+/// 会话状态的共享句柄（独立锁，P0-10 第 2 步）。
+///
+/// `session_tick` 每秒一次，不能排在持锁 3s 的交易后面；所以会话从 `AppState`
+/// 拆出来单独托管。锁序：`AppState` → `SessionSlot`，禁止反向。
+pub type SharedSession = Arc<Mutex<app::SessionSlot>>;
 
 /// 应用状态。所有命令都通过 `Arc<Mutex<AppState>>` 访问，避免 Rust/前端各持一份真相。
 ///
@@ -69,8 +74,10 @@ pub struct AppState {
     pub audit: Option<Arc<SqliteJournal>>,
     /// 外设型号白名单。默认只允许 mock 型号——没登记就拒绝。
     pub policy: DevicePolicy,
-    /// 会话锁屏状态。`None` 表示未登录。
-    pub session: Option<SessionGuard>,
+    /// 会话锁屏状态（独立锁）。未登录/锁定状态在槽内表示，不在这里。
+    ///
+    /// 与 `clock`/`audit` 共享同一批 `Arc`，见 `AppState::new` 的装配。
+    pub session: SharedSession,
     /// 时钟端口。锁屏/退避/审计都靠它，注入才能在测试里控制时间。
     pub clock: Arc<dyn ports::Clock>,
     /// 自动重放调度。挂起交易按退避节奏逐笔重试，不再一次全推。
@@ -94,6 +101,13 @@ impl AppState {
         verifying_key: VerifyingKey,
     ) -> Self {
         let ports::RemoteChoice { remote, mock } = remote;
+        let clock: Arc<dyn ports::Clock> = Arc::new(ports::SystemClock);
+        // 会话槽与 AppState 必须共用同一份 clock/audit：否则 tick 用的时间、
+        // 写的账本会和交易路径不是同一个，测试里注入的时钟也会失效。
+        let session: SharedSession = Arc::new(Mutex::new(app::SessionSlot::new(
+            Arc::clone(&clock),
+            audit.as_ref().map(Arc::clone),
+        )));
         Self {
             remote,
             mock,
@@ -108,8 +122,8 @@ impl AppState {
             packages: Vec::new(),
             audit,
             policy: DevicePolicy::allow_mocks(),
-            session: None,
-            clock: Arc::new(ports::SystemClock),
+            session,
+            clock,
             replay: ReplayScheduler::new(ReplayPolicy::default()),
             reversal: ReversalBook::new(),
             verifying_key,
@@ -119,6 +133,18 @@ impl AppState {
     /// 清空权限快照。登出、切换账号、收到 401 时都必须调用。
     pub fn clear_session(&mut self) {
         self.snapshot = None;
+    }
+
+    /// 替换时钟端口，**同时**替换会话槽里的那一份。
+    ///
+    /// 注入时钟必须两处一起换：只换 `AppState.clock` 会让锁屏判定继续用系统时钟
+    /// （P0-6 的测试就是靠这一点精确控制时间）。只有测试会调用它。
+    #[cfg(test)]
+    pub fn set_clock(&mut self, clock: Arc<dyn ports::Clock>) {
+        self.clock = Arc::clone(&clock);
+        if let Ok(mut slot) = self.session.lock() {
+            slot.set_clock(clock);
+        }
     }
 }
 
@@ -329,6 +355,9 @@ pub fn run() {
             if let Some(note) = remote_note {
                 eprintln!("{note}");
             }
+            // 会话槽单独托管一份：`session_*` 命令按类型直接取，不经过 AppState 锁。
+            // 托管的是同一个 Arc（不是副本），所以 require_unlocked 看到的仍是同一份状态。
+            app.manage(Arc::clone(&state.session));
             app.manage(Arc::new(Mutex::new(state)));
             // 必须在 manage 之后：线程的第一次 tick 要能拿到状态
             spawn_replay_worker(app_handle);

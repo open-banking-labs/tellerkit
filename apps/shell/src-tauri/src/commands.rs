@@ -15,8 +15,8 @@ use tellerkit_core::filter::MenuView;
 use tellerkit_core::tx::{TxRequest, TxResult};
 use tellerkit_core::PermSnapshot;
 
-use crate::app::{LoginOutcome, ShellApp};
-use crate::AppState;
+use crate::app::{LoginOutcome, SessionSlot, ShellApp};
+use crate::{AppState, SharedSession};
 
 /// 托管状态的共享句柄。
 ///
@@ -48,12 +48,41 @@ where
     F: FnOnce(&mut AppState) -> Result<T, String> + Send + 'static,
 {
     let shared = Arc::clone(state.inner());
-    tauri::async_runtime::spawn_blocking(move || {
+    blocking(move || {
         let mut guard = lock(&shared)?;
         work(&mut guard)
     })
     .await
-    .map_err(|e| format!("后台任务异常退出：{e}"))?
+}
+
+/// 会话命令的统一入口：**只锁会话槽**，不碰 `AppState` 锁。
+///
+/// 这是 P0-10 第 2 步的落点：`session_tick` 每秒一次，如果还要等交易那把锁，
+/// 一笔 3s 的主机调用就能让锁屏判定停摆 3 秒。
+async fn with_session<T, F>(session: &State<'_, SharedSession>, work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&mut SessionSlot) -> T + Send + 'static,
+{
+    let shared = Arc::clone(session.inner());
+    blocking(move || {
+        let mut slot = shared
+            .lock()
+            .map_err(|_| "会话状态已损坏，请重启客户端".to_string())?;
+        Ok(work(&mut slot))
+    })
+    .await
+}
+
+/// 把阻塞工作交给 Tokio 阻塞线程池，结果搬回异步上下文。
+async fn blocking<T, F>(work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|e| format!("后台任务异常退出：{e}"))?
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -424,18 +453,18 @@ pub async fn audit_tail(
 }
 
 #[tauri::command]
-pub async fn session_touch(state: State<'_, SharedState>) -> Result<SessionState, String> {
-    with_state(&state, |app| Ok(ShellApp::new(app).session_touch().into())).await
+pub async fn session_touch(session: State<'_, SharedSession>) -> Result<SessionState, String> {
+    with_session(&session, |slot| slot.touch().into()).await
 }
 
 #[tauri::command]
-pub async fn session_tick(state: State<'_, SharedState>) -> Result<SessionState, String> {
-    with_state(&state, |app| Ok(ShellApp::new(app).session_tick().into())).await
+pub async fn session_tick(session: State<'_, SharedSession>) -> Result<SessionState, String> {
+    with_session(&session, |slot| slot.tick().into()).await
 }
 
 #[tauri::command]
-pub async fn session_blur(state: State<'_, SharedState>) -> Result<SessionState, String> {
-    with_state(&state, |app| Ok(ShellApp::new(app).session_blur().into())).await
+pub async fn session_blur(session: State<'_, SharedSession>) -> Result<SessionState, String> {
+    with_session(&session, |slot| slot.blur().into()).await
 }
 
 // ---------------- 演示开关（不发生在真实逻辑里） ----------------
