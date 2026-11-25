@@ -107,10 +107,14 @@ pub enum CodecError {
 pub trait Transport: Send + Sync {
     /// 用于日志与排障的名字。
     fn name(&self) -> &'static str;
+    /// `timeout` 来自端点配置（`Endpoint::timeout_ms`）。
+    /// 由调用方传入而不是传输自己保存：同一种传输可能服务多个端点，
+    /// 每个端点的超时策略不同。
     fn exchange(
         &self,
         addr: &EndpointAddr,
         request: &WireMessage,
+        timeout: std::time::Duration,
     ) -> Result<WireMessage, TransportError>;
 }
 
@@ -236,7 +240,8 @@ impl Router {
                 }
             };
 
-            match endpoint.transport.exchange(&endpoint.addr, &wire) {
+            let timeout = std::time::Duration::from_millis(endpoint.timeout_ms.max(1));
+            match endpoint.transport.exchange(&endpoint.addr, &wire, timeout) {
                 Ok(response) => match endpoint.codec.decode(&response) {
                     Ok(body) => return Ok(body),
                     Err(e) => {
@@ -544,6 +549,7 @@ impl Transport for MockTransport {
         &self,
         _addr: &EndpointAddr,
         request: &WireMessage,
+        _timeout: std::time::Duration,
     ) -> Result<WireMessage, TransportError> {
         if let Ok(mut seen) = self.seen.lock() {
             seen.push(request.clone());

@@ -78,19 +78,21 @@ impl Transport for TcpTransport {
         &self,
         addr: &EndpointAddr,
         request: &WireMessage,
+        timeout: Duration,
     ) -> Result<WireMessage, TransportError> {
+        let timeout = timeout.min(self.timeout);
         let EndpointAddr::Tcp { host, port } = addr else {
             return Err(TransportError::Protocol(
                 "TcpTransport 只能处理 Tcp 地址".into(),
             ));
         };
 
-        let mut stream = connect(host, *port, self.timeout)?;
+        let mut stream = connect(host, *port, timeout)?;
         stream
-            .set_read_timeout(Some(self.timeout))
+            .set_read_timeout(Some(timeout))
             .map_err(|e| io_err("设置读超时失败", e))?;
         stream
-            .set_write_timeout(Some(self.timeout))
+            .set_write_timeout(Some(timeout))
             .map_err(|e| io_err("设置写超时失败", e))?;
 
         let len = u32::try_from(request.body.len())
@@ -264,7 +266,9 @@ impl Transport for HttpTransport {
         &self,
         addr: &EndpointAddr,
         request: &WireMessage,
+        timeout: Duration,
     ) -> Result<WireMessage, TransportError> {
+        let timeout = timeout.min(self.timeout);
         let EndpointAddr::Http { base_url } = addr else {
             return Err(TransportError::Protocol(
                 "HttpTransport 只能处理 Http 地址".into(),
@@ -274,8 +278,8 @@ impl Transport for HttpTransport {
         let mut target = split_host_port(base_url)?;
         target.path = format!("{}/{}", target.path.trim_end_matches('/'), op);
 
-        let tcp = connect(&target.host, target.port, self.timeout)?;
-        tcp.set_read_timeout(Some(self.timeout))
+        let tcp = connect(&target.host, target.port, timeout)?;
+        tcp.set_read_timeout(Some(timeout))
             .map_err(|e| io_err("设置读超时失败", e))?;
 
         let head = build_request_head(&target, request);
@@ -421,6 +425,7 @@ mod tests {
                     head: Default::default(),
                     body: b"HELLO".to_vec(),
                 },
+                Duration::from_secs(5),
             )
             .unwrap();
         assert_eq!(out.body, b"ACK:HELLO");
@@ -444,10 +449,46 @@ mod tests {
                     head: Default::default(),
                     body: vec![],
                 },
+                Duration::from_secs(5),
             )
             .unwrap_err();
         assert!(matches!(err, TransportError::Unreachable(_)));
         assert!(err.retryable(), "连接失败应可重试（换主备）");
+    }
+
+    #[test]
+    fn exchange_honours_the_timeout_argument() {
+        let (port, handle) = serve_once(|mut stream| {
+            // 故意比客户端超时慢：如果 timeout 没传下去，这个用例会挂 300ms 以上
+            thread::sleep(Duration::from_millis(300));
+            let _ = stream.write_all(&0u32.to_be_bytes());
+        });
+
+        let started = std::time::Instant::now();
+        let err = TcpTransport::default()
+            .exchange(
+                &tcp_addr(port),
+                &WireMessage {
+                    head: Default::default(),
+                    body: vec![],
+                },
+                Duration::from_millis(60),
+            )
+            .unwrap_err();
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(
+                err,
+                TransportError::Timeout | TransportError::Unreachable(_)
+            ),
+            "实际：{err:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "应按传入的 60ms 超时返回，而不是等服务器 300ms（实际 {elapsed:?}）"
+        );
+        handle.join().unwrap();
     }
 
     #[test]
@@ -458,6 +499,7 @@ mod tests {
                     base_url: "http://x".into(),
                 },
                 &WireMessage::default(),
+                Duration::from_secs(5),
             )
             .unwrap_err();
         assert!(matches!(err, TransportError::Protocol(_)));
@@ -493,6 +535,7 @@ mod tests {
                     head,
                     body: b"{}".to_vec(),
                 },
+                Duration::from_secs(5),
             )
             .unwrap();
         assert_eq!(out.body, b"{\"payload\":{\"ok\":true}}");
@@ -525,6 +568,7 @@ mod tests {
                     head: Default::default(),
                     body: b"{}".to_vec(),
                 },
+                Duration::from_secs(5),
             )
             .unwrap_err();
         assert!(err.to_string().contains("422"));
@@ -612,6 +656,7 @@ mod tests {
                     head,
                     body: b"{}".to_vec(),
                 },
+                Duration::from_secs(5),
             )
             .expect("TLS 握手与请求应成功");
         assert_eq!(out.body, b"{\"payload\":{\"ok\":true}}");
@@ -635,6 +680,7 @@ mod tests {
                     head: Default::default(),
                     body: b"{}".to_vec(),
                 },
+                Duration::from_secs(5),
             )
             .unwrap_err();
         let text = err.to_string();
