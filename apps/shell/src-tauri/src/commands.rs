@@ -199,14 +199,30 @@ pub async fn tx_exceptions(state: State<'_, SharedState>) -> Result<Vec<TxExcept
 }
 
 /// 申请冲正：本地授权 → 主机受理 → 返回主机流水号。
+///
+/// 与提交交易同样是三段式：主机受理那一下不持 `AppState` 锁。
 #[tauri::command]
 pub async fn request_reversal(
     key: String,
     reason: String,
     state: State<'_, SharedState>,
 ) -> Result<String, String> {
-    with_state(&state, move |app| {
-        ShellApp::new(app).request_reversal(&key, &reason)
+    let shared = Arc::clone(state.inner());
+    blocking(move || {
+        // 阶段一（锁内）：会话闸门、写前审计、回捞原交易要素、本地授权并落盘。
+        let prepared = {
+            let mut guard = lock(&shared)?;
+            ShellApp::new(&mut guard).prepare_reversal(&key, &reason)?
+        };
+
+        // 阶段二（**不持锁**）：向主机申请冲正。这期间该笔是"已授权未确认"，
+        // 并发的第二次冲正会在阶段一被拒——不需要额外的在途表。
+        let host_reference = prepared.call_host()?;
+
+        // 阶段三（重新加锁）：落主机回执。拿不到锁也要说清"主机可能已受理"。
+        let mut guard =
+            lock(&shared).map_err(|e| format!("{e}；主机可能已受理冲正，请立即查账确认"))?;
+        ShellApp::new(&mut guard).complete_reversal(&prepared, &host_reference)
     })
     .await
 }

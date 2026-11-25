@@ -343,6 +343,29 @@ impl PreparedSubmit {
     }
 }
 
+/// 冲正阶段一的产物：同样只带值。
+///
+/// 冲正比提交多一个"原交易要素"的约束：要素必须从账本回捞（不能让柜员凭记忆填），
+/// 所以阶段一把查到的要素也一起算进请求里，阶段二只发主机。
+pub struct PreparedReversal {
+    key: String,
+    reason: String,
+    actor: String,
+    remote: Arc<dyn RemoteBanking>,
+}
+
+impl PreparedReversal {
+    /// 阶段二：向主机申请冲正，**不持锁**。
+    ///
+    /// 这期间该笔在 `ReversalBook` 里已是"已授权未确认"，并发的第二次冲正
+    /// 会在阶段一被 `AwaitingConfirmation` 拒掉——不需要额外的在途表。
+    pub fn call_host(&self) -> Result<String, String> {
+        self.remote
+            .reverse(&self.key, &self.reason)
+            .map_err(|e| e.to_string())
+    }
+}
+
 /// 提交阶段一的结果。
 pub enum SubmitPrep {
     /// 可以打主机。
@@ -638,7 +661,15 @@ impl<'a> ShellApp<'a> {
     }
 
     /// 申请冲正：本地授权 → 主机受理 → 拿到流水号后才算处置完成。
-    pub fn request_reversal(&mut self, key: &str, reason: &str) -> Result<String, String> {
+    /// 冲正阶段一（锁内）：会话闸门、写前审计、从账本回捞原交易要素、
+    /// 本地授权并留痕（含落盘）。
+    ///
+    /// 产物只带值，调用方可以放掉锁去等主机回执。
+    pub fn prepare_reversal(
+        &mut self,
+        key: &str,
+        reason: &str,
+    ) -> Result<PreparedReversal, String> {
         self.require_unlocked("reversal")?;
         self.require_auditable("reversal", key)?;
         let actor = self.actor();
@@ -679,27 +710,52 @@ impl<'a> ShellApp<'a> {
             }
         }
 
-        // 2. 主机受理。失败时保留"已授权未确认"，柜员可以重试
-        let host_reference = self
-            .remote
-            .reverse(key, reason)
-            .map_err(|e| e.to_string())?;
+        Ok(PreparedReversal {
+            key: key.to_string(),
+            reason: reason.to_string(),
+            actor,
+            remote: Arc::clone(&self.remote),
+        })
+    }
 
+    /// 冲正阶段三（重新上锁）：主机回执落账 + 结论审计。
+    ///
+    /// "已授权未确认"在主机回执之前一直留在待处置清单里——账上状态还是原样，
+    /// 不能因为客户端发了请求就当冲正成功。
+    pub fn complete_reversal(
+        &mut self,
+        prepared: &PreparedReversal,
+        host_reference: &str,
+    ) -> Result<String, String> {
         // 3. 主机回了流水号才算处置完成
         self.state
             .reversal
-            .confirm(key, &host_reference)
+            .confirm(&prepared.key, host_reference)
             .map_err(|e| e.to_string())?;
         if let Some(journal) = self.state.audit.as_deref() {
-            if let Some(record) = self.state.reversal.reversal_of(key).cloned() {
+            if let Some(record) = self.state.reversal.reversal_of(&prepared.key).cloned() {
                 if let Err(e) = journal.save_reversal(&record) {
                     return Err(format!("冲正确认未能落盘，主机已受理：{e}；请立即查账"));
                 }
             }
         }
+        self.audit_checked(
+            &prepared.actor,
+            "reversal",
+            &prepared.key,
+            "ok",
+            host_reference,
+        )?;
+        Ok(host_reference.to_string())
+    }
 
-        self.audit_checked(&actor, "reversal", key, "ok", &host_reference)?;
-        Ok(host_reference)
+    /// 锁内一次做完冲正（测试与旧调用点用）。
+    ///
+    /// 命令层不走这条路：它要"锁内准备 → 锁外等主机 → 锁内落回执"三段。
+    pub fn request_reversal(&mut self, key: &str, reason: &str) -> Result<String, String> {
+        let prepared = self.prepare_reversal(key, reason)?;
+        let host_reference = prepared.call_host()?;
+        self.complete_reversal(&prepared, &host_reference)
     }
 
     /// 提交阶段一（锁内）：会话闸门、审计写前留痕、包能力与主机契约校验、
@@ -1323,6 +1379,52 @@ mod tests {
             .complete_submit(prepared, outcome)
             .expect("阶段三不应失败");
         assert_eq!(result.status, TxStatus::Committed);
+    }
+
+    /// P0-10 第 2b-2 步的验收点：冲正的主机申请同样发生在锁外。
+    ///
+    /// 冲正和提交不一样的地方在于：它在阶段一就把"已授权未确认"写进 `ReversalBook`，
+    /// 所以并发的第二次冲正会被阶段一拒掉，不需要额外的在途表。
+    #[test]
+    fn reversal_host_call_between_phases_does_not_hold_the_app_state_lock() {
+        use tellerkit_core::tx::TxJournal;
+
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let mut state = state_with(clock);
+        let key = "k-rev-out-of-lock";
+
+        // 种下原交易要素与异常标记，让阶段一有东西可回捞。
+        let journal = state.audit.as_ref().expect("测试账本应可用").clone();
+        journal
+            .record_intent(&TxRequest::new("account.deposit", key))
+            .expect("写前意图应能落盘");
+        state.reversal.mark(key, ExceptionKind::MarkedForReversal);
+
+        let shared = std::sync::Mutex::new(state);
+
+        let prepared = {
+            let mut guard = shared.lock().expect("测试里 AppState 锁不应中毒");
+            ShellApp::new(&mut guard)
+                .prepare_reversal(key, "网络超时查账后冲正")
+                .expect("阶段一应成功（授权 + 落盘）")
+        };
+
+        // 阶段一结束后锁已释放：主机申请期间别的命令能正常拿锁。
+        assert!(
+            shared.try_lock().is_ok(),
+            "主机申请冲正期间不能还握着 AppState 锁"
+        );
+
+        let host_reference = prepared.call_host().expect("演示主机应受理冲正");
+        let mut guard = shared.lock().expect("测试里 AppState 锁不应中毒");
+        let confirmed = ShellApp::new(&mut guard)
+            .complete_reversal(&prepared, &host_reference)
+            .expect("阶段三应成功");
+        assert_eq!(confirmed, host_reference);
+        assert!(
+            guard.reversal.is_confirmed(key),
+            "主机回执必须让该笔离开待处置清单"
+        );
     }
 
     #[test]
