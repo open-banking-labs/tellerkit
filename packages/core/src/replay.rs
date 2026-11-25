@@ -157,6 +157,22 @@ impl ReplayScheduler {
     pub fn tracked(&self) -> usize {
         self.attempts.len()
     }
+
+    /// 从持久化账本恢复进度。attempts 与下次重试时间都原样读回，
+    /// 否则反复重启就能把失败预算清零。
+    pub fn restore(&mut self, attempts: Vec<ReplayAttempt>) {
+        self.attempts.clear();
+        for attempt in attempts {
+            self.attempts.insert(attempt.key.clone(), attempt);
+        }
+    }
+
+    /// 写回用的快照。调用方逐条 `save_attempt`，删条目时调 `remove_attempt`。
+    pub fn snapshot(&self) -> Vec<ReplayAttempt> {
+        let mut out: Vec<ReplayAttempt> = self.attempts.values().cloned().collect();
+        out.sort_by(|a, b| a.key.cmp(&b.key));
+        out
+    }
 }
 
 #[cfg(test)]

@@ -17,6 +17,7 @@ use tellerkit_core::mock::DemoRole;
 use tellerkit_core::model::MenuTree;
 use tellerkit_core::pack::pubkey_to_hex;
 use tellerkit_core::pkg;
+use tellerkit_core::recovery::{exception_kind_str, RecoveryJournal};
 use tellerkit_core::reversal::{Authorization, Authorizer, ExceptionKind, ReversalRequest};
 use tellerkit_core::session::{SessionGuard, SessionPolicy};
 use tellerkit_core::sync;
@@ -368,10 +369,16 @@ impl<'a> ShellApp<'a> {
 
     /// 状态不明的交易：标记待冲正。这是超时后的**唯一**正确处置。
     fn mark_if_uncertain(&mut self, key: &str, result: &TxResult) {
-        if result.status == TxStatus::MarkedForReversal {
-            self.state
-                .reversal
-                .mark(key, ExceptionKind::MarkedForReversal);
+        if result.status != TxStatus::MarkedForReversal {
+            return;
+        }
+        let kind = ExceptionKind::MarkedForReversal;
+        self.state.reversal.mark(key, kind);
+        // 状态不明跨重启必须还在：标记内存成功但落盘失败时，也要让柜员看见告警。
+        if let Some(journal) = self.state.audit.as_deref() {
+            if let Err(e) = journal.save_exception(key, exception_kind_str(kind)) {
+                self.audit(&self.actor(), "exception", key, "failed", &e);
+            }
         }
     }
 
@@ -396,19 +403,42 @@ impl<'a> ShellApp<'a> {
     pub fn request_reversal(&mut self, key: &str, reason: &str) -> Result<String, String> {
         self.require_unlocked("reversal")?;
         let actor = self.actor();
+        // 冲正要素必须从原交易回捞，不能让柜员凭记忆填；账本里查不到就拒绝冲正。
+        let (original, lookup_error) = match self.state.audit.as_deref() {
+            Some(journal) => match journal.tx_request(key) {
+                Ok(request) => (request, None),
+                Err(e) => (None, Some(e)),
+            },
+            None => (None, Some("账本不可用".to_string())),
+        };
+        let original = match original {
+            Some(request) => request,
+            None => {
+                if let Some(e) = lookup_error {
+                    self.audit(&actor, "reversal", key, "failed", &e);
+                }
+                return Err(format!("找不到原交易 {key} 的落盘要素，无法冲正；请先查账"));
+            }
+        };
         let request = ReversalRequest {
             idempotency_key: key.to_string(),
             initiator: actor.clone(),
-            tx_code: String::new(),
-            amount_cents: 0,
+            tx_code: original.tx_code,
+            amount_cents: original.amount_cents,
             reason: reason.to_string(),
         };
 
         // 1. 授权（当前是演示主管；接 IAM 后换成真实授权端口）
-        self.state
+        let record = self
+            .state
             .reversal
             .request(&request, &DemoSupervisor)
             .map_err(|e| e.to_string())?;
+        if let Some(journal) = self.state.audit.as_deref() {
+            if let Err(e) = journal.save_reversal(&record) {
+                return Err(format!("冲正申请未能落盘，已中止：{e}"));
+            }
+        }
 
         // 2. 主机受理。失败时保留"已授权未确认"，柜员可以重试
         let host_reference = self
@@ -421,6 +451,13 @@ impl<'a> ShellApp<'a> {
             .reversal
             .confirm(key, &host_reference)
             .map_err(|e| e.to_string())?;
+        if let Some(journal) = self.state.audit.as_deref() {
+            if let Some(record) = self.state.reversal.reversal_of(key).cloned() {
+                if let Err(e) = journal.save_reversal(&record) {
+                    return Err(format!("冲正确认未能落盘，主机已受理：{e}；请立即查账"));
+                }
+            }
+        }
 
         self.audit(&actor, "reversal", key, "ok", &host_reference);
         Ok(host_reference)
@@ -490,6 +527,36 @@ impl<'a> ShellApp<'a> {
         Ok(result)
     }
 
+    /// 重放进度写回：先删已不在调度表的键，再 upsert 当前进度。
+    ///
+    /// 顺序很重要：先删后写，避免"重放成功后写回失败"时残留旧 attempts，
+    /// 下次启动又把已经冲正的交易当成未放弃。
+    fn persist_replay_attempts(&self) {
+        let Some(journal) = self.state.audit.as_deref() else {
+            return;
+        };
+        let before = match journal.load_attempts() {
+            Ok(rows) => rows,
+            Err(e) => {
+                self.audit(&self.actor(), "replay", "tx_queue", "failed", &e);
+                return;
+            }
+        };
+        let current = self.state.replay.snapshot();
+        for old in before {
+            if !current.iter().any(|a| a.key == old.key) {
+                if let Err(e) = journal.remove_attempt(&old.key) {
+                    self.audit(&self.actor(), "replay", "tx_queue", "failed", &e);
+                }
+            }
+        }
+        for attempt in current {
+            if let Err(e) = journal.save_attempt(&attempt) {
+                self.audit(&self.actor(), "replay", "tx_queue", "failed", &e);
+            }
+        }
+    }
+
     pub fn replay_pending(&mut self) -> Result<String, String> {
         self.require_unlocked("replay")?;
         let remote = Arc::clone(&self.remote);
@@ -500,6 +567,7 @@ impl<'a> ShellApp<'a> {
             remote.as_ref(),
             now,
         );
+        self.persist_replay_attempts();
         let journal_error = self.state.tx.take_journal_error();
         let actor = self.actor();
 

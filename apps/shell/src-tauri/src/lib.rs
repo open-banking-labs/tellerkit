@@ -25,6 +25,7 @@ use tellerkit_core::model::MenuTree;
 use tellerkit_core::pack::pubkey_from_hex;
 use tellerkit_core::perm::PermSnapshot;
 use tellerkit_core::pkg::BizPackage;
+use tellerkit_core::recovery::{parse_exception_kind, RecoveryJournal};
 use tellerkit_core::replay::{ReplayPolicy, ReplayScheduler};
 use tellerkit_core::reversal::{ExceptionKind, ReversalBook};
 use tellerkit_core::session::SessionGuard;
@@ -268,6 +269,39 @@ pub fn run() {
                 verifying_key,
             );
             state.startup_fatal = startup_fatal;
+            // 恢复跨重启状态：幂等索引已由 TxEngine::with_journal 读回；
+            // 这里读异常/冲正清单与重放进度，失败只告警不阻断启动。
+            let mut recovery_warnings: Vec<String> = Vec::new();
+            if let Some(journal) = state.audit.as_deref() {
+                match journal.load_exceptions() {
+                    Ok(rows) => {
+                        let mut exceptions = Vec::new();
+                        for (key, raw) in rows {
+                            match parse_exception_kind(&raw) {
+                                Ok(kind) => exceptions.push((key, kind)),
+                                Err(e) => recovery_warnings.push(e),
+                            }
+                        }
+                        match journal.load_reversals() {
+                            Ok(reversals) => state.reversal.restore(exceptions, reversals),
+                            Err(e) => recovery_warnings.push(format!("读取冲正记录失败：{e}")),
+                        }
+                    }
+                    Err(e) => recovery_warnings.push(format!("读取待冲正清单失败：{e}")),
+                }
+                match journal.load_attempts() {
+                    Ok(attempts) => state.replay.restore(attempts),
+                    Err(e) => recovery_warnings.push(format!("读取重放进度失败：{e}")),
+                }
+            }
+            if !recovery_warnings.is_empty() {
+                let note = format!("恢复状态不完整：{}", recovery_warnings.join("；"));
+                state.journal_warning = Some(match state.journal_warning.take() {
+                    Some(old) => format!("{old}；{note}"),
+                    None => note,
+                });
+                eprintln!("{}", state.journal_warning.as_deref().unwrap_or(""));
+            }
             // 写前意图已落盘但主机结论未记的交易，只能按"状态不明"处置：
             // 标记待冲正并提示查账，绝不自动重发（可能重复入账）。
             let recovered = state.tx.take_in_flight();
@@ -275,6 +309,16 @@ pub fn run() {
                 state
                     .reversal
                     .mark(&request.idempotency_key, ExceptionKind::MarkedForReversal);
+                if let Some(journal) = state.audit.as_deref() {
+                    if let Err(e) = journal.save_exception(
+                        &request.idempotency_key,
+                        tellerkit_core::recovery::exception_kind_str(
+                            ExceptionKind::MarkedForReversal,
+                        ),
+                    ) {
+                        eprintln!("遗留意图标记落盘失败：{e}");
+                    }
+                }
             }
             if !recovered.is_empty() {
                 eprintln!(

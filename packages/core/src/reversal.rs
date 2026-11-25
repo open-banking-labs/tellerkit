@@ -105,6 +105,23 @@ impl ReversalBook {
         Self::default()
     }
 
+    /// 从持久化账本恢复。只在启动时调用一次；内存态的后续变更由上层写回。
+    pub fn restore(
+        &mut self,
+        exceptions: Vec<(String, ExceptionKind)>,
+        reversals: Vec<ReversalRecord>,
+    ) {
+        self.exceptions.clear();
+        self.reversals.clear();
+        for (key, kind) in exceptions {
+            self.exceptions.insert(key, kind);
+        }
+        for record in reversals {
+            self.reversals
+                .insert(record.idempotency_key.clone(), record);
+        }
+    }
+
     /// 给一笔交易打异常标记。重复标记以最后一次为准。
     pub fn mark(&mut self, idempotency_key: &str, kind: ExceptionKind) {
         self.exceptions.insert(idempotency_key.to_string(), kind);

@@ -136,6 +136,22 @@ pub enum HostError {
 pub trait TxJournal: Send + Sync {
     /// 追加一条交易结论（审计日志，只增）。
     fn record(&self, request: &TxRequest, result: &TxResult) -> Result<(), String>;
+    /// 启动时读回幂等索引：(幂等键, 载荷签名, 首次结果)。
+    ///
+    /// 默认空实现给纯内存模式；接了账本的实现必须真正读回，
+    /// 否则重启后同一个键会被当成新交易再次打到主机。
+    fn load_idempotent(&self) -> Result<Vec<(String, String, TxResult)>, String> {
+        Ok(Vec::new())
+    }
+    /// 把一条可缓存的幂等结论落盘。
+    fn save_idempotent(
+        &self,
+        _key: &str,
+        _signature: &str,
+        _result: &TxResult,
+    ) -> Result<(), String> {
+        Ok(())
+    }
     /// 写前意图：调用主机**之前**落盘。
     ///
     /// 默认空实现给纯内存预览用；接了持久化账本的实现必须真正落盘，
@@ -277,6 +293,14 @@ impl TxEngine {
             Ok(list) => self.in_flight = list,
             Err(e) => self.journal_error = Some(format!("读取在途交易意图失败：{e}")),
         }
+        match journal.load_idempotent() {
+            Ok(list) => {
+                for (key, signature, result) in list {
+                    self.idempotent.insert(key, (signature, result));
+                }
+            }
+            Err(e) => self.journal_error = Some(format!("读取幂等索引失败：{e}")),
+        }
         self.journal = Some(journal);
         self
     }
@@ -289,6 +313,17 @@ impl TxEngine {
     /// 取走上次崩溃遗留的在途交易，由上层转入异常队列处置。
     pub fn take_in_flight(&mut self) -> Vec<TxRequest> {
         std::mem::take(&mut self.in_flight)
+    }
+
+    /// 幂等索引的内存与落盘写入放在一处，避免漏掉重放路径。
+    fn cache_result(&mut self, key: String, signature: String, result: &TxResult) {
+        self.idempotent
+            .insert(key.clone(), (signature.clone(), result.clone()));
+        if let Some(journal) = self.journal.as_deref() {
+            if let Err(e) = journal.save_idempotent(&key, &signature, result) {
+                self.journal_error = Some(format!("幂等索引落盘失败：{e}"));
+            }
+        }
     }
 
     /// 提交一笔交易。
@@ -351,8 +386,7 @@ impl TxEngine {
         };
 
         if cacheable {
-            self.idempotent
-                .insert(request.idempotency_key.clone(), (signature, result.clone()));
+            self.cache_result(request.idempotency_key.clone(), signature, &result);
         }
 
         // 记账失败不改变结论：交易已经发生，日志没写成是运维问题，不是业务问题。
@@ -395,8 +429,7 @@ impl TxEngine {
             }
         };
 
-        self.idempotent
-            .insert(key.clone(), (signature, result.clone()));
+        self.cache_result(key.clone(), signature, &result);
 
         if let Some(journal) = self.journal.as_deref() {
             if let Err(e) = journal.settle(&request, &result) {
@@ -426,8 +459,7 @@ impl TxEngine {
                     TxResult::pending("重放失败：仍不可达，保留在队列中")
                 }
             };
-            self.idempotent
-                .insert(key.clone(), (signature, result.clone()));
+            self.cache_result(key.clone(), signature, &result);
             if let Some(journal) = self.journal.as_deref() {
                 if let Err(e) = journal.settle(&request, &result) {
                     self.journal_error = Some(e);
@@ -921,5 +953,57 @@ mod tests {
         assert_eq!(result.status, TxStatus::Rejected);
         assert!(result.message.contains("写前意图落盘失败"));
         assert_eq!(host.calls(), 0, "落盘失败时不得向主机发出任何请求");
+    }
+    /// 能活过引擎重建的幂等索引，用来验证重启后不会二次打到主机。
+    struct SharedIdempotentJournal(
+        std::sync::Arc<std::sync::Mutex<Vec<(String, String, TxResult)>>>,
+    );
+
+    impl TxJournal for SharedIdempotentJournal {
+        fn record(&self, _request: &TxRequest, _result: &TxResult) -> Result<(), String> {
+            Ok(())
+        }
+        fn load_idempotent(&self) -> Result<Vec<(String, String, TxResult)>, String> {
+            Ok(self.0.lock().map_err(|e| e.to_string())?.clone())
+        }
+        fn save_idempotent(
+            &self,
+            key: &str,
+            signature: &str,
+            result: &TxResult,
+        ) -> Result<(), String> {
+            let mut rows = self.0.lock().map_err(|e| e.to_string())?;
+            rows.retain(|(k, _, _)| k != key);
+            rows.push((key.to_string(), signature.to_string(), result.clone()));
+            Ok(())
+        }
+        fn enqueue(&self, _request: &TxRequest) -> Result<(), String> {
+            Ok(())
+        }
+        fn dequeue(&self, _key: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn pending(&self) -> Result<Vec<TxRequest>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn idempotent_index_survives_engine_restart() {
+        use std::sync::{Arc, Mutex};
+
+        let store = Arc::new(Mutex::new(Vec::new()));
+        let host = ScriptedHost::always(Ok("TX-1".to_string()));
+        let mut first =
+            TxEngine::new().with_journal(Box::new(SharedIdempotentJournal(Arc::clone(&store))));
+        let result = first.submit(&host, req("k-restart"));
+        assert_eq!(result.status, TxStatus::Committed);
+        assert_eq!(host.calls(), 1);
+
+        let mut restarted =
+            TxEngine::new().with_journal(Box::new(SharedIdempotentJournal(Arc::clone(&store))));
+        let repeated = restarted.submit(&host, req("k-restart"));
+        assert_eq!(repeated.status, TxStatus::Committed);
+        assert_eq!(host.calls(), 1, "重启后同键不得再打到主机");
     }
 }

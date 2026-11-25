@@ -14,6 +14,9 @@ use rusqlite::{params, Connection};
 pub use cipher::LedgerCipher;
 use std::path::Path;
 use std::sync::Mutex;
+use tellerkit_core::recovery::{exception_kind_str, parse_exception_kind, RecoveryJournal};
+use tellerkit_core::replay::ReplayAttempt;
+use tellerkit_core::reversal::ReversalRecord;
 use tellerkit_core::tx::{TxJournal, TxRequest, TxResult, TxStatus};
 
 /// 哈希域分隔符：防止域外数据被拼进本链的哈希输入。
@@ -143,6 +146,41 @@ impl SqliteJournal {
                 last_hash TEXT    NOT NULL
             );
             INSERT OR IGNORE INTO audit_chain_state (id, last_seq, last_hash) VALUES (1, 0, '');
+            -- 幂等索引：重启后同键必须命中首次结果，不能重新打到主机。
+            CREATE TABLE IF NOT EXISTS tx_idempotent (
+                idempotency_key  TEXT PRIMARY KEY,
+                signature        TEXT NOT NULL,
+                status           TEXT NOT NULL,
+                reference        TEXT,
+                message          TEXT NOT NULL,
+                replayable       INTEGER NOT NULL
+            );
+            -- 待处置异常与冲正：状态不明必须跨重启保留，不能让柜员以为没事。
+            CREATE TABLE IF NOT EXISTS tx_exception (
+                idempotency_key  TEXT PRIMARY KEY,
+                kind             TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS tx_reversal (
+                idempotency_key  TEXT PRIMARY KEY,
+                initiator        TEXT NOT NULL,
+                approver         TEXT NOT NULL,
+                reason           TEXT NOT NULL,
+                host_reference   TEXT
+            );
+            -- 重放进度：attempts 跨重启不重置。
+            CREATE TABLE IF NOT EXISTS replay_attempt (
+                idempotency_key  TEXT PRIMARY KEY,
+                attempts         INTEGER NOT NULL,
+                next_at_secs     INTEGER NOT NULL
+            );
+            -- 原交易要素（加密）：冲正要带原交易码与金额，不能让柜员凭记忆填。
+            CREATE TABLE IF NOT EXISTS tx_request_elements (
+                idempotency_key  TEXT PRIMARY KEY,
+                tx_code          TEXT NOT NULL,
+                amount_cents     INTEGER NOT NULL,
+                elements         TEXT NOT NULL,
+                offline_capable  INTEGER NOT NULL
+            );
             "#,
         )
         .map_err(|e| format!("建表失败：{e}"))?;
@@ -421,6 +459,17 @@ fn status_str(status: TxStatus) -> &'static str {
     }
 }
 
+/// 读回交易状态。未知值报错，不能当成 Committed——那会让状态不明的交易被误认为已成功。
+fn parse_status(raw: &str) -> Result<TxStatus, String> {
+    match raw {
+        "committed" => Ok(TxStatus::Committed),
+        "pending" => Ok(TxStatus::Pending),
+        "rejected" => Ok(TxStatus::Rejected),
+        "marked_for_reversal" => Ok(TxStatus::MarkedForReversal),
+        other => Err(format!("账本中出现未知交易状态：{other}")),
+    }
+}
+
 /// 一条按状态聚合的对账行。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusSummary {
@@ -524,22 +573,39 @@ impl SqliteJournal {
 impl TxJournal for SqliteJournal {
     fn record_intent(&self, request: &TxRequest) -> Result<(), String> {
         let elements = self.seal_elements(request)?;
-        self.lock()
-            .execute(
-                "INSERT OR REPLACE INTO tx_intent
-                 (idempotency_key, tx_code, amount_cents, elements, offline_capable, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    request.idempotency_key,
-                    request.tx_code,
-                    request.amount_cents,
-                    elements,
-                    request.offline_capable as i32,
-                    now(),
-                ],
-            )
-            .map(|_| ())
-            .map_err(|e| format!("写前意图落盘失败：{e}"))
+        let mut conn = self.lock();
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("写前意图事务失败：{e}"))?;
+        tx.execute(
+            "INSERT OR REPLACE INTO tx_intent
+             (idempotency_key, tx_code, amount_cents, elements, offline_capable, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                request.idempotency_key,
+                request.tx_code,
+                request.amount_cents,
+                elements,
+                request.offline_capable as i32,
+                now(),
+            ],
+        )
+        .map_err(|e| format!("写前意图落盘失败：{e}"))?;
+        // 意图收口时会删 tx_intent，原交易要素要留在这里供冲正回捞。
+        tx.execute(
+            "INSERT OR REPLACE INTO tx_request_elements
+             (idempotency_key, tx_code, amount_cents, elements, offline_capable)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                request.idempotency_key,
+                request.tx_code,
+                request.amount_cents,
+                elements,
+                request.offline_capable as i32,
+            ],
+        )
+        .map_err(|e| format!("原交易要素落盘失败：{e}"))?;
+        tx.commit().map_err(|e| format!("写前意图提交失败：{e}"))
     }
 
     fn settle(&self, request: &TxRequest, result: &TxResult) -> Result<(), String> {
@@ -651,6 +717,63 @@ impl TxJournal for SqliteJournal {
             .map_err(|e| format!("写审计日志失败：{e}"))
     }
 
+    fn load_idempotent(&self) -> Result<Vec<(String, String, TxResult)>, String> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT idempotency_key, signature, status, reference, message, replayable
+                 FROM tx_idempotent ORDER BY rowid",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i32>(5)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (key, signature, status, reference, message, replayable) =
+                row.map_err(|e| e.to_string())?;
+            out.push((
+                key,
+                signature,
+                TxResult {
+                    status: parse_status(&status)?,
+                    reference,
+                    message,
+                    replayable: replayable != 0,
+                },
+            ));
+        }
+        Ok(out)
+    }
+
+    fn save_idempotent(&self, key: &str, signature: &str, result: &TxResult) -> Result<(), String> {
+        self.lock()
+            .execute(
+                "INSERT OR REPLACE INTO tx_idempotent
+                 (idempotency_key, signature, status, reference, message, replayable)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    key,
+                    signature,
+                    status_str(result.status),
+                    result.reference,
+                    result.message,
+                    result.replayable as i32,
+                ],
+            )
+            .map(|_| ())
+            .map_err(|e| format!("幂等索引落盘失败：{e}"))
+    }
+
     fn enqueue(&self, request: &TxRequest) -> Result<(), String> {
         let elements = self.seal_elements(request)?;
         self.lock()
@@ -723,6 +846,147 @@ impl TxJournal for SqliteJournal {
 
 /// 本条哈希 = SHA256(域分隔 || seq || prev_hash || 六个事件字段)。
 /// 每字段带 8 字节长度前缀，避免 `("ab","c")` 与 `("a","bc")` 拼出同一串。
+impl RecoveryJournal for SqliteJournal {
+    fn load_exceptions(&self) -> Result<Vec<(String, String)>, String> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare("SELECT idempotency_key, kind FROM tx_exception ORDER BY rowid")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("读取待冲正清单失败：{e}"))
+    }
+
+    fn save_exception(&self, key: &str, kind: &str) -> Result<(), String> {
+        self.lock()
+            .execute(
+                "INSERT OR REPLACE INTO tx_exception (idempotency_key, kind) VALUES (?1, ?2)",
+                params![key, exception_kind_str(parse_exception_kind(kind)?)],
+            )
+            .map(|_| ())
+            .map_err(|e| format!("待冲正标记落盘失败：{e}"))
+    }
+
+    fn load_reversals(&self) -> Result<Vec<ReversalRecord>, String> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT idempotency_key, initiator, approver, reason, host_reference
+                 FROM tx_reversal ORDER BY rowid",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(ReversalRecord {
+                    idempotency_key: r.get(0)?,
+                    initiator: r.get(1)?,
+                    approver: r.get(2)?,
+                    reason: r.get(3)?,
+                    host_reference: r.get(4)?,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("读取冲正记录失败：{e}"))
+    }
+
+    fn save_reversal(&self, record: &ReversalRecord) -> Result<(), String> {
+        self.lock()
+            .execute(
+                "INSERT OR REPLACE INTO tx_reversal
+                 (idempotency_key, initiator, approver, reason, host_reference)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    record.idempotency_key,
+                    record.initiator,
+                    record.approver,
+                    record.reason,
+                    record.host_reference,
+                ],
+            )
+            .map(|_| ())
+            .map_err(|e| format!("冲正记录落盘失败：{e}"))
+    }
+
+    fn load_attempts(&self) -> Result<Vec<ReplayAttempt>, String> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT idempotency_key, attempts, next_at_secs FROM replay_attempt ORDER BY rowid",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(ReplayAttempt {
+                    key: r.get(0)?,
+                    attempts: r.get::<_, i64>(1)? as u32,
+                    next_at_secs: r.get::<_, i64>(2)? as u64,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("读取重放进度失败：{e}"))
+    }
+
+    fn save_attempt(&self, attempt: &ReplayAttempt) -> Result<(), String> {
+        self.lock()
+            .execute(
+                "INSERT OR REPLACE INTO replay_attempt
+                 (idempotency_key, attempts, next_at_secs) VALUES (?1, ?2, ?3)",
+                params![
+                    attempt.key,
+                    attempt.attempts as i64,
+                    attempt.next_at_secs as i64,
+                ],
+            )
+            .map(|_| ())
+            .map_err(|e| format!("重放进度落盘失败：{e}"))
+    }
+
+    fn remove_attempt(&self, key: &str) -> Result<(), String> {
+        self.lock()
+            .execute(
+                "DELETE FROM replay_attempt WHERE idempotency_key = ?1",
+                params![key],
+            )
+            .map(|_| ())
+            .map_err(|e| format!("重放进度删除失败：{e}"))
+    }
+
+    fn tx_request(&self, key: &str) -> Result<Option<TxRequest>, String> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT tx_code, amount_cents, elements, offline_capable
+                 FROM tx_request_elements WHERE idempotency_key = ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt
+            .query_map(params![key], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i32>(3)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        let Some(row) = rows.next() else {
+            return Ok(None);
+        };
+        let (tx_code, amount_cents, elements, offline) = row.map_err(|e| e.to_string())?;
+        Ok(Some(TxRequest {
+            idempotency_key: key.to_string(),
+            tx_code,
+            amount_cents,
+            elements: self.unseal_elements(&elements)?,
+            offline_capable: offline != 0,
+        }))
+    }
+}
+
 fn chain_hash(seq: i64, prev_hash: &str, event: &AuditEvent, at: &str) -> String {
     let seq_bytes = seq.to_be_bytes();
     let mut buf = Vec::new();
@@ -756,6 +1020,7 @@ fn now() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tellerkit_core::reversal::ExceptionKind;
     use tellerkit_core::tx::{HostError, TxHost};
 
     fn req(key: &str) -> TxRequest {
@@ -1246,5 +1511,79 @@ mod tests {
         assert_eq!(report.legacy, 2);
         assert_eq!(report.checked, 1, "只有新行参与哈希校验");
         assert_eq!(j.audit_tail(1).unwrap()[0].target, "t1", "旧接口保持可用");
+    }
+    #[test]
+    fn idempotent_index_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tx.db");
+        let j = SqliteJournal::open(&path).unwrap();
+        j.save_idempotent("k-1", "sig-1", &committed()).unwrap();
+        drop(j);
+
+        let j = SqliteJournal::open(&path).unwrap();
+        let rows = j.load_idempotent().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "k-1");
+        assert_eq!(rows[0].1, "sig-1");
+        assert_eq!(rows[0].2, committed());
+    }
+
+    #[test]
+    fn recovery_state_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tx.db");
+        let j = SqliteJournal::open(&path).unwrap();
+        j.save_exception("k-1", exception_kind_str(ExceptionKind::MarkedForReversal))
+            .unwrap();
+        j.save_reversal(&ReversalRecord {
+            idempotency_key: "k-1".into(),
+            initiator: "teller".into(),
+            approver: "supervisor".into(),
+            reason: "查账".into(),
+            host_reference: None,
+        })
+        .unwrap();
+        j.save_attempt(&ReplayAttempt {
+            key: "k-2".into(),
+            attempts: 3,
+            next_at_secs: 999,
+        })
+        .unwrap();
+        drop(j);
+
+        let j = SqliteJournal::open(&path).unwrap();
+        let exceptions = j.load_exceptions().unwrap();
+        assert_eq!(
+            exceptions,
+            vec![("k-1".into(), "marked_for_reversal".into())]
+        );
+        assert_eq!(
+            parse_exception_kind(&exceptions[0].1).unwrap(),
+            ExceptionKind::MarkedForReversal
+        );
+        let reversals = j.load_reversals().unwrap();
+        assert_eq!(reversals.len(), 1);
+        assert_eq!(reversals[0].host_reference, None);
+        let attempts = j.load_attempts().unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].attempts, 3, "失败预算跨重启不重置");
+        assert_eq!(attempts[0].next_at_secs, 999);
+        j.remove_attempt("k-2").unwrap();
+        assert!(j.load_attempts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn original_request_elements_can_be_recalled_for_reversal() {
+        let j = SqliteJournal::in_memory().unwrap();
+        let mut request = req("rev-1");
+        request.elements.insert("account".into(), "MASKED".into());
+        j.record_intent(&request).unwrap();
+        j.settle(&request, &committed()).unwrap();
+
+        let recalled = j.tx_request("rev-1").unwrap().unwrap();
+        assert_eq!(recalled.tx_code, request.tx_code);
+        assert_eq!(recalled.amount_cents, 10_000);
+        assert_eq!(recalled.elements.get("account").unwrap(), "MASKED");
+        assert!(j.tx_request("unknown").unwrap().is_none());
     }
 }
