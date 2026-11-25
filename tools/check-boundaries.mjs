@@ -95,6 +95,18 @@ for (const file of rustFiles.filter((f) => f.includes(CORE_DIR))) {
   }
 }
 
+// 规则 1.95：业务包模块只能经沙箱加载（docs/security-boundary.md §4.5）
+for (const file of frontendFiles) {
+  const relPath = posix(file);
+  if (relPath.endsWith("/platform/sandbox.ts")) continue;
+  const text = read(file);
+  if (/URL\.createObjectURL\s*\(/.test(text) && /import\s*\(/.test(text)) {
+    errors.push(
+      `${rel(file)} 在主窗口里用 Blob URL 动态 import：业务包必须经 platform/sandbox.ts 加载，否则包能访问 window/DOM`,
+    );
+  }
+}
+
 // 规则 2：核心包不得依赖 tauri（否则无法脱离 GUI 测试）
 for (const dir of packageSrcDirs) {
   const pkgRoot = dir.replace(/\/src$/, "");

@@ -136,8 +136,36 @@ export const mockClient: ShellClient = {
     return unlocked;
   },
 
+  /**
+   * 预览用的示例包模块：故意尝试越权，用来演示沙箱会拦下什么。
+   * 返回值是一段 ES module 源码（与真实包同形态）。
+   */
   async packageModule(): Promise<string> {
-    throw new Error("浏览器预览不加载业务包模块：请在 Tauri 客户端验证");
+    return `
+export function mount(container, shell) {
+  const problems = [];
+  const check = (name, fn) => {
+    try {
+      const value = fn();
+      problems.push(name + "：允许 → " + String(value).slice(0, 40));
+    } catch (e) {
+      problems.push(name + "：被拦住（" + e.name + "）");
+    }
+  };
+  check("读父页面 title", () => window.parent.document.title);
+  check("读 localStorage", () => localStorage.getItem("x"));
+  container.innerHTML =
+    "<div style='font-family:monospace;font-size:12px;line-height:1.8'>" +
+    "<b>业务包已加载（沙箱内）</b><br>" +
+    problems.map((p) => "· " + p).join("<br>") +
+    "</div>";
+  fetch("https://example.com").then(
+    () => shell.log("网络可达（不应该发生）"),
+    () => shell.log("网络被 CSP 拦住（预期）")
+  );
+  shell.log("沙箱演示包已挂载");
+}
+`;
   },
 
   dev,
