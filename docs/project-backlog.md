@@ -33,7 +33,7 @@
 |---|---|---|---|---|
 | P0-1 | 命名与提交门禁 | 本轮新增 | `npm run gate` 含银行名检查；pre-commit 同规则；全仓 0 命中 | ✅ 已完成 |
 | P0-2 | 裁决链可信 | C-01 C-02 C-05 | 故意让一条测试红，CI 必红；`--locked` 构建通过；门禁负向用例可复算 | 1（C-02/C-05 完成，C-01 待提案批准） |
-| P0-3 | 文档与事实一致 | C-07 D-02 D-05 D-06 | README 不再声称未实现的能力；伪门禁删除或接真数据；版本单一来源 | 1 |
+| P0-3 | 文档与事实一致 | C-07 D-02 D-05 D-06 | README 不再声称未实现的能力；伪门禁删除或接真数据；版本单一来源 | ✅ 已完成（runbook D-06 留待批次 3 交付链） |
 | P0-4 | 信任根：生产公钥 | A-01 安全 P0-1 | release 缺 `TK_MENU_PUBKEY_HEX` 构建失败（已验证）；启动摘要显示实际公钥指纹；演示公钥不进发布产物（P0-5 后 release 不再回退 mock） | ✅ 已完成 |
 | P0-5 | 启动/配置 fail-closed | A-06 安全 P0-2 规模 P0-09 | release 缺端点/配置非法/未签名/明文端点一律拒绝启动并给可读错误页；非法开关值不静默当作关；debug 才回退演示远端且必须带 note | ✅ 已完成 |
 | P0-6 | 会话与锁屏真门 | A-02 安全 P0-3 | `ShellApp::require_unlocked` 只信 Rust 侧会话状态；锁定/未登录时资金/打印/冲正/重放/业务包入口一律 Err 且不触达主机，拒绝写审计；后台重放同门；负向用例 5 命令全拒 + 解锁放行对照 | ✅ 已完成（Rust 闸门；前端卸载包宿主留 UX-08 批次） |
@@ -105,6 +105,7 @@ P0-1 命名门禁 + 本台账 + 评审/待办入库。
 7. P0-2 轨迹门禁转真：`check-trajectory` 不再对无法复算/指纹不符的记录放行；T-11 旧记录因预设更新已在 `.agents/dispatch-superseded.json` 显式作废（负向验证：去掉作废登记后 gate exit 1）。C-01 的宪法措辞矛盾写进 `changes/015-gate-adjudication.md`，等负责人批准。派发提示词/输入哈希统一 LF + 新增 `.gitattributes`，消除 Windows CRLF 导致的跨平台指纹漂移。
 8. P0-5 启动 fail-closed：新增 `bootstrap.rs`（策略与判定纯函数），release 强制配置验签/TLS、缺端点/非法/未签名/明文一律拒绝进入业务界面；失败原因存入 `AppState.startup_fatal`，由唯一加锁入口 `lock()` 拦下全部 23 条命令与后台重放，前端错误页可读。debug 才回退演示远端且必须留 note。行为变更写进 `changes/016-fail-closed-startup.md`（提案）。远端验收：49 passed / 0 failed、clippy `-D warnings` 通过、`npm run gate` exit 0。
 9. P0-6 会话真门：`ShellApp::require_unlocked` 统一判定 Rust 侧会话（未登录/锁定），命中即写审计并返回可读错误，绝不触达主机；资金/打印/冲正/重放/业务包五个入口全部接入；后台重放改走同一闸门，锁定时写 skip 审计。负向测试 5 命令全拒、未登录 3 命令全拒、解锁放行对照。远端验收：52 passed / 0 failed、`npm run gate` exit 0。前端卸载包宿主/键盘锁时屏蔽归 UX-08 批次。
+10. P0-3 文档与事实一致：README 澄清 gate 是本地静态预检、合并以 CI required checks 为准；PLAN/team/security-boundary 同步裁决口径与真实路径；删掉 check-ai-rules 的标题/短语存在性检查（陈旧文档也能绿，D-02），check-boundaries 的 `boot_load` 等五处改为正则匹配任意模块路径，堵住别名 import 绕过；新增 `tools/check-version.mjs`（Cargo.toml 单源 + 三处副本校验，负向测试 exit 1）与 `CHANGELOG.md`。`npm run gate` exit 0。D-06 runbook 与 C-07 文档路径全量校验留待批次 3。
 
 ## 7. 维护方式
 

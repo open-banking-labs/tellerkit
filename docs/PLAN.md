@@ -458,10 +458,10 @@ templates/        # 打印模板（套打）
 |---|---|---|
 | 规则 | ✅ 本次 | `docs/constitution.md`（10 条）、4 份 `AGENTS.md` |
 | 契约 | ✅ 本次 | `contracts/` 六份 + `fields.json`，`check-contracts` 双向比对 |
-| 门禁 | ✅ 本次 | `tools/check-{boundaries,contracts,ai-rules}.mjs`，`npm run gate` |
+| 门禁 | ✅ 本次 | `tools/check-{boundaries,contracts,tasks,ai-rules,trajectory,bank-names}.mjs`，`npm run gate`（本地静态预检） |
 | 规格 | ✅ 本次 | `.specify/` 模板 + `000-menu-permission-loop`（补记式） |
 | 提案流程 | ✅ 本次 | `changes/` |
-| CI | ✅ 本次 | `.github/workflows/gate.yml`（与本地同一条命令） |
+| CI | ✅ 本次 | `.github/workflows/gate.yml`（额外跑 test / clippy / bindings / build；合并裁决以 CI checks 为准，见 changes/015） |
 | 形态 | ✅ 本次 | monorepo：`apps/shell` + `packages/*` + `tools/`（ADR-0006） |
 | 团队 | ✅ 本次 | `docs/team.md` + `.agents/presets/` 四份角色定义 |
 | 生成层 | ✅ W2 | ts-rs 生成类型 + 命令名；手写 `contracts.ts` 已删除（ADR-0007） |

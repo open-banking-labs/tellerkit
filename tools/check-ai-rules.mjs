@@ -88,26 +88,11 @@ if (existsSync(rootAgents)) {
   else notes.push(`根 AGENTS.md ${lines} 行`);
 }
 
-// 6. 宪法十条必须在场
-const constitution = join(ROOT, "docs/constitution.md");
-if (!existsSync(constitution)) {
-  errors.push("缺少 docs/constitution.md");
-} else {
-  const text = read(constitution);
-  for (let i = 1; i <= 10; i++) {
-    if (!text.includes(`## 第 ${i} 条`)) errors.push(`docs/constitution.md 缺少「第 ${i} 条」`);
-  }
-}
-
-// 7. 安全边界的关键表述不得被删除（对外话术必须统一）
-const boundary = join(ROOT, "docs/security-boundary.md");
-if (!existsSync(boundary)) {
-  errors.push("缺少 docs/security-boundary.md");
-} else {
-  const text = read(boundary);
-  for (const phrase of ["不是安全边界", "本机管理员", "服务端对每一次请求独立鉴权"]) {
-    if (!text.includes(phrase)) errors.push(`docs/security-boundary.md 缺少关键表述：「${phrase}」`);
-  }
+// 6/7. 文档存在性只查文件在不在，不查标题/短语是否齐全。
+// 短语存在性检查奖励陈旧文档：内容写错但只要关键词还在，门禁照样绿（架构评审 D-02）。
+// 文档的真实性由项目级台账与人工评审负责，不在这道静态门禁里自欺。
+for (const doc of ["docs/constitution.md", "docs/security-boundary.md"]) {
+  if (!existsSync(join(ROOT, doc))) errors.push(`缺少 ${doc}`);
 }
 
 // 8. 团队定义与 Agent 预设（AI 主力团队的可执行部分）
@@ -119,12 +104,7 @@ const presets = existsSync(presetDir) ? readdirSync(presetDir).filter((f) => f.e
 if (presets.length < 4) {
   errors.push(`.agents/presets/ 只有 ${presets.length} 份预设，至少需要 4 份（Schema/Engine/Test/Review）`);
 }
-for (const f of presets) {
-  const text = read(join(presetDir, f));
-  for (const key of ["toolFilter", "输出", "验收"]) {
-    if (!text.includes(key)) errors.push(`.agents/presets/${f} 缺少「${key}」小节：预设必须声明工具边界、产物和验收方式`);
-  }
-}
+// 预设内容是否真的可执行由人工评审裁决；短语存在性不算证据（D-02）。
 
 // 8.5 派发记录必须结构完整（W4 的审计凭据）
 const dispatchDir = join(ROOT, ".agents/dispatches");
@@ -200,6 +180,6 @@ if (errors.length) {
 }
 
 console.log(
-  `✓ check-ai-rules 通过（${units.length} 个单位、${presets.length} 份 Agent 预设、${dispatchCount} 条派发记录、宪法 10 条、安全边界表述齐全）`,
+  `✓ check-ai-rules 通过（${units.length} 个单位、${presets.length} 份 Agent 预设、${dispatchCount} 条派发记录；文档存在性与结构已查，内容真实性由人工评审负责）`,
 );
 for (const n of notes) console.log("  · " + n);
