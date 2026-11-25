@@ -8,6 +8,7 @@
 
 pub mod app;
 pub mod commands;
+pub mod config_sig;
 pub mod endpoint_config;
 pub mod ports;
 
@@ -117,11 +118,22 @@ fn build_remote(
     if path.exists() {
         match endpoint_config::load_router(&path) {
             Ok(router) => {
+                let plaintext = !std::env::var("TK_REQUIRE_TLS")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
                 return (
                     Arc::new(tellerkit_core::banking::RoutedBanking::new(router)),
                     None,
-                    Some(format!("已按 {} 接入真实端点", path.display())),
-                )
+                    Some(format!(
+                        "已按 {} 接入真实端点{}",
+                        path.display(),
+                        if plaintext {
+                            "（未强制 TLS：生产部署请设置 TK_REQUIRE_TLS=1 并补 TLS 支持）"
+                        } else {
+                            ""
+                        }
+                    )),
+                );
             }
             Err(e) => {
                 eprintln!("端点配置不可用，回退内置 mock：{e}");

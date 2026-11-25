@@ -159,6 +159,10 @@
 - `transport`：`http` | `tcp`
 - `codec`：`json` | `raw` | `fixed-width`
 - 解析失败或文件缺失 → **回退内置 mock**，并在启动 notes 里写明原因
+- **完整性**：`endpoints.json.sig`（对文件原始字节的 Ed25519 签名，hex）。
+  `TK_CONFIG_PUBKEY` 指定公钥；配了公钥就**必须**有签名（`TK_REQUIRE_SIGNED_CONFIG=0` 可显式关闭）
+- **明文**：`https://` 当前会被拒绝（缺 TLS 后端，见 `changes/009`）；
+  `TK_REQUIRE_TLS=1` 时连 `http://` 也拒绝
 
 完整规则见 `changes/008-endpoint-config.md`。
 
