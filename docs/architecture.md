@@ -139,6 +139,17 @@ Endpoint { service: "card.auth",  addr: Tcp{..},    priority: 0, codec: FixedWid
 CJK 会算出 12 字节而不是 8，报文长度对不上。已加回归用例
 （`fixed_width_roundtrip_pads_numeric_and_text`）。
 
+### 端到端验证
+
+`packages/fake-bank` 是一个**真的 TCP 服务端**，`tests/end_to_end.rs` 用它跑通：
+
+```
+RoutedBanking → Router → TcpTransport → 假后台（真 socket）
+```
+
+覆盖：三个服务各自路由、二进制下载走 RawCodec、业务拒绝映射为 `Rejected`、
+主端点不可达时自动切到备用端点。
+
 ## 4. 三类 DTO 必须分开
 
 同一笔交易在三个边界上形状不同，混用会让某一侧的演进绑架另外两侧：
@@ -202,7 +213,7 @@ CJK 会算出 12 字节而不是 8，报文长度对不上。已加回归用例
 | 前端门面 | ✅ `platform/client.ts` 接口 + `tauri.ts`/`mock.ts` 两个实现；`check-boundaries` 强制"只有 tauri.ts 能碰 invoke" | — | 完成 |
 | IPC DTO 与领域类型 | ⚠️ 混用 | 保留混用但**记录理由**：DTO 已由 ts-rs 生成并门禁，加映射层会多一层无收益转换 | 低 |
 | 远端契约 | ✅ `contracts/remote-api.md`（含幂等、504 状态不明、错误模型、端点绑定表） | 补 OpenAPI 生成（可选） | 完成 |
-| 远端三层 | ✅ `remote.rs`（Router/Codec/Transport）+ `transport-net`（TCP 短连接 / 最小 HTTP） | 写 `RoutedBanking` 把 `RemoteBanking` 落到 Router | 中 |
+| 远端三层 | ✅ `remote.rs`（Router/Codec/Transport）+ `transport-net`（TCP / 最小 HTTP）+ `banking.rs`（`RoutedBanking`） | TLS、连接池、真实端点配置 | 中 |
 
 ## 8. 可检查的规则（要加进门禁）
 

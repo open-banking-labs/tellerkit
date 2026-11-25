@@ -21,49 +21,10 @@ use tellerkit_core::perm::PermSnapshot;
 use tellerkit_core::tx::{HostError, TxHost, TxRequest};
 use tellerkit_core::Version;
 
-/// 远端调用的错误。**不携带 HTTP 细节**：应用层只需要知道"可重试 / 不可重试 / 需要重新登录"。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RemoteError {
-    /// 网络不可达或超时：可以重试。
-    Unavailable(String),
-    /// 服务端明确拒绝：不必重试。
-    Rejected(String),
-    /// 凭据失效：需要重新登录。
-    Unauthorized,
-}
-
-impl std::fmt::Display for RemoteError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RemoteError::Unavailable(m) => write!(f, "服务端不可达：{m}"),
-            RemoteError::Rejected(m) => write!(f, "服务端拒绝：{m}"),
-            RemoteError::Unauthorized => write!(f, "登录已失效，请重新登录"),
-        }
-    }
-}
-
-/// 菜单版本探测结果。体积必须很小：它是启动后的第一个后台请求。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MenuVersionProbe {
-    pub latest: u64,
-    pub shell_compat_min: u16,
-    pub shell_compat_max: u16,
-}
-
-/// ③ 边界：桌面应用看到的"银行后台"。
-///
-/// 继承 [`TxHost`]：交易提交与菜单/登录走同一套远端，分成两个对象只会让
-/// 应用层多持有一个引用，没有收益。
-pub trait RemoteBanking: TxHost + Send + Sync {
-    /// 探测菜单版本。实现应保证只传版本号、返回极小响应。
-    fn probe_menu(&self) -> Result<MenuVersionProbe, RemoteError>;
-
-    /// 下载菜单包（已签名，本地负责验签）。
-    fn download_menu(&self) -> Result<Vec<u8>, RemoteError>;
-
-    /// 登录换取权限快照。
-    fn login(&self, role_id: &str, perm_version: u64) -> Result<PermSnapshot, RemoteError>;
-}
+// 端口定义在 core：这样 fake 后台与路由适配器能脱离 Tauri 测试。
+pub use tellerkit_core::banking::{
+    MenuVersionProbe, RemoteBanking, RemoteError, RoutedBanking, ServiceNames,
+};
 
 /// 时钟端口。锁屏、退避、审计都依赖时间，注入才能把测试从 `sleep` 里救出来。
 pub trait Clock: Send + Sync {
