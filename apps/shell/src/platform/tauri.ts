@@ -14,6 +14,7 @@ import type {
   LoginResult,
   MenuView,
   PrintReceipt,
+  Reconciliation,
   ReloadReport,
   SessionState,
   TxException,
@@ -53,6 +54,7 @@ export const tauriClient: ShellClient = {
   txPendingCount: () => call<number>("tx_pending_count"),
   txExceptions: () => call<TxException[]>("tx_exceptions"),
   requestReversal: (key, reason) => call<string>("request_reversal", { key, reason }),
+  txReconciliation: () => call<Reconciliation>("tx_reconciliation"),
   replayPending: () => call<string>("replay_pending"),
 
   auditTail: (limit = 20) => call<string[]>("audit_tail", { limit }),

@@ -17,6 +17,7 @@
 | `tx_pending_count` | — | `number` | 否 |
 | `tx_exceptions` | — | `TxException[]` | 否 |
 | `request_reversal` | `key: string`、`reason: string` | `string`（主机流水号） | 是（向主机申请） |
+| `tx_reconciliation` | — | `Reconciliation` | 否（只读账本） |
 | `replay_pending` | — | `string`（人可读汇总） | 是（逐笔打主机） |
 | `package_module` | `route: string` | `string`（模块源码） | 否 |
 | `audit_tail` | `limit: number` | `string[]`（一行一条） | 否（读本地账本） |

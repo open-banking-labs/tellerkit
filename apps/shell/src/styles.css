@@ -907,3 +907,61 @@ code,
 .tx-exception-row .btn {
   margin-left: auto;
 }
+
+/* ---------- 日终对账 ---------- */
+.reconcile-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(12, 23, 36, 0.55);
+}
+
+.reconcile-card {
+  width: min(760px, 92vw);
+  max-height: 86vh;
+  overflow: auto;
+  background: var(--panel);
+  border-radius: 10px;
+  padding: 20px 24px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
+}
+
+.reconcile-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.reconcile-head h2 {
+  margin: 0;
+  font-size: 17px;
+  margin-right: auto;
+}
+
+.reconcile-sub {
+  margin: 18px 0 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.reconcile-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.reconcile-table th,
+.reconcile-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.reconcile-table .num {
+  text-align: right;
+  font-family: var(--mono);
+}

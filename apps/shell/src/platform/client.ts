@@ -14,6 +14,7 @@ import type {
   LoginResult,
   MenuView,
   PrintReceipt,
+  Reconciliation,
   ReloadReport,
   SessionState,
   TxException,
@@ -59,6 +60,8 @@ export interface ShellClient {
   txExceptions(): Promise<TxException[]>;
   /** 申请冲正：本地授权 → 主机受理 → 返回主机流水号。 */
   requestReversal(key: string, reason: string): Promise<string>;
+  /** 日终对账：本地账本的聚合与最近明细。 */
+  txReconciliation(): Promise<Reconciliation>;
   replayPending(): Promise<string>;
   auditTail(limit?: number): Promise<string[]>;
   sessionTouch(): Promise<SessionState>;

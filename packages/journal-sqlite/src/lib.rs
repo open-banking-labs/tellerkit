@@ -183,6 +183,87 @@ fn status_str(status: TxStatus) -> &'static str {
     }
 }
 
+/// 一条按状态聚合的对账行。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusSummary {
+    pub status: String,
+    pub count: i64,
+    pub amount_cents: i64,
+}
+
+impl SqliteJournal {
+    /// 按状态聚合交易（日终对账用）。
+    ///
+    /// `since` 是零填充的秒级时间戳字符串（与 `created_at` 同格式），
+    /// 传空串表示不限时间。**只读**：不改任何状态。
+    pub fn summary(&self, since: &str) -> Result<Vec<StatusSummary>, String> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT status, COUNT(*), COALESCE(SUM(amount_cents), 0)
+                 FROM tx_log WHERE created_at >= ?1
+                 GROUP BY status ORDER BY status",
+            )
+            .map_err(|e| format!("准备对账查询失败：{e}"))?;
+        let rows = stmt
+            .query_map(params![since], |r| {
+                Ok(StatusSummary {
+                    status: r.get(0)?,
+                    count: r.get(1)?,
+                    amount_cents: r.get(2)?,
+                })
+            })
+            .map_err(|e| format!("执行对账查询失败：{e}"))?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| format!("读取对账结果失败：{e}"))?);
+        }
+        Ok(out)
+    }
+
+    /// 最近 N 条交易记录（对账时要能点开看具体是哪几笔）。
+    pub fn recent(&self, limit: usize) -> Result<Vec<RecentTx>, String> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT idempotency_key, tx_code, amount_cents, status, reference, created_at
+                 FROM tx_log ORDER BY id DESC LIMIT ?1",
+            )
+            .map_err(|e| format!("准备明细查询失败：{e}"))?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = stmt
+            .query_map(params![limit], |r| {
+                Ok(RecentTx {
+                    idempotency_key: r.get(0)?,
+                    tx_code: r.get(1)?,
+                    amount_cents: r.get(2)?,
+                    status: r.get(3)?,
+                    reference: r.get(4)?,
+                    at: r.get(5)?,
+                })
+            })
+            .map_err(|e| format!("执行明细查询失败：{e}"))?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(|e| format!("读取交易明细失败：{e}"))?);
+        }
+        Ok(out)
+    }
+}
+
+/// 一笔交易的简报（对账明细）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentTx {
+    pub idempotency_key: String,
+    pub tx_code: String,
+    pub amount_cents: i64,
+    pub status: String,
+    pub reference: Option<String>,
+    pub at: String,
+}
+
 impl TxJournal for SqliteJournal {
     fn record(&self, request: &TxRequest, result: &TxResult) -> Result<(), String> {
         self.lock()
@@ -349,6 +430,50 @@ mod tests {
             .map(|r| r.idempotency_key)
             .collect();
         assert_eq!(keys, vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn summary_aggregates_by_status_and_amount() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = SqliteJournal::open(dir.path().join("tx.db")).unwrap();
+
+        j.record(&req("a"), &committed()).unwrap();
+        j.record(&req("b"), &committed()).unwrap();
+        j.record(
+            &req("c"),
+            &TxResult {
+                status: TxStatus::Rejected,
+                reference: None,
+                message: "余额不足".into(),
+                replayable: false,
+            },
+        )
+        .unwrap();
+
+        let rows = j.summary("").unwrap();
+        let committed = rows.iter().find(|r| r.status == "committed").unwrap();
+        assert_eq!(committed.count, 2);
+        assert_eq!(committed.amount_cents, 2 * req("a").amount_cents);
+
+        let rejected = rows.iter().find(|r| r.status == "rejected").unwrap();
+        assert_eq!(rejected.count, 1);
+    }
+
+    #[test]
+    fn summary_respects_since_and_recent_is_newest_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = SqliteJournal::open(dir.path().join("tx.db")).unwrap();
+        j.record(&req("old"), &committed()).unwrap();
+        j.record(&req("new"), &committed()).unwrap();
+
+        // 未来时间点：什么都统计不到（证明 since 生效）
+        let future = format!("{:020}", u64::MAX / 2);
+        assert!(j.summary(future.as_str()).unwrap().is_empty());
+
+        let recent = j.recent(10).unwrap();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].idempotency_key, "new", "最近的在前");
+        assert_eq!(recent[0].reference.as_deref(), Some("TX-1"));
     }
 
     #[test]

@@ -12,6 +12,7 @@ import type {
   LoginResult,
   MenuView,
   PrintReceipt,
+  Reconciliation,
   ReloadReport,
   SessionState,
   TxException,
@@ -119,6 +120,14 @@ export const mockClient: ShellClient = {
 
   async txExceptions(): Promise<TxException[]> {
     return [];
+  },
+
+  async txReconciliation(): Promise<Reconciliation> {
+    return {
+      since: "0",
+      summary: [],
+      recent: [],
+    };
   },
 
   async requestReversal(): Promise<string> {

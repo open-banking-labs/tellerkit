@@ -148,6 +148,67 @@ pub fn request_reversal(
     ShellApp::new(&mut guard).request_reversal(&key, &reason)
 }
 
+/// 对账聚合行。
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct StatusRow {
+    pub status: String,
+    #[ts(type = "number")]
+    pub count: i64,
+    #[ts(type = "number")]
+    pub amount_cents: i64,
+}
+
+/// 最近一笔交易（对账明细）。
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct RecentTx {
+    pub key: String,
+    pub tx_code: String,
+    #[ts(type = "number")]
+    pub amount_cents: i64,
+    pub status: String,
+    pub reference: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct Reconciliation {
+    pub since: String,
+    pub summary: Vec<StatusRow>,
+    pub recent: Vec<RecentTx>,
+}
+
+/// 日终对账：只读本地账本，不打主机。
+#[tauri::command]
+pub fn tx_reconciliation(state: State<'_, Mutex<AppState>>) -> Result<Reconciliation, String> {
+    let mut guard = lock(&state)?;
+    let view = ShellApp::new(&mut guard).reconciliation()?;
+    Ok(Reconciliation {
+        since: view.since,
+        summary: view
+            .summary
+            .into_iter()
+            .map(|r| StatusRow {
+                status: r.status,
+                count: r.count,
+                amount_cents: r.amount_cents,
+            })
+            .collect(),
+        recent: view
+            .recent
+            .into_iter()
+            .map(|r| RecentTx {
+                key: r.key,
+                tx_code: r.tx_code,
+                amount_cents: r.amount_cents,
+                status: r.status,
+                reference: r.reference,
+            })
+            .collect(),
+    })
+}
+
 fn dev_state_of(st: &AppState) -> DevState {
     DevState {
         offline: st.mock.as_ref().map(|m| m.offline()).unwrap_or(false),
