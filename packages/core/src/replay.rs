@@ -7,7 +7,7 @@
 //! 所以这里是**调度策略**而不是执行器：回答"现在该重放哪几笔"、
 //! "失败几次算放弃"、"下次什么时候再试"。执行仍由 `TxEngine::replay_pending` 做。
 
-use crate::tx::{TxEngine, TxHost, TxStatus};
+use crate::tx::{HostError, ReplayTicket, TxEngine, TxHost, TxStatus};
 use std::collections::HashMap;
 
 /// 重放策略。
@@ -371,12 +371,36 @@ pub struct ReplayRun {
 ///
 /// 为什么逐笔而不是整批：整批失败时无法区分"哪笔该退避"，
 /// 而且主机刚恢复时一批推过去更容易打垮它。
-pub fn run_once(
+/// 重放计划：锁内算出的「本轮该打主机的请求」，交给锁外逐笔发送。
+///
+/// `due` 是到期键全集（含队列里已经没有的，用来释放调度名额）；
+/// `in_flight` 是真正取出队列、等待主机回执的那几笔。
+pub struct ReplayPlan {
+    due: Vec<String>,
+    in_flight: Vec<ReplayTicket>,
+}
+
+impl ReplayPlan {
+    /// 等待主机回执的请求，顺序即 `apply_once` 需要的回执顺序。
+    pub fn in_flight(&self) -> &[ReplayTicket] {
+        &self.in_flight
+    }
+
+    /// 本轮到期的笔数（含队列里已没有的）。
+    pub fn attempted(&self) -> usize {
+        self.due.len()
+    }
+}
+
+/// 重放阶段一（锁内）：接管未登记的挂起交易，把到期的从队列取出。
+///
+/// 取出即占位：这期间第二轮流重放（含后台 worker）拿到的是空的 `in_flight`，
+/// 不会同一笔打两次主机。
+pub fn plan_once(
     engine: &mut TxEngine,
     scheduler: &mut ReplayScheduler,
-    host: &dyn TxHost,
     now_secs: u64,
-) -> ReplayRun {
+) -> ReplayPlan {
     // 1. 接管引擎里尚未登记的挂起交易
     let pending_keys: Vec<String> = engine
         .pending_requests()
@@ -387,26 +411,54 @@ pub fn run_once(
         scheduler.track(key, now_secs);
     }
 
-    // 2. 到期的逐笔重放
+    // 2. 到期的取出，交给锁外发送
     let due = scheduler.due(now_secs);
+    let mut in_flight = Vec::new();
+    for key in &due {
+        if let Some(ticket) = engine.take_for_replay(key) {
+            in_flight.push(ticket);
+        }
+    }
+    ReplayPlan { due, in_flight }
+}
+
+/// 重放阶段三（重新锁内）：按主机回执逐笔落账并推进调度表。
+///
+/// `outcomes` 必须与 `plan.in_flight()` **一一对应、顺序一致**。
+pub fn apply_once(
+    engine: &mut TxEngine,
+    scheduler: &mut ReplayScheduler,
+    now_secs: u64,
+    plan: ReplayPlan,
+    outcomes: Vec<Result<String, HostError>>,
+) -> ReplayRun {
+    let ReplayPlan { due, in_flight } = plan;
     let mut committed = 0;
     let mut gave_up = Vec::new();
+    let mut replayed: Vec<String> = Vec::with_capacity(in_flight.len());
+    let mut outcomes = outcomes.into_iter();
 
-    for key in &due {
-        match engine.replay_one(host, key) {
-            Some((_, result)) => {
-                if result.status == TxStatus::Committed {
-                    committed += 1;
-                    scheduler.record_success(key);
-                } else {
-                    scheduler.record_failure(key, now_secs);
-                    if scheduler.exhausted(key) {
-                        gave_up.push(key.clone());
-                    }
-                }
+    for ticket in in_flight {
+        let key = ticket.key().to_string();
+        // 回执数量对不上属于程序错误：按"不可达"处理，宁可保留挂起也不丢单。
+        let outcome = outcomes.next().unwrap_or(Err(HostError::Unavailable));
+        let (_, result) = engine.finish_replay(ticket, outcome);
+        if result.status == TxStatus::Committed {
+            committed += 1;
+            scheduler.record_success(&key);
+        } else {
+            scheduler.record_failure(&key, now_secs);
+            if scheduler.exhausted(&key) {
+                gave_up.push(key.clone());
             }
-            // 队列里没有这笔（可能被手动重放掉了）：释放调度名额
-            None => scheduler.record_success(key),
+        }
+        replayed.push(key);
+    }
+
+    // 到期但队列里已经没有这笔（可能被手动重放掉了）：释放调度名额。
+    for key in &due {
+        if !replayed.contains(key) {
+            scheduler.record_success(key);
         }
     }
 
@@ -416,6 +468,25 @@ pub fn run_once(
         still_pending: engine.pending_requests().len(),
         gave_up,
     }
+}
+
+/// 重放一轮（锁内一次做完；测试与旧调用点用）。
+///
+/// 命令层不走这里：它要"锁内算计划 → 锁外逐笔打主机 → 锁内落回执"三段，
+/// 否则后台每 60 秒一轮的重放会把柜员操作挡住 N×3 秒。
+pub fn run_once(
+    engine: &mut TxEngine,
+    scheduler: &mut ReplayScheduler,
+    host: &dyn TxHost,
+    now_secs: u64,
+) -> ReplayRun {
+    let plan = plan_once(engine, scheduler, now_secs);
+    let outcomes: Vec<Result<String, HostError>> = plan
+        .in_flight()
+        .iter()
+        .map(|ticket| host.submit(ticket.request()))
+        .collect();
+    apply_once(engine, scheduler, now_secs, plan, outcomes)
 }
 
 #[cfg(test)]
@@ -468,6 +539,71 @@ mod coordinator_tests {
             assert_eq!(result.status, TxStatus::Pending);
         }
         engine
+    }
+
+    // ---- 两阶段接缝：锁内算计划 → 锁外打主机 → 锁内落回执 ----
+    //
+    // `run_once` 是这两段的组合；下面单独验证接缝，因为命令层与后台 worker
+    // 会在两段之间放掉锁。
+
+    #[test]
+    fn plan_claims_due_tickets_so_a_second_plan_gets_nothing() {
+        let mut engine = engine_with_pending(&["k-claim"]);
+        let mut scheduler = ReplayScheduler::new(ReplayPolicy::default());
+
+        let plan = plan_once(&mut engine, &mut scheduler, 0);
+        assert_eq!(plan.in_flight().len(), 1);
+        assert!(
+            engine.pending_requests().is_empty(),
+            "取出即占位：两轮重放不能同时对同一笔打主机"
+        );
+
+        let second = plan_once(&mut engine, &mut scheduler, 0);
+        assert!(
+            second.in_flight().is_empty(),
+            "第二轮不该再拿到已被上一轮取走的笔"
+        );
+    }
+
+    #[test]
+    fn apply_with_host_reply_commits_and_clears_queue() {
+        let mut engine = engine_with_pending(&["k-apply"]);
+        let mut scheduler = ReplayScheduler::new(ReplayPolicy::default());
+
+        let plan = plan_once(&mut engine, &mut scheduler, 0);
+        let run = apply_once(
+            &mut engine,
+            &mut scheduler,
+            0,
+            plan,
+            vec![Ok("TX-A".into())],
+        );
+
+        assert_eq!(run.attempted, 1);
+        assert_eq!(run.committed, 1);
+        assert_eq!(run.still_pending, 0);
+        assert!(engine.pending_requests().is_empty());
+        assert_eq!(scheduler.tracked(), 0, "成功后应移出调度");
+    }
+
+    #[test]
+    fn apply_puts_unreachable_back_and_backs_off() {
+        let mut engine = engine_with_pending(&["k-back"]);
+        let mut scheduler = ReplayScheduler::new(ReplayPolicy::default());
+
+        let plan = plan_once(&mut engine, &mut scheduler, 0);
+        let run = apply_once(
+            &mut engine,
+            &mut scheduler,
+            0,
+            plan,
+            vec![Err(HostError::Unavailable)],
+        );
+
+        assert_eq!(run.committed, 0);
+        assert_eq!(run.still_pending, 1, "不可达不得丢单");
+        // 回执已经在阶段三放回队列，下轮才有可能再取到。
+        assert_eq!(engine.pending_requests().len(), 1);
     }
 
     #[test]

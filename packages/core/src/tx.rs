@@ -248,6 +248,23 @@ impl TxHost for DemoTxHost {
     }
 }
 
+/// 一笔已从待重放队列取出、等待主机回执的重放。
+#[derive(Debug)]
+pub struct ReplayTicket {
+    request: TxRequest,
+    signature: String,
+}
+
+impl ReplayTicket {
+    pub fn request(&self) -> &TxRequest {
+        &self.request
+    }
+
+    pub fn key(&self) -> &str {
+        &self.request.idempotency_key
+    }
+}
+
 /// 交易引擎。幂等索引常驻内存；待重放队列可选持久化。
 #[derive(Default)]
 pub struct TxEngine {
@@ -471,37 +488,60 @@ impl TxEngine {
     /// 重放**单笔**挂起交易，供调度器按退避节奏逐笔调用。
     ///
     /// 返回 None 表示队列里没有这笔（可能已被别处重放）。
-    pub fn replay_one(
-        &mut self,
-        host: &dyn TxHost,
-        idempotency_key: &str,
-    ) -> Option<(String, TxResult)> {
+    /// 重放阶段一：把该笔从待重放队列**取出**，交给调用方去锁外发送。
+    ///
+    /// 取出而不是只读取，是为了当"在途占位"：重放期间同一笔不会再被另一轮重放
+    /// 取到（否则两轮都会打主机）。进程崩了也不怕——未成功的仍在账本队列里，
+    /// 下次启动会读回。
+    ///
+    /// 返回 `None` 表示队列里没有这笔（可能已被手动重放掉）。
+    pub fn take_for_replay(&mut self, idempotency_key: &str) -> Option<ReplayTicket> {
         let index = self
             .pending
             .iter()
             .position(|r| r.idempotency_key == idempotency_key)?;
         let request = self.pending.remove(index);
-        let key = request.idempotency_key.clone();
-        let signature = request_signature(&request);
+        Some(ReplayTicket {
+            signature: request_signature(&request),
+            request,
+        })
+    }
 
-        let result = match host.submit(&request) {
+    /// 重放阶段三：把主机回执落账。不可达时放回队列，绝不丢单。
+    pub fn finish_replay(
+        &mut self,
+        ticket: ReplayTicket,
+        outcome: Result<String, HostError>,
+    ) -> (String, TxResult) {
+        let key = ticket.request.idempotency_key.clone();
+        let result = match outcome {
             Ok(reference) => TxResult::committed(reference),
             Err(HostError::Rejected(reason)) => TxResult::rejected(&format!("主机拒绝：{reason}")),
             Err(HostError::Timeout) | Err(HostError::Unavailable) => {
                 // 不可达：放回队列，绝不丢单
-                self.pending.push(request.clone());
+                self.pending.push(ticket.request.clone());
                 TxResult::pending("重放失败：仍不可达，保留在队列中")
             }
         };
 
-        self.cache_result(key.clone(), signature, &result);
+        self.cache_result(key.clone(), ticket.signature, &result);
 
         if let Some(journal) = self.journal.as_deref() {
-            if let Err(e) = journal.settle(&request, &result) {
+            if let Err(e) = journal.settle(&ticket.request, &result) {
                 self.journal_error = Some(e);
             }
         }
-        Some((key, result))
+        (key, result)
+    }
+
+    pub fn replay_one(
+        &mut self,
+        host: &dyn TxHost,
+        idempotency_key: &str,
+    ) -> Option<(String, TxResult)> {
+        let ticket = self.take_for_replay(idempotency_key)?;
+        let outcome = host.submit(ticket.request());
+        Some(self.finish_replay(ticket, outcome))
     }
 
     /// 重放全部挂起交易。成功的移出队列，失败的保留。
