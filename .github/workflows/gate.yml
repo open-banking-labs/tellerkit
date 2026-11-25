@@ -31,10 +31,10 @@ jobs:
         run: npm ci
 
       - name: 核心逻辑测试
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
       - name: Clippy（-D warnings）
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: 生成物必须与源码同步
         run: |

@@ -18,7 +18,7 @@ set -euo pipefail
 HOST="${TK_BUILD_HOST:-tailscale-seoul}"
 # rsync 的远端路径相对远端 home；ssh 里再用 $HOME 拼绝对路径
 DIR_REL="${TK_BUILD_DIR:-build/tk-work}"
-CMD="${*:-cargo test --workspace}"
+CMD="${*:-cargo test --workspace --locked}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
