@@ -548,7 +548,7 @@ impl TxJournal for SqliteJournal {
         } else {
             None
         };
-        let conn = self.lock();
+        let mut conn = self.lock();
         let tx = conn
             .transaction()
             .map_err(|e| format!("结论落盘事务失败：{e}"))?;

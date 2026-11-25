@@ -905,6 +905,9 @@ mod tests {
         fn dequeue(&self, _key: &str) -> Result<(), String> {
             Ok(())
         }
+        fn pending(&self) -> Result<Vec<TxRequest>, String> {
+            Ok(Vec::new())
+        }
     }
 
     // S-08：写前意图是提交的前置条件，不是事后补记。

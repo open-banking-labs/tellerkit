@@ -26,7 +26,7 @@ use tellerkit_core::pack::pubkey_from_hex;
 use tellerkit_core::perm::PermSnapshot;
 use tellerkit_core::pkg::BizPackage;
 use tellerkit_core::replay::{ReplayPolicy, ReplayScheduler};
-use tellerkit_core::reversal::ReversalBook;
+use tellerkit_core::reversal::{ExceptionKind, ReversalBook};
 use tellerkit_core::session::SessionGuard;
 use tellerkit_core::store::MenuStore;
 use tellerkit_core::tx::TxEngine;
@@ -268,6 +268,20 @@ pub fn run() {
                 verifying_key,
             );
             state.startup_fatal = startup_fatal;
+            // 写前意图已落盘但主机结论未记的交易，只能按"状态不明"处置：
+            // 标记待冲正并提示查账，绝不自动重发（可能重复入账）。
+            let recovered = state.tx.take_in_flight();
+            for request in &recovered {
+                state
+                    .reversal
+                    .mark(&request.idempotency_key, ExceptionKind::MarkedForReversal);
+            }
+            if !recovered.is_empty() {
+                eprintln!(
+                    "发现 {} 笔在途交易（结论未记），已转入待冲正，请查账确认",
+                    recovered.len()
+                );
+            }
             if let Some(note) = remote_note {
                 eprintln!("{note}");
             }
