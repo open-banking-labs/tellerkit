@@ -12,7 +12,11 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::Arc;
 use std::time::Duration;
+
+use rustls::pki_types::{CertificateDer, ServerName};
+use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 
 use tellerkit_core::remote::{EndpointAddr, Transport, TransportError, WireMessage};
 
@@ -117,40 +121,138 @@ impl Transport for TcpTransport {
     }
 }
 
-/// 最小 HTTP/1.1 传输：`POST {base_url}/{op}`，`Content-Length` 定长。
+/// 最小 HTTP/1.1 传输，支持 `http://` 与 `https://`。
 ///
-/// 不处理：TLS、重定向、分块编码、连接复用。
-/// 这些在接入真实后台前必须补（或换成成熟客户端），已经在文档里记为 TODO。
-#[derive(Debug, Clone)]
+/// - 明文：直接 TCP + 手写报文头；
+/// - TLS：`rustls` + 内置根证书（`webpki-roots`），**不读系统证书库**，
+///   保证 Windows / macOS / Linux 行为一致。
+///
+/// 不处理：重定向、分块编码、连接复用、客户端证书。这些在接入真实后台前按需补。
+#[derive(Clone)]
 pub struct HttpTransport {
     pub timeout: Duration,
+    client: Arc<ClientConfig>,
+}
+
+impl std::fmt::Debug for HttpTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpTransport")
+            .field("timeout", &self.timeout)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for HttpTransport {
     fn default() -> Self {
+        let mut roots = RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         Self {
             timeout: Duration::from_secs(5),
+            client: Arc::new(
+                ClientConfig::builder()
+                    .with_root_certificates(roots)
+                    .with_no_client_auth(),
+            ),
         }
     }
 }
 
-fn split_host_port(base_url: &str) -> Result<(String, u16, String), TransportError> {
-    let without_scheme = base_url
-        .strip_prefix("http://")
-        .ok_or_else(|| TransportError::Protocol(format!("只支持 http://：{base_url}")))?;
+impl HttpTransport {
+    /// 额外信任若干根证书。**只给测试与内网自签场景用**——
+    /// 生产环境用 [`HttpTransport::default`]，只信公共根。
+    pub fn with_extra_roots(extra: Vec<CertificateDer<'static>>) -> Self {
+        let mut roots = RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        for cert in extra {
+            let _ = roots.add(cert);
+        }
+        Self {
+            timeout: Duration::from_secs(5),
+            client: Arc::new(
+                ClientConfig::builder()
+                    .with_root_certificates(roots)
+                    .with_no_client_auth(),
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Target {
+    host: String,
+    port: u16,
+    path: String,
+    tls: bool,
+}
+
+fn split_host_port(base_url: &str) -> Result<Target, TransportError> {
+    let (tls, without_scheme) = if let Some(rest) = base_url.strip_prefix("https://") {
+        (true, rest)
+    } else if let Some(rest) = base_url.strip_prefix("http://") {
+        (false, rest)
+    } else {
+        return Err(TransportError::Protocol(format!(
+            "只支持 http:// 或 https://：{base_url}"
+        )));
+    };
+
     let (authority, path) = match without_scheme.find('/') {
         Some(i) => (&without_scheme[..i], &without_scheme[i..]),
         None => (without_scheme, ""),
     };
+    let default_port = if tls { 443 } else { 80 };
     let (host, port) = match authority.rsplit_once(':') {
         Some((h, p)) => (
             h.to_string(),
             p.parse::<u16>()
                 .map_err(|_| TransportError::Protocol(format!("端口非法：{p}")))?,
         ),
-        None => (authority.to_string(), 80),
+        None => (authority.to_string(), default_port),
     };
-    Ok((host, port, path.to_string()))
+    Ok(Target {
+        host,
+        port,
+        path: path.to_string(),
+        tls,
+    })
+}
+
+fn build_request_head(target: &Target, request: &WireMessage) -> String {
+    let host_header = if target.port == 80 || target.port == 443 {
+        target.host.clone()
+    } else {
+        format!("{}:{}", target.host, target.port)
+    };
+    let mut head = format!(
+        "POST {} HTTP/1.1\r\nHost: {host_header}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        target.path,
+        request.body.len()
+    );
+    for (k, v) in &request.head {
+        if k == "x-op" {
+            continue;
+        }
+        head.push_str(&format!("{k}: {v}\r\n"));
+    }
+    head.push_str("\r\n");
+    head
+}
+
+fn write_and_read<S: Read + Write>(
+    stream: &mut S,
+    head: &str,
+    body: &[u8],
+) -> Result<Vec<u8>, TransportError> {
+    stream
+        .write_all(head.as_bytes())
+        .and_then(|_| stream.write_all(body))
+        .and_then(|_| stream.flush())
+        .map_err(|e| io_err("发送失败", e))?;
+    let mut raw = Vec::new();
+    stream
+        .read_to_end(&mut raw)
+        .map_err(|e| io_err("读响应失败", e))?;
+    Ok(raw)
 }
 
 impl Transport for HttpTransport {
@@ -168,37 +270,27 @@ impl Transport for HttpTransport {
                 "HttpTransport 只能处理 Http 地址".into(),
             ));
         };
-        let (host, port, base_path) = split_host_port(base_url)?;
         let op = request.head.get("x-op").cloned().unwrap_or_default();
-        let path = format!("{base_path}/{op}");
+        let mut target = split_host_port(base_url)?;
+        target.path = format!("{}/{}", target.path.trim_end_matches('/'), op);
 
-        let mut stream = connect(&host, port, self.timeout)?;
-        stream
-            .set_read_timeout(Some(self.timeout))
+        let tcp = connect(&target.host, target.port, self.timeout)?;
+        tcp.set_read_timeout(Some(self.timeout))
             .map_err(|e| io_err("设置读超时失败", e))?;
 
-        let mut head = format!(
-            "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: {}\r\nConnection: close\r\n",
-            request.body.len()
-        );
-        for (k, v) in &request.head {
-            if k == "x-op" {
-                continue;
-            }
-            head.push_str(&format!("{k}: {v}\r\n"));
-        }
-        head.push_str("\r\n");
+        let head = build_request_head(&target, request);
 
-        stream
-            .write_all(head.as_bytes())
-            .and_then(|_| stream.write_all(&request.body))
-            .and_then(|_| stream.flush())
-            .map_err(|e| io_err("发送失败", e))?;
-
-        let mut raw = Vec::new();
-        stream
-            .read_to_end(&mut raw)
-            .map_err(|e| io_err("读响应失败", e))?;
+        let raw = if target.tls {
+            let server_name = ServerName::try_from(target.host.clone())
+                .map_err(|e| TransportError::Protocol(format!("服务器名非法：{e}")))?;
+            let conn = ClientConnection::new(Arc::clone(&self.client), server_name)
+                .map_err(|e| TransportError::Protocol(format!("TLS 初始化失败：{e}")))?;
+            let mut stream = StreamOwned::new(conn, tcp);
+            write_and_read(&mut stream, &head, &request.body)?
+        } else {
+            let mut stream = tcp;
+            write_and_read(&mut stream, &head, &request.body)?
+        };
 
         parse_http_response(&raw)
     }
@@ -270,7 +362,7 @@ mod tests {
     ///
     /// 只读一次就回包会让客户端在 Windows 上收到 RST（还有未读数据），
     /// 表现是 "读响应失败" 而不是预期的状态码——测试必须把请求读完。
-    fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {
+    fn read_http_request<S: Read + Write>(stream: &mut S) -> Vec<u8> {
         let mut buf = Vec::new();
         let mut chunk = [0u8; 1024];
         loop {
@@ -441,14 +533,118 @@ mod tests {
     }
 
     #[test]
-    fn split_host_port_handles_default_and_explicit_ports() {
-        assert_eq!(
-            split_host_port("http://localhost/api").unwrap(),
-            ("localhost".to_string(), 80, "/api".to_string())
+    fn split_host_port_handles_schemes_and_default_ports() {
+        let http = split_host_port("http://localhost/api").unwrap();
+        assert_eq!(http.host, "localhost");
+        assert_eq!(http.port, 80);
+        assert_eq!(http.path, "/api");
+        assert!(!http.tls);
+
+        let https = split_host_port("https://bank.internal/v1").unwrap();
+        assert_eq!(https.port, 443, "https 默认 443");
+        assert!(https.tls);
+
+        let explicit = split_host_port("http://10.0.0.1:8080").unwrap();
+        assert_eq!(explicit.port, 8080);
+        assert_eq!(explicit.path, "");
+    }
+
+    #[test]
+    fn unsupported_scheme_is_rejected() {
+        let err = split_host_port("ftp://x").unwrap_err();
+        assert!(matches!(err, TransportError::Protocol(_)));
+        assert!(err.to_string().contains("http://"));
+    }
+
+    /// 起一个只服务一次的 TLS 服务器，返回 (端口, 证书 DER)。
+    fn serve_once_tls(
+        handler: impl FnOnce(&mut StreamOwned<rustls::ServerConnection, TcpStream>) + Send + 'static,
+    ) -> (u16, CertificateDer<'static>, thread::JoinHandle<()>) {
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("生成自签证书");
+        let cert_der = certified.cert.der().clone();
+        let key_der =
+            rustls::pki_types::PrivateKeyDer::Pkcs8(certified.key_pair.serialize_der().into());
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der.clone()], key_der)
+            .expect("服务器 TLS 配置");
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            if let Ok((tcp, _)) = listener.accept() {
+                let conn = rustls::ServerConnection::new(Arc::new(config)).expect("服务端连接");
+                let mut stream = StreamOwned::new(conn, tcp);
+                handler(&mut stream);
+            }
+        });
+        (port, cert_der, handle)
+    }
+
+    #[test]
+    fn https_handshake_succeeds_with_trusted_root() {
+        let (port, cert, handle) = serve_once_tls(|stream| {
+            let request = read_http_request(stream);
+            assert!(
+                String::from_utf8_lossy(&request).starts_with("POST /v1/ping HTTP/1.1"),
+                "TLS 上的报文内容应与明文一致"
+            );
+            let reply = b"{\"payload\":{\"ok\":true}}";
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", reply.len());
+            stream.write_all(head.as_bytes()).unwrap();
+            stream.write_all(reply).unwrap();
+            // 必须发 close_notify：没有它，客户端会把 EOF 当成被截断（rustls 的正确行为）
+            stream.conn.send_close_notify();
+            stream.flush().unwrap();
+        });
+
+        let transport = HttpTransport::with_extra_roots(vec![cert]);
+        let mut head = std::collections::BTreeMap::new();
+        head.insert("x-op".to_string(), "ping".to_string());
+
+        let out = transport
+            .exchange(
+                &EndpointAddr::Http {
+                    base_url: format!("https://localhost:{port}/v1"),
+                },
+                &WireMessage {
+                    head,
+                    body: b"{}".to_vec(),
+                },
+            )
+            .expect("TLS 握手与请求应成功");
+        assert_eq!(out.body, b"{\"payload\":{\"ok\":true}}");
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn https_rejects_untrusted_certificate() {
+        let (port, _cert, handle) = serve_once_tls(|stream| {
+            // 客户端会先握手失败，这里读到的是错误或 EOF，忽略即可
+            let _ = read_http_request(stream);
+        });
+
+        // 不把自签证书加进信任库：必须失败，而不是"连上就行"
+        let err = HttpTransport::default()
+            .exchange(
+                &EndpointAddr::Http {
+                    base_url: format!("https://localhost:{port}"),
+                },
+                &WireMessage {
+                    head: Default::default(),
+                    body: b"{}".to_vec(),
+                },
+            )
+            .unwrap_err();
+        let text = err.to_string();
+        assert!(
+            matches!(
+                err,
+                TransportError::Unreachable(_) | TransportError::Protocol(_)
+            ),
+            "实际：{text}"
         );
-        assert_eq!(
-            split_host_port("http://10.0.0.1:8080").unwrap(),
-            ("10.0.0.1".to_string(), 8080, "".to_string())
-        );
+        handle.join().unwrap();
     }
 }
