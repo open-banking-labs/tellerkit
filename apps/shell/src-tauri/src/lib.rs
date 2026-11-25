@@ -201,10 +201,8 @@ fn spawn_replay_worker(handle: tauri::AppHandle) {
         if guard.startup_fatal.check().is_err() {
             continue;
         }
-        // 未登录不重放：没有权限快照时重放会在审计里留下 unknown 操作者
-        if guard.snapshot.is_none() {
-            continue;
-        }
+        // 会话校验统一走 replay_pending 里的 require_unlocked：
+        // 未登录/锁定时它会拒绝并写审计，后台线程吞掉 Err 即可（skip 已留痕）。
         let mut app = app::ShellApp::new(&mut guard);
         let _ = app.replay_pending();
     });

@@ -138,6 +138,31 @@ impl<'a> ShellApp<'a> {
         }
     }
 
+    // ---------- 会话闸门 ----------
+
+    /// 资金/打印/冲正/重放/业务包入口的统一会话校验。
+    ///
+    /// 锁屏与未登录的判定**只信 Rust 侧状态**——前端 tick 可以被跳过，
+    /// 覆盖层下的 iframe 也能发 postMessage，只有这里是唯一真相。
+    /// 判定失败即写审计（拒绝原因），且绝不触达主机。
+    fn require_unlocked(&self, action: &str) -> Result<(), String> {
+        match &self.state.session {
+            Some(g) if !g.is_locked() => Ok(()),
+            other => {
+                let (reason, detail) = match other {
+                    None => ("尚未登录", "未登录即调用受保护命令"),
+                    Some(g) => {
+                        let why = g.reason().map(|r| r.label()).unwrap_or("会话已锁定");
+                        ("会话已锁定", why)
+                    }
+                };
+                let actor = self.actor();
+                self.audit(&actor, action, "", "denied", detail);
+                Err(format!("{reason}：{detail}。请回到锁屏界面解锁后再试"))
+            }
+        }
+    }
+
     // ---------- 启动与菜单 ----------
 
     /// 启动：本地包优先，业务包合并，网络只在本地不可用时兜底。
@@ -324,6 +349,7 @@ impl<'a> ShellApp<'a> {
 
     /// 申请冲正：本地授权 → 主机受理 → 拿到流水号后才算处置完成。
     pub fn request_reversal(&mut self, key: &str, reason: &str) -> Result<String, String> {
+        self.require_unlocked("reversal")?;
         let actor = self.actor();
         let request = ReversalRequest {
             idempotency_key: key.to_string(),
@@ -356,6 +382,7 @@ impl<'a> ShellApp<'a> {
     }
 
     pub fn submit_transaction(&mut self, request: TxRequest) -> Result<TxResult, String> {
+        self.require_unlocked("submit_tx")?;
         // 契约 lifecycle.md 不变量 7：主机没声明幂等，就不许离线挂起。
         // 挂起意味着"以后一定会重发"，而重发只有服务端按幂等键去重才不会重复入账。
         if request.offline_capable && !self.remote.supports_idempotency() {
@@ -396,6 +423,7 @@ impl<'a> ShellApp<'a> {
     }
 
     pub fn replay_pending(&mut self) -> Result<String, String> {
+        self.require_unlocked("replay")?;
         let remote = Arc::clone(&self.remote);
         let now = self.clock.now_secs();
         let run = tellerkit_core::replay::run_once(
@@ -446,6 +474,7 @@ impl<'a> ShellApp<'a> {
     // ---------- 设备 ----------
 
     pub fn print_voucher(&mut self, voucher: Voucher) -> Result<PrintReceipt, String> {
+        self.require_unlocked("print_voucher")?;
         // 白名单先于动作：未登记的型号连纸都不该动
         self.state
             .devices
@@ -526,6 +555,7 @@ impl<'a> ShellApp<'a> {
     // ---------- 业务包 ----------
 
     pub fn package_module(&self, route: &str) -> Result<String, String> {
+        self.require_unlocked("package_module")?;
         for package in &self.state.packages {
             if let Some(module) = package.routes.get(route) {
                 return package.assets.get(module).cloned().ok_or_else(|| {
@@ -748,5 +778,75 @@ mod tests {
         clock.set(400);
         let view = ShellApp::new(&mut state).session_touch();
         assert!(view.locked, "锁定期间的操作不得解锁");
+    }
+
+    /// 锁定后所有资金/打印/冲正/重放/包入口一律拒绝，
+    /// 且主机调用次数为 0——把 mock 设成"在线且有响应"，
+    /// 若闸门失效就会返回成功，测试会失败。
+    fn locked_state() -> AppState {
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let mut state = state_with(Arc::clone(&clock));
+        clock.set(180);
+        assert!(ShellApp::new(&mut state).session_tick().locked);
+        state
+    }
+
+    #[test]
+    fn locked_session_refuses_all_protected_commands() {
+        let mut state = locked_state();
+
+        let err = ShellApp::new(&mut state)
+            .submit_transaction(TxRequest::new("account.deposit", "k-lock"))
+            .unwrap_err();
+        assert!(err.contains("会话已锁定"), "提交应被闸门拒绝：{err}");
+
+        let err = ShellApp::new(&mut state)
+            .print_voucher(Voucher::new("voucher", "account.deposit"))
+            .unwrap_err();
+        assert!(err.contains("会话已锁定"), "打印应被闸门拒绝：{err}");
+
+        let err = ShellApp::new(&mut state)
+            .request_reversal("k-lock", "冲正")
+            .unwrap_err();
+        assert!(err.contains("会话已锁定"), "冲正应被闸门拒绝：{err}");
+
+        let err = ShellApp::new(&mut state).replay_pending().unwrap_err();
+        assert!(err.contains("会话已锁定"), "重放应被闸门拒绝：{err}");
+
+        let err = ShellApp::new(&mut state)
+            .package_module("pkg.any.route")
+            .unwrap_err();
+        assert!(err.contains("会话已锁定"), "业务包入口应被闸门拒绝：{err}");
+    }
+
+    #[test]
+    fn missing_session_refuses_protected_commands() {
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let mut state = state_with(clock);
+        state.session = None;
+
+        let err = ShellApp::new(&mut state)
+            .submit_transaction(TxRequest::new("account.deposit", "k-none"))
+            .unwrap_err();
+        assert!(err.contains("尚未登录"), "未登录应被闸门拒绝：{err}");
+
+        let err = ShellApp::new(&mut state).replay_pending().unwrap_err();
+        assert!(err.contains("尚未登录"), "未登录重放应被闸门拒绝：{err}");
+
+        let err = ShellApp::new(&mut state)
+            .request_reversal("k-none", "冲正")
+            .unwrap_err();
+        assert!(err.contains("尚未登录"), "未登录冲正应被闸门拒绝：{err}");
+    }
+
+    #[test]
+    fn unlocked_session_allows_commands_to_reach_host() {
+        // 反向对照：解锁后必须真的走到主机，证明闸门不是"一律拒绝"。
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let mut state = state_with(clock);
+        let result = ShellApp::new(&mut state)
+            .submit_transaction(TxRequest::new("account.deposit", "k-ok"))
+            .expect("解锁后应放行到主机");
+        assert_eq!(result.status, TxStatus::Committed);
     }
 }
