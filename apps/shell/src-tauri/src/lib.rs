@@ -84,6 +84,11 @@ pub struct AppState {
     pub replay: ReplayScheduler,
     /// 冲正账本：记录"状态不明"的交易与冲正申请。
     pub reversal: ReversalBook,
+    /// "正在检查菜单包更新"的在途标记。
+    ///
+    /// 更新检查（探测 + 下载 + 安装）现在跑在锁外，两次并发检查会同时写同一个
+    /// 临时包文件——写入不是原子的，可能把包写坏。标记挡住第二次。
+    pub updating: bool,
     /// 菜单包 / 业务包的验签公钥。
     ///
     /// 生产由构建期 `TK_MENU_PUBKEY_HEX` 注入；调试构建没有注入时才回退演示公钥。
@@ -126,6 +131,7 @@ impl AppState {
             clock,
             replay: ReplayScheduler::new(ReplayPolicy::default()),
             reversal: ReversalBook::new(),
+            updating: false,
             verifying_key,
         }
     }

@@ -369,10 +369,24 @@ pub async fn current_menu(state: State<'_, SharedState>) -> Result<Vec<MenuView>
     with_state(&state, |app| ShellApp::new(app).current_menu()).await
 }
 
+/// 后台版本探测：探测 + 按需下载装包那一段不持锁。
 #[tauri::command]
 pub async fn check_update(state: State<'_, SharedState>) -> Result<UpdateReport, String> {
-    with_state(&state, |app| {
-        let outcome = ShellApp::new(app).check_update()?;
+    let shared = Arc::clone(state.inner());
+    blocking(move || {
+        // 阶段一（锁内）：占住"正在检查"标记，交出端口与仓库句柄。
+        let prepared = {
+            let mut guard = lock(&shared)?;
+            ShellApp::new(&mut guard).prepare_check_update()?
+        };
+
+        // 阶段二（**不持锁**）：版本探测 + 按需下载安装。
+        let outcome = prepared.call_host();
+
+        // 阶段三（重新锁内）：装好了就换内存菜单树，并释放标记。
+        let mut guard =
+            lock(&shared).map_err(|e| format!("{e}；菜单包可能已更新，请重启客户端"))?;
+        let outcome = ShellApp::new(&mut guard).complete_check_update(outcome)?;
         Ok(UpdateReport {
             checked: outcome.checked,
             local: outcome.local.unwrap_or(0),

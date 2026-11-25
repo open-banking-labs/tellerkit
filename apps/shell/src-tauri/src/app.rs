@@ -367,6 +367,22 @@ impl PreparedReversal {
     }
 }
 
+/// 版本检查阶段一的产物：端口与仓库句柄（都是廉价克隆），只带值。
+pub struct PreparedUpdate {
+    store: tellerkit_core::store::MenuStore,
+    remote: Arc<dyn RemoteBanking>,
+}
+
+impl PreparedUpdate {
+    /// 阶段二：版本探测 + 按需下载安装，**不持锁**。
+    ///
+    /// 安装是"写临时文件 → rename"，但两次并发检查会写同一个临时文件，
+    /// 所以阶段一的在途标记不能省。
+    pub fn call_host(&self) -> tellerkit_core::sync::UpdateOutcome {
+        sync::check_and_update(self.remote.as_ref(), &self.store)
+    }
+}
+
 /// 重放阶段一的产物：本轮计划 + 主机句柄，只带值。
 pub struct PreparedReplay {
     plan: ReplayPlan,
@@ -609,15 +625,41 @@ impl<'a> ShellApp<'a> {
         Ok(filter::filter_visible(menu, snapshot))
     }
 
-    /// 后台版本探测。菜单版本更新不重置权限快照——两者独立演进。
-    pub fn check_update(&mut self) -> Result<sync::UpdateOutcome, String> {
-        let outcome = sync::check_and_update(self.state.remote.as_ref(), &self.state.store);
+    /// 版本检查阶段一（锁内）：占住"正在检查"标记，交出端口与仓库句柄。
+    pub fn prepare_check_update(&mut self) -> Result<PreparedUpdate, String> {
+        if self.state.updating {
+            return Err("正在检查菜单包更新，请稍候再试".to_string());
+        }
+        self.state.updating = true;
+        Ok(PreparedUpdate {
+            store: self.state.store.clone(),
+            remote: Arc::clone(&self.remote),
+        })
+    }
+
+    /// 版本检查阶段三（重新锁内）：新包装好了就换内存里的菜单树，并释放标记。
+    ///
+    /// 菜单版本更新**不**重置权限快照——两者独立演进。
+    pub fn complete_check_update(
+        &mut self,
+        outcome: sync::UpdateOutcome,
+    ) -> Result<sync::UpdateOutcome, String> {
+        self.state.updating = false;
         if outcome.updated {
             if let Ok(loaded) = self.state.store.load_latest() {
                 self.state.menu = Some(loaded.tree);
             }
         }
         Ok(outcome)
+    }
+
+    /// 锁内一次做完版本检查（测试与旧调用点用）。
+    ///
+    /// 命令层走三段式：探测 + 下载可能按 3s 超时走，不该让别的命令排队。
+    pub fn check_update(&mut self) -> Result<sync::UpdateOutcome, String> {
+        let prepared = self.prepare_check_update()?;
+        let outcome = prepared.call_host();
+        self.complete_check_update(outcome)
     }
 
     /// 演示"本地包被篡改"后的回退：验签失败 → 服务端救回。
@@ -1521,6 +1563,64 @@ mod tests {
             .expect("阶段三应成功");
         assert!(summary.contains("成功 1 笔"), "实际：{summary}");
         assert_eq!(guard.tx.pending_requests().len(), 0, "成功后应清空队列");
+    }
+
+    /// P0-10 第 2b-2c 步：版本探测/下载那一段不持锁。
+    ///
+    /// 这里不真的联网：阶段二直接用合成结论，只验"阶段一结束后锁已放掉"
+    /// 与"标记在阶段三释放"两件事——真实探测+装包逻辑在 core 的 sync 测试里。
+    #[test]
+    fn update_check_between_phases_does_not_hold_the_app_state_lock() {
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let state = state_with(clock);
+        let shared = std::sync::Mutex::new(state);
+
+        // 产物只是句柄，不持有锁；`_prepared` 活到函数结束即可（标记由阶段三释放）。
+        let _prepared = {
+            let mut guard = shared.lock().expect("测试里 AppState 锁不应中毒");
+            ShellApp::new(&mut guard)
+                .prepare_check_update()
+                .expect("阶段一应成功")
+        };
+
+        // 阶段一结束后锁已释放：版本探测/下载期间别的命令能正常拿锁。
+        assert!(
+            shared.try_lock().is_ok(),
+            "版本检查期间不能还握着 AppState 锁"
+        );
+
+        let outcome = tellerkit_core::sync::UpdateOutcome {
+            checked: true,
+            local: None,
+            latest: Some(1),
+            updated: false,
+            note: "测试：菜单已是最新".to_string(),
+        };
+
+        let mut guard = shared.lock().expect("测试里 AppState 锁不应中毒");
+        ShellApp::new(&mut guard)
+            .complete_check_update(outcome)
+            .expect("阶段三应成功");
+        // 标记必须释放，否则之后再也检查不了更新。
+        assert!(
+            ShellApp::new(&mut guard).prepare_check_update().is_ok(),
+            "阶段三必须释放「正在检查」标记"
+        );
+    }
+
+    #[test]
+    fn concurrent_update_check_is_refused_while_one_is_in_flight() {
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let mut state = state_with(clock);
+
+        let _first = ShellApp::new(&mut state)
+            .prepare_check_update()
+            .expect("首轮应放行");
+        let err = match ShellApp::new(&mut state).prepare_check_update() {
+            Ok(_) => panic!("并发第二轮必须被拒"),
+            Err(err) => err,
+        };
+        assert!(err.contains("正在检查"), "实际：{err}");
     }
 
     #[test]
