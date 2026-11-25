@@ -24,4 +24,11 @@ serde_json = { workspace = true }
 tellerkit-core = { path = "../../../packages/core" }
 tellerkit-journal-sqlite = { path = "../../../packages/journal-sqlite" }
 tellerkit-transport-net = { path = "../../../packages/transport-net" }
+ed25519-dalek.workspace = true
+hex.workspace = true
+thiserror.workspace = true
 ts-rs.workspace = true
+
+[dev-dependencies]
+rand.workspace = true
+tempfile = "3"

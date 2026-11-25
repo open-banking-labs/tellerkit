@@ -59,13 +59,69 @@ fn default_timeout() -> u64 {
 }
 
 /// 解析并构建路由。任何一条端点非法都整体失败——不猜、不跳过。
+///
+/// 顺序：先验签（如果要求），再解析。**先验签后解析**的原因：
+/// 未签名的配置可能被改成任意内容，解析它等于信任它。
 pub fn load_router(path: &Path) -> Result<Router, String> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| format!("读取端点配置失败（{}）：{e}", path.display()))?;
-    parse(&raw)
+    load_router_with(path, &LoadPolicy::from_env())
+}
+
+/// 加载策略。抽出来是为了能测——直接读环境变量的函数在并行测试里不可靠。
+#[derive(Debug, Clone, Default)]
+pub struct LoadPolicy {
+    /// 配置公钥（hex）。`None` 表示未配置。
+    pub pubkey: Option<String>,
+    /// 是否强制要求签名。
+    pub require_signed: bool,
+    /// 是否禁止明文端点（生产应为 true）。
+    pub require_tls: bool,
+}
+
+impl LoadPolicy {
+    pub fn from_env() -> Self {
+        Self {
+            pubkey: crate::config_sig::config_pubkey(),
+            require_signed: crate::config_sig::require_signed(),
+            require_tls: std::env::var("TK_REQUIRE_TLS")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+        }
+    }
+}
+
+pub fn load_router_with(path: &Path, policy: &LoadPolicy) -> Result<Router, String> {
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("读取端点配置失败（{}）：{e}", path.display()))?;
+    let raw = String::from_utf8(bytes.clone()).map_err(|e| format!("端点配置不是 UTF-8：{e}"))?;
+
+    if policy.require_signed {
+        let pubkey = policy
+            .pubkey
+            .as_deref()
+            .ok_or_else(|| "要求配置签名，但未设置 TK_CONFIG_PUBKEY".to_string())?;
+        let sig_path = signature_path(path);
+        let sig = std::fs::read_to_string(&sig_path)
+            .map_err(|_| format!("缺少签名文件 {}", sig_path.display()))?;
+        crate::config_sig::verify_detached(&bytes, &sig, pubkey)
+            .map_err(|e| format!("端点配置验签失败：{e}"))?;
+    }
+
+    parse_with(&raw, policy.require_tls)
+}
+
+/// `endpoints.json` → `endpoints.json.sig`
+fn signature_path(path: &Path) -> std::path::PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".sig");
+    path.with_file_name(name)
 }
 
 pub fn parse(raw: &str) -> Result<Router, String> {
+    parse_with(raw, false)
+}
+
+/// `require_tls` 为真时拒绝一切 `http://` 端点（生产环境应打开）。
+pub fn parse_with(raw: &str, require_tls: bool) -> Result<Router, String> {
     let config: EndpointConfig =
         serde_json::from_str(raw).map_err(|e| format!("端点配置不是合法 JSON：{e}"))?;
 
@@ -79,6 +135,15 @@ pub fn parse(raw: &str) -> Result<Router, String> {
             return Err(format!("服务 {service} 没有配置任何端点"));
         }
         for spec in specs {
+            if require_tls {
+                if let Some(url) = &spec.url {
+                    if url.starts_with("http://") {
+                        return Err(format!(
+                            "{service}: 已要求 TLS（TK_REQUIRE_TLS=1），拒绝明文端点 {url}"
+                        ));
+                    }
+                }
+            }
             endpoints.push(build(service, spec)?);
         }
     }
@@ -87,12 +152,22 @@ pub fn parse(raw: &str) -> Result<Router, String> {
 
 fn build(service: &str, spec: &EndpointSpec) -> Result<Endpoint, String> {
     let addr = match spec.transport.as_str() {
-        "http" => EndpointAddr::Http {
-            base_url: spec
+        "http" => {
+            let url = spec
                 .url
                 .clone()
-                .ok_or_else(|| format!("{service}: http 端点必须提供 url"))?,
-        },
+                .ok_or_else(|| format!("{service}: http 端点必须提供 url"))?;
+            if let Some(rest) = url.strip_prefix("https://") {
+                // 当前构建不含 TLS，必须**明确拒绝**而不是悄悄降级成明文
+                return Err(format!(
+                    "{service}: {rest} 需要 TLS，当前构建未包含（见 changes/009-tls-decision.md）"
+                ));
+            }
+            if !url.starts_with("http://") {
+                return Err(format!("{service}: url 必须以 http:// 开头"));
+            }
+            EndpointAddr::Http { base_url: url }
+        }
         "tcp" => EndpointAddr::Tcp {
             host: spec
                 .host
@@ -223,6 +298,68 @@ mod tests {
         let bad = r#"{ "services": { "x": [
             { "transport": "tcp", "codec": "fixed-width", "host": "1.2.3.4", "port": 1 } ] } }"#;
         assert!(parse(bad).unwrap_err().contains("layout"));
+    }
+
+    #[test]
+    fn https_is_rejected_with_explicit_message() {
+        let cfg = r#"{ "services": { "x": [
+            { "transport": "http", "codec": "json", "url": "https://bank.internal/v1" } ] } }"#;
+        let err = parse(cfg).unwrap_err();
+        assert!(
+            err.contains("TLS"),
+            "必须明确说清是缺 TLS，而不是含糊的协议错误：{err}"
+        );
+    }
+
+    #[test]
+    fn non_http_scheme_is_rejected() {
+        let cfg = r#"{ "services": { "x": [
+            { "transport": "http", "codec": "json", "url": "ftp://bank.internal" } ] } }"#;
+        assert!(parse(cfg).unwrap_err().contains("http://"));
+    }
+
+    #[test]
+    fn signed_config_is_verified_before_parse() {
+        use ed25519_dalek::{Signer, SigningKey};
+        use rand::rngs::OsRng;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("endpoints.json");
+        let payload = OK.as_bytes();
+        std::fs::write(&path, payload).unwrap();
+
+        let key = SigningKey::generate(&mut OsRng);
+        let pubkey = tellerkit_core::pack::pubkey_to_hex(&key.verifying_key());
+        let sig_path = dir.path().join("endpoints.json.sig");
+        std::fs::write(&sig_path, hex::encode(key.sign(payload).to_bytes())).unwrap();
+
+        let policy = LoadPolicy {
+            pubkey: Some(pubkey),
+            require_signed: true,
+            require_tls: false,
+        };
+        assert!(load_router_with(&path, &policy).is_ok(), "合法签名应通过");
+
+        // 篡改一个字节：必须失败，而不是回退到"没签名也能用"
+        let mut tampered = payload.to_vec();
+        tampered.push(b' ');
+        std::fs::write(&path, &tampered).unwrap();
+        let err = load_router_with(&path, &policy).unwrap_err();
+        assert!(err.contains("验签失败"), "实际：{err}");
+    }
+
+    #[test]
+    fn missing_signature_is_refused_when_required() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("endpoints.json");
+        std::fs::write(&path, OK).unwrap();
+        let policy = LoadPolicy {
+            pubkey: Some("00".repeat(32)),
+            require_signed: true,
+            require_tls: false,
+        };
+        let err = load_router_with(&path, &policy).unwrap_err();
+        assert!(err.contains("缺少签名文件"), "实际：{err}");
     }
 
     #[test]

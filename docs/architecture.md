@@ -214,7 +214,9 @@ RoutedBanking → Router → TcpTransport → 假后台（真 socket）
 | IPC DTO 与领域类型 | ⚠️ 混用 | 保留混用但**记录理由**：DTO 已由 ts-rs 生成并门禁，加映射层会多一层无收益转换 | 低 |
 | 远端契约 | ✅ `contracts/remote-api.md`（含幂等、504 状态不明、错误模型、端点绑定表） | 补 OpenAPI 生成（可选） | 完成 |
 | 远端三层 | ✅ `remote.rs` + `transport-net` + `banking.rs`（`RoutedBanking`） | TLS、连接池 | 中 |
-| 端点配置 | ✅ `endpoint_config.rs`（`TK_ENDPOINTS` / `endpoints.json` → Router），非法配置回退 mock | 配置签名校验（P4） | 完成 |
+| 端点配置 | ✅ `endpoint_config.rs`（`TK_ENDPOINTS` / `endpoints.json` → Router），非法配置回退 mock | — | 完成 |
+| 配置完整性 | ✅ `config_sig.rs`：Ed25519 分离签名，先验签后解析；配了公钥就必须签 | — | 完成 |
+| 传输加密 | ⚠️ 失败关闭：拒绝 `https://`（缺 TLS 后端）、`TK_REQUIRE_TLS=1` 时拒绝明文 | 按 `changes/009` 引入 rustls | 高 |
 
 ## 8. 可检查的规则（要加进门禁）
 
