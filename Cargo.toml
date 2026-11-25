@@ -24,3 +24,6 @@ hex = "0.4"
 thiserror = "2"
 rand = "0.8"
 ts-rs = { version = "12", features = ["serde-compat"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "0.26"
+rcgen = "0.13"

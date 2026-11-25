@@ -157,14 +157,8 @@ fn build(service: &str, spec: &EndpointSpec) -> Result<Endpoint, String> {
                 .url
                 .clone()
                 .ok_or_else(|| format!("{service}: http 端点必须提供 url"))?;
-            if let Some(rest) = url.strip_prefix("https://") {
-                // 当前构建不含 TLS，必须**明确拒绝**而不是悄悄降级成明文
-                return Err(format!(
-                    "{service}: {rest} 需要 TLS，当前构建未包含（见 changes/009-tls-decision.md）"
-                ));
-            }
-            if !url.starts_with("http://") {
-                return Err(format!("{service}: url 必须以 http:// 开头"));
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                return Err(format!("{service}: url 必须以 http:// 或 https:// 开头"));
             }
             EndpointAddr::Http { base_url: url }
         }
@@ -298,17 +292,6 @@ mod tests {
         let bad = r#"{ "services": { "x": [
             { "transport": "tcp", "codec": "fixed-width", "host": "1.2.3.4", "port": 1 } ] } }"#;
         assert!(parse(bad).unwrap_err().contains("layout"));
-    }
-
-    #[test]
-    fn https_is_rejected_with_explicit_message() {
-        let cfg = r#"{ "services": { "x": [
-            { "transport": "http", "codec": "json", "url": "https://bank.internal/v1" } ] } }"#;
-        let err = parse(cfg).unwrap_err();
-        assert!(
-            err.contains("TLS"),
-            "必须明确说清是缺 TLS，而不是含糊的协议错误：{err}"
-        );
     }
 
     #[test]

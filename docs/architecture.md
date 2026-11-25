@@ -216,7 +216,7 @@ RoutedBanking → Router → TcpTransport → 假后台（真 socket）
 | 远端三层 | ✅ `remote.rs` + `transport-net` + `banking.rs`（`RoutedBanking`） | TLS、连接池 | 中 |
 | 端点配置 | ✅ `endpoint_config.rs`（`TK_ENDPOINTS` / `endpoints.json` → Router），非法配置回退 mock | — | 完成 |
 | 配置完整性 | ✅ `config_sig.rs`：Ed25519 分离签名，先验签后解析；配了公钥就必须签 | — | 完成 |
-| 传输加密 | ⚠️ 失败关闭：拒绝 `https://`（缺 TLS 后端）、`TK_REQUIRE_TLS=1` 时拒绝明文 | 按 `changes/009` 引入 rustls | 高 |
+| 传输加密 | ✅ `rustls` + 内置根证书；`https` 自动启用，`TK_REQUIRE_TLS=1` 拒绝明文 | 证书吊销/企业 CA（P4） | 完成 |
 
 ## 8. 可检查的规则（要加进门禁）
 
