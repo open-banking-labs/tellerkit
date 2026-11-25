@@ -23,7 +23,7 @@ use tellerkit_core::Version;
 
 // 端口定义在 core：这样 fake 后台与路由适配器能脱离 Tauri 测试。
 pub use tellerkit_core::banking::{
-    MenuVersionProbe, RemoteBanking, RemoteError, RoutedBanking, ServiceNames,
+    MenuSource, MenuVersionProbe, RemoteBanking, RemoteError, RoutedBanking, ServiceNames,
 };
 
 /// 时钟端口。锁屏、退避、审计都依赖时间，注入才能把测试从 `sleep` 里救出来。
@@ -150,7 +150,7 @@ impl MockRemote {
     }
 }
 
-impl RemoteBanking for MockRemote {
+impl MenuSource for MockRemote {
     fn probe_menu(&self) -> Result<MenuVersionProbe, RemoteError> {
         let state = self.snapshot();
         self.mock_host(&state)
@@ -169,7 +169,9 @@ impl RemoteBanking for MockRemote {
             .download()
             .map_err(|e| RemoteError::Unavailable(e.to_string()))
     }
+}
 
+impl RemoteBanking for MockRemote {
     fn login(&self, role_id: &str, perm_version: u64) -> Result<PermSnapshot, RemoteError> {
         let state = self.snapshot();
         if state.offline {

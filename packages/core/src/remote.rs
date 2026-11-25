@@ -165,6 +165,14 @@ pub struct Router {
     endpoints: Vec<Endpoint>,
 }
 
+impl std::fmt::Debug for Router {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Router")
+            .field("endpoints", &self.endpoints)
+            .finish()
+    }
+}
+
 impl Router {
     /// `endpoints` 可以乱序传入；内部按服务与优先级排序，保证顺序可复现。
     pub fn new(mut endpoints: Vec<Endpoint>) -> Self {

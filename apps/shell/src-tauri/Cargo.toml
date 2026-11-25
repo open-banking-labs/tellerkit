@@ -23,4 +23,5 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tellerkit-core = { path = "../../../packages/core" }
 tellerkit-journal-sqlite = { path = "../../../packages/journal-sqlite" }
+tellerkit-transport-net = { path = "../../../packages/transport-net" }
 ts-rs.workspace = true

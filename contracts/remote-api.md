@@ -135,6 +135,33 @@
 3. 业务包若需要独立后台，在自己的 manifest 里声明服务名（字段待定，见 `changes/`）。
 4. 端点配置**不写进业务包**：由网点配置下发，避免包作者决定数据流向。
 
+## 2.2 端点配置文件
+
+网点级配置 `endpoints.json`（应用数据目录，或 `TK_ENDPOINTS` 指向的路径）：
+
+```jsonc
+{
+  "services": {
+    "menu.core": [
+      { "transport": "http", "codec": "json", "url": "http://menu.internal/v1", "priority": 0 }
+    ],
+    "card.auth": [
+      { "transport": "tcp", "codec": "fixed-width", "host": "10.0.9.20", "port": 7002,
+        "layout": [
+          { "name": "amount", "width": 12, "numeric": true },
+          { "name": "memo", "width": 20 }
+        ] }
+    ]
+  }
+}
+```
+
+- `transport`：`http` | `tcp`
+- `codec`：`json` | `raw` | `fixed-width`
+- 解析失败或文件缺失 → **回退内置 mock**，并在启动 notes 里写明原因
+
+完整规则见 `changes/008-endpoint-config.md`。
+
 ## 3. 客户端侧的端口
 
 ```rust

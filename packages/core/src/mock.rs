@@ -5,6 +5,7 @@
 //! ⚠️ 这里的签名私钥是**公开的演示种子**，只能用于 demo。生产环境私钥必须
 //! 只存在于服务端构建环节，客户端只内置公钥。
 
+use crate::banking::{MenuSource, MenuVersionProbe, RemoteError};
 use crate::model::{MenuNode, MenuTree, NodeStatus};
 use crate::pack::MenuPack;
 use crate::perm::PermSnapshot;
@@ -225,14 +226,6 @@ impl DemoRole {
     }
 }
 
-/// 版本探测响应（真实环境应 < 1KB）。
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct MenuVersionProbe {
-    pub latest: u64,
-    pub shell_compat_min: u16,
-    pub shell_compat_max: u16,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HostError {
     #[error("网络不可达（mock offline）")]
@@ -301,6 +294,22 @@ impl MockHost {
 
     pub fn login(&self, role_id: &str, perm_version: u64) -> Option<PermSnapshot> {
         DemoRole::from_id(role_id).map(|r| r.snapshot(perm_version))
+    }
+}
+
+impl MenuSource for MockHost {
+    fn probe_menu(&self) -> Result<MenuVersionProbe, RemoteError> {
+        self.probe().map_err(|e| match e {
+            HostError::Offline => RemoteError::Unavailable("mock 离线".into()),
+            other => RemoteError::Rejected(other.to_string()),
+        })
+    }
+
+    fn download_menu(&self) -> Result<Vec<u8>, RemoteError> {
+        self.download().map_err(|e| match e {
+            HostError::Offline => RemoteError::Unavailable("mock 离线".into()),
+            other => RemoteError::Rejected(other.to_string()),
+        })
     }
 }
 

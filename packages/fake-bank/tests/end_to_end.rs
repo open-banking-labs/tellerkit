@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use tellerkit_core::banking::{RemoteBanking, RoutedBanking};
+use tellerkit_core::banking::{MenuSource, RemoteBanking, RoutedBanking};
 use tellerkit_core::remote::{
     Codec, Endpoint, EndpointAddr, JsonCodec, RawCodec, Router, Transport,
 };

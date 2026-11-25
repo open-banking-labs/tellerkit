@@ -3,7 +3,7 @@
 //! 命令层（`src-tauri/src/commands.rs`）只负责加锁和翻译错误，真正的决策在这里，
 //! 因此这些路径可以在没有 GUI 的环境里被完整测到。
 
-use crate::mock::MockHost;
+use crate::banking::MenuSource;
 use crate::pack;
 use crate::store::{LoadSource, LoadedMenu, MenuStore, StoreError};
 
@@ -42,12 +42,12 @@ pub enum BootError {
 }
 
 fn fetch(
-    host: &MockHost,
+    host: &dyn MenuSource,
     store: &MenuStore,
     notes: &mut Vec<String>,
 ) -> Result<LoadedMenu, BootError> {
     let bytes = host
-        .download()
+        .download_menu()
         .map_err(|e| BootError::Offline(e.to_string()))?;
     let version = pack::peek_version(&bytes)
         .ok_or_else(|| BootError::Install("服务端下发的包结构非法（头部无法解析）".to_string()))?;
@@ -63,7 +63,7 @@ fn fetch(
 }
 
 /// 重新加载：优先本地，失败则回退服务端。`verify_failed` 表示本地包验签没过。
-pub fn reload(host: &MockHost, store: &MenuStore) -> Result<ReloadOutcome, BootError> {
+pub fn reload(host: &dyn MenuSource, store: &MenuStore) -> Result<ReloadOutcome, BootError> {
     let mut notes = Vec::new();
     match store.load_latest() {
         Ok(loaded) => Ok(ReloadOutcome {
@@ -89,7 +89,7 @@ pub fn reload(host: &MockHost, store: &MenuStore) -> Result<ReloadOutcome, BootE
 }
 
 /// 启动路径：本地命中时**完全不碰网络**。
-pub fn boot_load(host: &MockHost, store: &MenuStore) -> Result<BootOutcome, BootError> {
+pub fn boot_load(host: &dyn MenuSource, store: &MenuStore) -> Result<BootOutcome, BootError> {
     let outcome = reload(host, store)?;
     Ok(BootOutcome {
         loaded: outcome.loaded,
@@ -100,9 +100,9 @@ pub fn boot_load(host: &MockHost, store: &MenuStore) -> Result<BootOutcome, Boot
 /// 版本探测 + 按需静默安装。
 ///
 /// 注意：这里**不**清空任何会话状态——菜单版本与权限版本互相独立。
-pub fn check_and_update(host: &MockHost, store: &MenuStore) -> UpdateOutcome {
+pub fn check_and_update(host: &dyn MenuSource, store: &MenuStore) -> UpdateOutcome {
     let local = store.current_version();
-    let probe = match host.probe() {
+    let probe = match host.probe_menu() {
         Ok(probe) => probe,
         Err(err) => {
             return UpdateOutcome {
@@ -125,7 +125,7 @@ pub fn check_and_update(host: &MockHost, store: &MenuStore) -> UpdateOutcome {
         };
     }
 
-    let bytes = match host.download() {
+    let bytes = match host.download_menu() {
         Ok(bytes) => bytes,
         Err(err) => {
             return UpdateOutcome {
@@ -200,7 +200,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store_for(dir.path());
         store
-            .install(&MockHost::new(7).download().unwrap())
+            .install(&MockHost::new(7).download_menu().unwrap())
             .unwrap();
 
         let host = MockHost {
@@ -218,7 +218,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store_for(dir.path());
         store
-            .install(&MockHost::new(7).download().unwrap())
+            .install(&MockHost::new(7).download_menu().unwrap())
             .unwrap();
 
         let path = store.pack_path(7);
@@ -241,7 +241,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store_for(dir.path());
         store
-            .install(&MockHost::new(7).download().unwrap())
+            .install(&MockHost::new(7).download_menu().unwrap())
             .unwrap();
 
         let outcome = check_and_update(&MockHost::new(7), &store);
@@ -255,7 +255,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store_for(dir.path());
         store
-            .install(&MockHost::new(7).download().unwrap())
+            .install(&MockHost::new(7).download_menu().unwrap())
             .unwrap();
 
         let outcome = check_and_update(&MockHost::new(8), &store);
@@ -269,7 +269,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store_for(dir.path());
         store
-            .install(&MockHost::new(7).download().unwrap())
+            .install(&MockHost::new(7).download_menu().unwrap())
             .unwrap();
 
         let host = MockHost {
@@ -288,7 +288,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store_for(dir.path());
         store
-            .install(&MockHost::new(7).download().unwrap())
+            .install(&MockHost::new(7).download_menu().unwrap())
             .unwrap();
 
         let host = MockHost {
