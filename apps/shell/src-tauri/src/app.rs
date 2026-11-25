@@ -21,7 +21,7 @@ use tellerkit_core::recovery::{exception_kind_str, RecoveryJournal};
 use tellerkit_core::reversal::{Authorization, Authorizer, ExceptionKind, ReversalRequest};
 use tellerkit_core::session::{LockReason, SessionGuard, SessionPolicy};
 use tellerkit_core::sync;
-use tellerkit_core::tx::{TxRequest, TxResult, TxStatus};
+use tellerkit_core::tx::{SubmitStart, TxHost, TxRequest, TxResult, TxStatus};
 use tellerkit_core::{filter, LoadSource};
 use tellerkit_journal_sqlite::{AuditEvent, SqliteJournal};
 
@@ -700,7 +700,16 @@ impl<'a> ShellApp<'a> {
         let key = request.idempotency_key.clone();
         let actor = self.actor();
 
-        let result = self.state.tx.submit(self.remote.as_ref(), request);
+        // 两阶段：先落写前意图并占住在途位，再打主机，最后落结论。
+        // 此刻两段仍在同一把锁内；第 2b 步会把中间这次主机调用挪到锁外。
+        let result = match self.state.tx.begin_submit(&request) {
+            SubmitStart::ShortCircuited(result) => result,
+            SubmitStart::Proceed { signature } => {
+                let host: &dyn TxHost = self.remote.as_ref();
+                let outcome = host.submit(&request);
+                self.state.tx.finish_submit(&request, &signature, outcome)
+            }
+        };
         self.mark_if_uncertain(&key, &result);
 
         let origin = identity

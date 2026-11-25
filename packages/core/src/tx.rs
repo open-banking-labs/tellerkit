@@ -264,6 +264,13 @@ pub struct TxEngine {
     journal_error: Option<String>,
     /// 上次崩溃时未完成主机调用的交易，启动时读出等待上层转异常。
     in_flight: Vec<TxRequest>,
+    /// "正在飞"的幂等键 -> 载荷签名。
+    ///
+    /// 与 `in_flight` 不是一回事：`in_flight` 是**上次崩溃**遗留的意图（落盘读回），
+    /// 这里是**本进程正在打主机**的那几笔。作用也不同：幂等索引防"重放已完成的交易"，
+    /// 这里防"同一笔被并发提交两次"——索引要等结论落定才有记录，覆盖不到
+    /// "第一笔还没回来"的窗口。
+    submitting: HashMap<String, String>,
 }
 
 impl std::fmt::Debug for TxEngine {
@@ -272,8 +279,18 @@ impl std::fmt::Debug for TxEngine {
             .field("idempotent_keys", &self.idempotent.len())
             .field("pending", &self.pending.len())
             .field("journaled", &self.journal.is_some())
+            .field("submitting", &self.submitting.len())
             .finish()
     }
+}
+
+/// 提交第一阶段的结果。
+#[derive(Debug)]
+pub enum SubmitStart {
+    /// 放行：调用方去打主机，结论必须交回 [`TxEngine::finish_submit`]。
+    Proceed { signature: String },
+    /// 不必打主机：已有结论（重复提交/幂等键冲突/在途）或参数、落盘不成立。
+    ShortCircuited(TxResult),
 }
 
 impl TxEngine {
@@ -326,40 +343,70 @@ impl TxEngine {
         }
     }
 
-    /// 提交一笔交易。
+    /// 阶段一：校验 → 幂等查表 → 在途去重 → 写前意图落盘。
     ///
-    /// 顺序刻意如此：先校验、再查幂等、最后才碰主机。
-    /// 把幂等检查放在最前，是因为"重复提交"不该因为主机暂时不可用而变成失败。
-    pub fn submit(&mut self, host: &dyn TxHost, request: TxRequest) -> TxResult {
-        if let Some(msg) = validate(&request) {
-            return TxResult::rejected(&msg);
+    /// 顺序刻意如此：先校验、再查幂等、最后才碰主机。把幂等检查放在最前，
+    /// 是因为"重复提交"不该因为主机暂时不可用而变成失败。
+    ///
+    /// 返回 `Proceed` 后**必须**调用 [`Self::finish_submit`]：否则该幂等键会一直
+    /// 占着在途位，之后同一笔会被误判成"正在处理中"。
+    pub fn begin_submit(&mut self, request: &TxRequest) -> SubmitStart {
+        if let Some(msg) = validate(request) {
+            return SubmitStart::ShortCircuited(TxResult::rejected(&msg));
         }
 
-        let signature = request_signature(&request);
+        let signature = request_signature(request);
         if let Some((known, previous)) = self.idempotent.get(&request.idempotency_key) {
             if *known != signature {
-                return TxResult::rejected(
+                return SubmitStart::ShortCircuited(TxResult::rejected(
                     "幂等键已用于另一笔交易（交易码或要素不同），请为该笔业务使用新的幂等键",
-                );
+                ));
             }
             let mut replay = previous.clone();
             replay.message = format!("重复提交：返回首次结果（{}）", previous.message);
-            return replay;
+            return SubmitStart::ShortCircuited(replay);
         }
+
+        // 在途去重：结论还没回来就又一次提交同一笔。放过去就是两笔。
+        // 幂等索引要等结论落定才有记录，覆盖不到这个窗口——这就是本表存在的理由。
+        if let Some(in_flight_signature) = self.submitting.get(&request.idempotency_key) {
+            if *in_flight_signature != signature {
+                return SubmitStart::ShortCircuited(TxResult::rejected(
+                    "幂等键已用于另一笔交易（交易码或要素不同），请为该笔业务使用新的幂等键",
+                ));
+            }
+            return SubmitStart::ShortCircuited(TxResult::rejected(
+                "同一笔交易正在处理中，请勿重复提交；若上一笔超时，请先查账确认再决定是否重试",
+            ));
+        }
+        self.submitting
+            .insert(request.idempotency_key.clone(), signature.clone());
 
         // 写前意图必须先落盘：崩溃时至少能知道主机可能受理了哪一笔。
         // 落盘失败就绝不碰主机——否则事故后没有任何证据可查。
         if let Some(journal) = self.journal.as_deref() {
-            if let Err(e) = journal.record_intent(&request) {
-                return TxResult::rejected(&format!("写前意图落盘失败，交易未提交：{e}"));
+            if let Err(e) = journal.record_intent(request) {
+                self.submitting.remove(&request.idempotency_key);
+                return SubmitStart::ShortCircuited(TxResult::rejected(&format!(
+                    "写前意图落盘失败，交易未提交：{e}"
+                )));
             }
         }
+        SubmitStart::Proceed { signature }
+    }
 
-        // 瞬时失败（超时/不可达）**不写幂等索引**：
-        // 此刻我们并不知道主机是否已处理。若把"拒绝"永久缓存，柜员就再也无法安全重试；
-        // 而换个新键重试又可能重复入账。正确做法是保留原键，让重试打到主机，
-        // 由主机的幂等键去重收口。
-        let (result, cacheable) = match host.submit(&request) {
+    /// 阶段二：把主机结论落成账，并释放在途标记。
+    ///
+    /// 瞬时失败（超时/不可达）**不写幂等索引**：此刻我们并不知道主机是否已处理。
+    /// 若把"拒绝"永久缓存，柜员就再也无法安全重试；而换个新键重试又可能重复入账。
+    /// 正确做法是保留原键，让重试打到主机，由主机的幂等键去重收口。
+    pub fn finish_submit(
+        &mut self,
+        request: &TxRequest,
+        signature: &str,
+        outcome: Result<String, HostError>,
+    ) -> TxResult {
+        let (result, cacheable) = match outcome {
             Ok(reference) => (TxResult::committed(reference), true),
             Err(HostError::Rejected(reason)) => {
                 (TxResult::rejected(&format!("主机拒绝：{reason}")), true)
@@ -386,16 +433,34 @@ impl TxEngine {
         };
 
         if cacheable {
-            self.cache_result(request.idempotency_key.clone(), signature, &result);
+            self.cache_result(
+                request.idempotency_key.clone(),
+                signature.to_string(),
+                &result,
+            );
         }
 
         // 记账失败不改变结论：交易已经发生，日志没写成是运维问题，不是业务问题。
         if let Some(journal) = self.journal.as_deref() {
-            if let Err(e) = journal.settle(&request, &result) {
+            if let Err(e) = journal.settle(request, &result) {
                 self.journal_error = Some(e);
             }
         }
+        self.submitting.remove(&request.idempotency_key);
         result
+    }
+
+    /// 提交一笔交易（调用方持锁期间一次做完）。
+    ///
+    /// 拆成两阶段是为了让上层能把**主机调用**放在两阶段之间（P0-10 第 2b 步）；
+    /// 此刻两段仍连续执行，行为与拆分前完全一致。
+    pub fn submit(&mut self, host: &dyn TxHost, request: TxRequest) -> TxResult {
+        let signature = match self.begin_submit(&request) {
+            SubmitStart::Proceed { signature } => signature,
+            SubmitStart::ShortCircuited(result) => return result,
+        };
+        let outcome = host.submit(&request);
+        self.finish_submit(&request, &signature, outcome)
     }
 
     /// 待重放的请求（按提交顺序）。
@@ -582,6 +647,88 @@ mod tests {
         assert_eq!(second.status, TxStatus::Committed);
         assert_eq!(host.calls(), 1, "重复提交不得再次调用主机");
         assert!(second.message.contains("重复提交"));
+    }
+
+    // ---- P0-10 第 3 步：同一笔"在途"去重（并发窗口）----
+    //
+    // 幂等索引记的是"结论"，覆盖不到"第一笔还没回来"的窗口；`submitting`
+    // 记的是"正在飞"，两者互补。
+
+    #[test]
+    fn second_begin_while_first_in_flight_is_refused() {
+        let mut engine = TxEngine::new();
+        let request = req("k-fly");
+
+        assert!(
+            matches!(engine.begin_submit(&request), SubmitStart::Proceed { .. }),
+            "首笔必须放行"
+        );
+        match engine.begin_submit(&request) {
+            SubmitStart::Proceed { .. } => panic!("同一笔不应被放行两次"),
+            SubmitStart::ShortCircuited(result) => {
+                assert_eq!(result.status, TxStatus::Rejected);
+                assert!(
+                    result.message.contains("正在处理中"),
+                    "文案要让人看懂是「别点第二下」：{}",
+                    result.message
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn finish_releases_in_flight_so_the_same_key_can_retry() {
+        let mut engine = TxEngine::new();
+        let request = req("k-retry");
+        let signature = match engine.begin_submit(&request) {
+            SubmitStart::Proceed { signature } => signature,
+            SubmitStart::ShortCircuited(result) => panic!("首笔应放行：{}", result.message),
+        };
+
+        // 状态不明（超时且不支持离线）：不写幂等索引，必须允许按原键重试。
+        let first = engine.finish_submit(&request, &signature, Err(HostError::Timeout));
+        assert_eq!(first.status, TxStatus::MarkedForReversal);
+        assert!(
+            matches!(engine.begin_submit(&request), SubmitStart::Proceed { .. }),
+            "在途位必须释放，否则原键永远无法重试"
+        );
+    }
+
+    #[test]
+    fn different_keys_may_be_in_flight_together() {
+        let mut engine = TxEngine::new();
+        assert!(matches!(
+            engine.begin_submit(&req("k-a")),
+            SubmitStart::Proceed { .. }
+        ));
+        assert!(
+            matches!(
+                engine.begin_submit(&req("k-b")),
+                SubmitStart::Proceed { .. }
+            ),
+            "不同业务不该互相挡路"
+        );
+    }
+
+    #[test]
+    fn same_key_with_different_payload_in_flight_is_refused() {
+        let mut engine = TxEngine::new();
+        let first = req("k-x");
+        let mut second = req("k-x");
+        second.amount_cents = 20_000;
+
+        assert!(matches!(
+            engine.begin_submit(&first),
+            SubmitStart::Proceed { .. }
+        ));
+        match engine.begin_submit(&second) {
+            SubmitStart::Proceed { .. } => panic!("同一键换要素必须拒绝"),
+            SubmitStart::ShortCircuited(result) => assert!(
+                result.message.contains("另一笔交易"),
+                "错误文案要指向幂等键被挪用：{}",
+                result.message
+            ),
+        }
     }
 
     // S-03
