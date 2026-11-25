@@ -118,3 +118,43 @@ P0-1 命名门禁 + 本台账 + 评审/待办入库。
 - 每完成一个项目级控制点，更新本表“批次”为 ✅，并在源台账勾掉细项；不新开平行台账。
 - 新评审先归入现有控制点；确实新开的，先写“为什么它是项目级”，再排批次。
 - 排序变化必须写理由；不允许因为“做起来顺手”插队。
+
+## 8. 交接状态（跨机器续做）
+
+**唯一跨机器真相源是 Git 远端**：本文件、全部代码分支、13 个 PR 与 `changes/` 提案都在 GitHub；会话上下文、压缩摘要、worktree、`/tmp` 文件、`git config core.hooksPath` 本机设置都不跨机器。换机器只要拉仓库就能接着干，但**改动尚未合并进 `main`**，必须切到对应分支或看 PR，不能只看 `main`。
+
+### 8.1 PR 栈（全部 OPEN、gate pass、MERGEABLE，均未合并）
+
+链：`#31→main`，`#32→#31`，`#33→#32`，`#34→#33`，`#35→#34`，`#36→#35`，`#37→#36`，`#38→#36`，`#39→#36`，`#40→#39`，`#41→#37`，`#42→#40`，`#43→#42`。
+head 分支依次为 `chore/naming-and-backlog`、`chore/lockfile-reproducible`、`feat/menu-key-injection`、`fix/trajectory-gate-truthful`、`fix/fail-closed-startup`、`fix/session-lock-gate`、`fix/doc-truthfulness`、`agent/p11-audit-chain`、`agent/p07-package-capability`、`agent/p08-write-ahead`、`docs/backlog-progress`、`agent/p09-persistent-state`、`fix/audit-fails-closed`。
+合并顺序：线性链先合 #31 再逐层向下；#38/#39 与 #37 是兄弟，合并顺序无关（文件集互斥）。沿用 ready-for-review 惯例，等负责人合并。
+
+### 8.2 完成度快照
+
+- 批次 1（P0-1…P0-6）全 ✅；批次 2（P0-7/P0-8/P0-9/P0-11）全 ✅。
+- **批次 2 唯一未完成：P0-10 IPC 并发**（第 3 节状态 `2`）。批次 3–5 未开始。
+
+### 8.3 P0-10 拆解（下一步就干这个，必须分 PR）
+
+现状证据：`apps/shell/src-tauri/src/commands.rs` 23 条命令全为同步 `pub fn`，统一走 `lock()` 返回 `MutexGuard<AppState>` 并**跨网络调用持锁**；`apps/shell/src-tauri/src/lib.rs:274` 是 `app.manage(Mutex::new(state))`，`lib.rs:185` 的 `spawn_replay_worker` 周期调 `replay_pending`。这跨 3 个文件且必然超 300 行退回线，故按序拆：
+
+1. **async 化**：`app.manage(Arc::new(Mutex::new(state)))`，23 条命令改 `pub async fn` + `tauri::async_runtime::spawn_blocking(move || …)`，把阻塞工作移出主线程（Tauri 2 同步命令跑主线程会冻 UI）。此步**不解决**锁竞争，PR 描述必须写清，不能冒充完成 P0-10。
+2. **拆锁**：把 `session` 从 `AppState` 拆成独立锁，`session_tick`/`session_touch`/`session_blur` 不再排队等交易；网络调用移出临界区。注意 `AppState::new` 已 7 参、卡 clippy `too_many_arguments (8/7)` 上限，别再加参数；`require_unlocked` 需同时持会话锁与状态锁。
+3. **单飞**：`submit_transaction` 按幂等键做 in-flight 去重，防超时重试点出两笔。P0-9 的持久化幂等索引是落盘去重，不覆盖并发窗口，两者互补。
+
+### 8.4 已登记但未做（不要重复发现）
+
+- 审计：配置变更审计（app.rs 无入口，需契约）、`audit_verify()` 接启动自检与日终对账、`print_voucher`/`package_module`/后台重放的审计闸门、外部锚定与服务端存证。
+- 业务包：一等调用来源身份（`changes/017`，契约提案）、锁定时卸载包宿主与键盘屏蔽（UX-08）。
+- 交付/文档：D-06 runbook、C-07 文档路径全量校验（批次 3）；`changes/015`、`changes/016` 待负责人批准。
+- 前端：冲正原交易展示。
+- 第 5 节 B1–B7、T-01 阻塞项仍待人/契约，别当成漏做。
+
+### 8.5 换机器后开工检查
+
+1. `git fetch --all`，按 8.1 切到目标分支；PR 详情在 GitHub 上（含范围外说明与超 300 行的裁决理由）。
+2. `git config core.hooksPath .githooks` —— 本机设置不随仓库走，不设则 pre-commit 银行名门禁不生效；提交前可手跑 `node tools/check-bank-names.mjs`。
+3. **不在本机跑 cargo**：编译/测试一律 `bash scripts/remote-build.sh '<cmd>'`；远端需 `source $HOME/.cargo/env`，本机无 `timeout` 命令。
+4. 远端 `rsync -az` 保留 mtime，切分支/换机器验证前先 `touch` 改过的源文件，否则 cargo 误判为最新、报假的旧错误。
+5. 本地只跑 `npm run gate`（node 部分 + `cargo fmt --check`）；合并裁决以 CI required checks 为准，见 `changes/015`。
+6. 远端构建机是单一路径 `tailscale-seoul:~/build/tk-work`，**并行 agent 不能同时跑 remote-build**（`--delete` 会互相删文件）；本地 gate 可各 worktree 独立跑。
