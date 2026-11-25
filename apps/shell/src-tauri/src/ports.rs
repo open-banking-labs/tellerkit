@@ -49,6 +49,8 @@ impl Clock for SystemClock {
 pub struct MockRemote {
     state: Mutex<MockRemoteState>,
     tx_seq: AtomicU64,
+    /// 幂等表：同一个 key 必须返回同一个流水号，否则演示会教坏使用方。
+    accepted: Mutex<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +72,7 @@ impl Default for MockRemote {
                 reject_reason: None,
             }),
             tx_seq: AtomicU64::new(0),
+            accepted: Mutex::new(std::collections::BTreeMap::new()),
         }
     }
 }
@@ -184,7 +187,11 @@ impl RemoteBanking for MockRemote {
 }
 
 impl TxHost for MockRemote {
-    fn submit(&self, _request: &TxRequest) -> Result<String, HostError> {
+    fn supports_idempotency(&self) -> bool {
+        true
+    }
+
+    fn submit(&self, request: &TxRequest) -> Result<String, HostError> {
         let state = self.snapshot();
         if state.offline {
             return Err(HostError::Unavailable);
@@ -192,8 +199,17 @@ impl TxHost for MockRemote {
         if let Some(reason) = state.reject_reason {
             return Err(HostError::Rejected(reason));
         }
-        let n = self.tx_seq.fetch_add(1, Ordering::SeqCst) + 1;
-        Ok(format!("TX{n:08}"))
+        // 同键复用流水号：这就是服务端该有的幂等行为
+        if let Ok(mut map) = self.accepted.lock() {
+            if let Some(existing) = map.get(&request.idempotency_key) {
+                return Ok(existing.clone());
+            }
+            let n = self.tx_seq.fetch_add(1, Ordering::SeqCst) + 1;
+            let reference = format!("TX{n:08}");
+            map.insert(request.idempotency_key.clone(), reference.clone());
+            return Ok(reference);
+        }
+        Err(HostError::Unavailable)
     }
 }
 

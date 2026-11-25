@@ -74,18 +74,32 @@ impl Default for ServiceNames {
 pub struct RoutedBanking {
     router: Router,
     services: ServiceNames,
+    /// 交易服务是否声明了幂等。未声明 → 客户端不挂起离线交易。
+    idempotent: bool,
 }
 
 impl RoutedBanking {
+    /// 默认**不**假定幂等：接真实后台时必须显式声明。
     pub fn new(router: Router) -> Self {
         Self {
             router,
             services: ServiceNames::default(),
+            idempotent: false,
         }
     }
 
     pub fn with_services(router: Router, services: ServiceNames) -> Self {
-        Self { router, services }
+        Self {
+            router,
+            services,
+            idempotent: false,
+        }
+    }
+
+    /// 声明交易服务按幂等键去重（服务端契约要求，见 `changes/001`）。
+    pub fn with_idempotency(mut self, idempotent: bool) -> Self {
+        self.idempotent = idempotent;
+        self
     }
 
     fn call_json(
@@ -167,6 +181,10 @@ impl RemoteBanking for RoutedBanking {
 }
 
 impl TxHost for RoutedBanking {
+    fn supports_idempotency(&self) -> bool {
+        self.idempotent
+    }
+
     fn submit(&self, request: &TxRequest) -> Result<String, HostError> {
         let payload = serde_json::to_value(request)
             .map_err(|e| HostError::Rejected(format!("请求无法序列化：{e}")))?;
@@ -305,6 +323,17 @@ mod tests {
             HostError::Rejected(msg) => assert!(msg.contains("余额不足")),
             other => panic!("应映射为 Rejected，实际 {other:?}"),
         }
+    }
+
+    #[test]
+    fn idempotency_is_opt_in_not_assumed() {
+        assert!(
+            !RoutedBanking::new(Router::new(vec![])).supports_idempotency(),
+            "未声明时必须视为不支持"
+        );
+        assert!(RoutedBanking::new(Router::new(vec![]))
+            .with_idempotency(true)
+            .supports_idempotency());
     }
 
     #[test]

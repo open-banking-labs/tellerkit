@@ -141,6 +141,14 @@ pub trait TxJournal: Send + Sync {
 /// 主机接口。真实实现走网络，测试实现可以精确控制失败方式。
 pub trait TxHost {
     fn submit(&self, request: &TxRequest) -> Result<String, HostError>;
+
+    /// 主机是否按 `idempotency_key` 去重。
+    ///
+    /// 默认 `false`：**未知即不安全**。离线挂起意味着"以后一定会重发"，
+    /// 而重发只有在校验键去重时才不会重复入账。主机没声明，就不许挂起。
+    fn supports_idempotency(&self) -> bool {
+        false
+    }
 }
 
 /// 演示用主机：把"在线/离线/业务拒绝"做成可切换的开关。

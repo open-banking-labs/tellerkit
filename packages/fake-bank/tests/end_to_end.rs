@@ -132,3 +132,52 @@ fn backend_down_falls_back_to_secondary_endpoint() {
         Some(7)
     );
 }
+
+/// 契约 lifecycle.md 不变量 6：同键重复提交只入账一次，且返回同一流水号。
+///
+/// 这是客户端所有重试/重放策略的前提。用真 socket 证明它，而不是写在文档里。
+#[test]
+fn same_idempotency_key_is_charged_once() {
+    let bank = FakeBank::start(FakeBankConfig::default());
+    let banking = RoutedBanking::new(router_for(&bank)).with_idempotency(true);
+
+    let mut req = TxRequest::new("account.deposit", "dup-key-1");
+    req.amount_cents = 50_000;
+
+    let first = banking.submit(&req).expect("首次提交");
+    let second = banking.submit(&req).expect("重试");
+    let third = banking.submit(&req).expect("再重试");
+
+    assert_eq!(first, second, "重试必须返回同一流水号");
+    assert_eq!(second, third);
+    assert_eq!(*bank.config().charged.lock().unwrap(), 1, "只应入账一次");
+    assert_eq!(
+        bank.ops().iter().filter(|op| *op == "submit_tx").count(),
+        3,
+        "请求确实发了三次，是服务端去重而不是客户端缓存"
+    );
+}
+
+/// 未声明幂等的主机：每次提交都入账。
+///
+/// 这个用例是"为什么客户端必须拦住离线挂起"的证据——
+/// 不拦的话，断网期间的交易在恢复后重放就会重复扣账。
+#[test]
+fn non_idempotent_backend_charges_every_attempt() {
+    let bank = FakeBank::start(FakeBankConfig {
+        idempotent: false,
+        ..Default::default()
+    });
+    let banking = RoutedBanking::new(router_for(&bank));
+
+    assert!(!banking.supports_idempotency());
+    let req = TxRequest::new("account.deposit", "dup-key-2");
+    let _ = banking.submit(&req);
+    let _ = banking.submit(&req);
+
+    assert_eq!(
+        *bank.config().charged.lock().unwrap(),
+        2,
+        "主机不去重时，两次提交就是两次扣账"
+    );
+}
