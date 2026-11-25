@@ -56,6 +56,24 @@ const p90 = (xs) => {
   return s[Math.min(s.length - 1, Math.ceil(s.length * 0.9) - 1)];
 };
 
+/** 规格里登记的任务总数：用来算"派发记录覆盖率"。 */
+function totalTasks() {
+  const specsDir = join(ROOT, ".specify", "specs");
+  if (!existsSync(specsDir)) return 0;
+  let total = 0;
+  for (const entry of readdirSync(specsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const file = join(specsDir, entry.name, "tasks.md");
+    if (!existsSync(file)) continue;
+    try {
+      total += parseTasksFile(file, (p) => readFileSync(p, "utf8")).length;
+    } catch {
+      // 解析不了的规格不参与统计，但也不算 0
+    }
+  }
+  return total;
+}
+
 function loadRecords(dir) {
   if (!existsSync(dir)) return { records: [], broken: [] };
   const files = readdirSync(dir).filter((f) => f.endsWith(".json"));
@@ -201,6 +219,16 @@ const fmtPct = (n) => (n === null ? "—" : `${n}%`);
 
 console.log(`\n派发记录 · ${metrics.total} 条（已裁决 ${metrics.decided} / 未裁决 ${metrics.undecided}）`);
 if (broken.length) console.log(`  ⚠ 无法解析：${broken.join(", ")}`);
+
+{
+  const tasks = totalTasks();
+  const covered = metrics.total;
+  const pctText = tasks === 0 ? "—" : `${Math.round((covered / tasks) * 1000) / 10}%`;
+  console.log(`  覆盖率      ${covered}/${tasks} 个任务有派发记录（${pctText}）`);
+  if (tasks > 0 && covered / tasks < 0.5) {
+    console.log("             ⚠ 多数任务没有留痕：轨迹门禁只校验有记录的，别当成全覆盖");
+  }
+}
 
 console.log(`
   结论分布    PASS ${metrics.by_status.PASS} · FAIL ${metrics.by_status.FAIL} · OUT_OF_SCOPE ${metrics.by_status.OUT_OF_SCOPE}

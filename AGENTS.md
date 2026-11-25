@@ -41,6 +41,7 @@ Windows / Ubuntu / macOS 产物都在那台机器上验证。本地只跑 `npm r
 | Agent 预设 | `.agents/presets/` |
 | 门禁与路径发现 | `tools/` |
 | Rust 写法 | `docs/rust-style.md`（Google Rust Style Guide 落地版） |
+| 边界 / 上生产 | `docs/desktop-scope.md` · `docs/production-readiness.md` |
 
 ## 命令
 
@@ -52,6 +53,7 @@ npm run build                 # 前端类型检查 + 打包（apps/shell）
 bash scripts/verify-p0.sh     # 菜单包端到端验收
 npm run task -- --tasks .specify/specs/<id>/tasks.md --id T-01   # 跑一个任务并裁决
 npm run dispatch -- --tasks .specify/specs/<id>/tasks.md --id T-01 --record   # 编译任务单并留痕
-npm run metrics               # 派发指标与判断（打回率/越界率/追溯）
+npm run metrics               # 派发指标与判断（含覆盖率，别把有记录当全覆盖）
+npm run stats                 # 规模数字（能力/任务/场景/契约），不要手抄
 npm run dev                   # 浏览器预览（无需 Tauri）
 ```
