@@ -83,9 +83,16 @@ mod tests {
 
     #[test]
     fn lock_file_records_pid_for_ops() {
+        use std::io::{Read, Seek, SeekFrom};
+
         let dir = tempfile::tempdir().expect("临时目录");
-        let lock = acquire(dir.path()).expect("应拿到锁");
-        let content = std::fs::read_to_string(lock.path()).expect("锁文件可读");
+        let mut lock = acquire(dir.path()).expect("应拿到锁");
+
+        // 必须用**持锁的那个句柄**读：Windows 的 LockFileEx 会锁住字节范围，
+        // 另开句柄读同一文件会被拒（CI 在 Windows 上抓到的就是这个差异）。
+        lock.file.seek(SeekFrom::Start(0)).expect("定位锁文件");
+        let mut content = String::new();
+        lock.file.read_to_string(&mut content).expect("锁文件可读");
         assert!(
             content.contains(&format!("pid={}", std::process::id())),
             "锁文件应写当前 PID 便于排查：{content}"
