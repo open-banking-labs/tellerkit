@@ -64,6 +64,20 @@ WHEN 再次申请冲正
 THEN 返回 AlreadyReversed
 ```
 
+### S-07 授权完成不等于处置完成
+
+```gherkin
+GIVEN 冲正已获授权
+WHEN 主机尚未回流水号
+THEN 该笔仍在待处置清单里
+AND 再次申请返回 AwaitingConfirmation（不是 AlreadyReversed）
+WHEN 主机回执后确认
+THEN 才从待处置清单移除，且不能重复确认
+```
+
+理由：冲正是账务操作，账只有一个地方算。客户端把"已授权"当"已冲正"，
+会出现"柜员以为冲了、账上没冲"。
+
 ### S-06 待处置清单顺序稳定
 
 ```gherkin

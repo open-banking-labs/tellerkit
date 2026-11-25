@@ -80,6 +80,21 @@ const FORBIDDEN_IN_COMMANDS = [
   }
 }
 
+// 规则 1.9：桌面端边界 —— core 里不得出现核心系统的业务词汇（docs/desktop-scope.md §7）
+const CORE_DIR = "packages/core/src";
+const CORE_BUSINESS_TERMS = ["balance", "interest", "accrual", "fee"];
+for (const file of rustFiles.filter((f) => f.includes(CORE_DIR))) {
+  const text = read(file);
+  for (const term of CORE_BUSINESS_TERMS) {
+    const re = new RegExp(`\\b${term}\\b`, "i");
+    if (re.test(text)) {
+      errors.push(
+        `${rel(file)} 出现核心系统词汇 \`${term}\`：账务规则属于远端核心系统，桌面端不得内置（docs/desktop-scope.md）`,
+      );
+    }
+  }
+}
+
 // 规则 2：核心包不得依赖 tauri（否则无法脱离 GUI 测试）
 for (const dir of packageSrcDirs) {
   const pkgRoot = dir.replace(/\/src$/, "");

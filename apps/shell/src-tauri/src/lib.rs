@@ -158,6 +158,36 @@ fn build_remote(
     )
 }
 
+/// 后台重放线程。
+///
+/// 为什么需要：挂起交易的自动重放以前只在前端 tick 时发生，
+/// 界面关掉就等于停摆。柜面终端下班后常留着进程，这时候更需要它自己跑。
+///
+/// 间隔由 `TK_REPLAY_INTERVAL_SECS` 控制，默认 60 秒；`0` 关闭。
+fn spawn_replay_worker(handle: tauri::AppHandle) {
+    let secs: u64 = std::env::var("TK_REPLAY_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(60);
+    if secs == 0 {
+        return;
+    }
+
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(secs));
+        let state = handle.state::<Mutex<AppState>>();
+        let Ok(mut guard) = state.lock() else {
+            continue;
+        };
+        // 未登录不重放：没有权限快照时重放会在审计里留下 unknown 操作者
+        if guard.snapshot.is_none() {
+            continue;
+        }
+        let mut app = app::ShellApp::new(&mut guard);
+        let _ = app.replay_pending();
+    });
+}
+
 /// 让同一个 SQLite 连接既做交易账本、又做审计查询。
 ///
 /// `TxEngine` 需要 `Box<dyn TxJournal>` 的所有权，而命令层还要按需查审计，
@@ -204,6 +234,7 @@ pub fn run() {
             };
             // 端点配置（changes/008）：有配置就用真实路由，否则回退内置 mock
             let (remote, mock, remote_note) = build_remote(&appdata);
+            let app_handle = app.handle().clone();
             let state = AppState::new(
                 store,
                 appdata.display().to_string(),
@@ -217,6 +248,8 @@ pub fn run() {
                 eprintln!("{note}");
             }
             app.manage(Mutex::new(state));
+            // 必须在 manage 之后：线程的第一次 tick 要能拿到状态
+            spawn_replay_worker(app_handle);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

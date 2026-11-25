@@ -2,7 +2,7 @@
 
 | ID | 任务 | 场景 | layer | 允许改动 | 验收命令 |
 |---|---|---|---|---|---|
-| T-01 | 实现异常标记与冲正申请 | S-01, S-02, S-03, S-04, S-05, S-06 | `core` | `packages/core/src/reversal.rs` | `cargo test -p tellerkit-core reversal::` |
+| T-01 | 实现异常标记与冲正申请 | S-01, S-02, S-03, S-04, S-05, S-06, S-07 | `core` | `packages/core/src/reversal.rs` | `cargo test -p tellerkit-core reversal::` |
 
 ## 完成定义
 
