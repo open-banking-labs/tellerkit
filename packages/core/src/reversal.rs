@@ -48,13 +48,19 @@ pub trait Authorizer {
     fn authorize(&self, request: &ReversalRequest) -> Authorization;
 }
 
-/// 冲正完成的凭证，进审计用。
+/// 冲正申请。**本地的这条记录是"意图"，不是"结果"**——
+/// 只有主机回了流水号（`host_reference`）才算处置完成。
+///
+/// 为什么不本地判定完成：冲正是账务操作，账只有一个地方算。
+/// 客户端先标"已冲正"、主机却没受理，就会出现"柜员以为冲了、账上没冲"。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReversalRecord {
     pub idempotency_key: String,
     pub initiator: String,
     pub approver: String,
     pub reason: String,
+    /// 主机回执的流水号。`None` = 已授权但未确认。
+    pub host_reference: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -69,6 +75,12 @@ pub enum ReversalError {
     NotReversible,
     #[error("授权被拒绝：{0}")]
     NotAuthorized(String),
+    #[error("该笔冲正已授权，等待主机确认，不能重复申请")]
+    AwaitingConfirmation,
+    #[error("该笔冲正已确认，不能重复确认")]
+    AlreadyConfirmed,
+    #[error("没有待确认的冲正申请")]
+    NoPendingReversal,
 }
 
 /// 冲正账本：谁被标记、谁批了、冲过没有。
@@ -103,12 +115,15 @@ impl ReversalBook {
     }
 
     /// 待处置的异常交易，按幂等键排序（便于界面稳定展示）。
+    /// 待处置清单：**已授权但主机未确认的冲正仍在清单里**——
+    /// 在主机确认之前，账上的状态还是原样，柜员不能当它已经处理完。
     pub fn outstanding(&self) -> Vec<(String, ExceptionKind)> {
         let mut rows: Vec<(String, ExceptionKind)> = self
             .exceptions
             .iter()
-            // 已冲正的交易处置已完成，不再待办；标记本身留给幂等判断（S-05）。
-            .filter(|(key, _)| !self.reversals.contains_key(*key))
+            // 只有主机确认过的冲正才算处置完成；已授权未确认的仍在清单里。
+            // 标记本身留着，供幂等判断（S-05）。
+            .filter(|(key, _)| !self.is_confirmed(key))
             .map(|(key, kind)| (key.clone(), *kind))
             .collect();
         // HashMap 的迭代顺序不稳定；排序后界面与测试看到的才是同一个顺序。
@@ -118,6 +133,32 @@ impl ReversalBook {
 
     pub fn reversal_of(&self, idempotency_key: &str) -> Option<&ReversalRecord> {
         self.reversals.get(idempotency_key)
+    }
+
+    /// 主机回了流水号：这一刻才算处置完成。
+    ///
+    /// 客户端不得自己调它来"假装完成"——调用方必须是主机回执的处理路径。
+    pub fn confirm(
+        &mut self,
+        idempotency_key: &str,
+        host_reference: &str,
+    ) -> Result<(), ReversalError> {
+        let Some(record) = self.reversals.get_mut(idempotency_key) else {
+            return Err(ReversalError::NoPendingReversal);
+        };
+        if record.host_reference.is_some() {
+            return Err(ReversalError::AlreadyConfirmed);
+        }
+        record.host_reference = Some(host_reference.to_string());
+        Ok(())
+    }
+
+    /// 是否已由主机确认。
+    pub fn is_confirmed(&self, idempotency_key: &str) -> bool {
+        self.reversals
+            .get(idempotency_key)
+            .map(|r| r.host_reference.is_some())
+            .unwrap_or(false)
     }
 
     /// 申请冲正。
@@ -138,8 +179,13 @@ impl ReversalBook {
             return Err(ReversalError::NotMarked);
         }
         // 2. 幂等：冲正一次就够，重复冲正等于重复记账。
-        if self.reversals.contains_key(&request.idempotency_key) {
-            return Err(ReversalError::AlreadyReversed);
+        //    但"已授权未确认"与"已确认"要分开报——前者还能等主机回执，后者只能人工查。
+        if let Some(existing) = self.reversals.get(&request.idempotency_key) {
+            return Err(if existing.host_reference.is_some() {
+                ReversalError::AlreadyReversed
+            } else {
+                ReversalError::AwaitingConfirmation
+            });
         }
         // 3. 待推进（Roll Forward）的语义是"继续推进"，不是"回滚"。
         //    它和待冲正是两种处置方向，不能被同一套流程处理。
@@ -158,13 +204,14 @@ impl ReversalBook {
         if !authorization.granted {
             return Err(ReversalError::NotAuthorized(authorization.reason));
         }
-        // 6. 通过：留凭证。异常标记保留——它是幂等判断的依据（S-05）；
-        //    "已处置完、不再待办"由 `outstanding` 扣除已冲正的交易来表达。
+        // 6. 通过：留**申请**记录。异常标记保留——它是幂等判断的依据（S-05）；
+        //    "已处置完、不再待办"要等主机确认后才表达。
         let record = ReversalRecord {
             idempotency_key: request.idempotency_key.clone(),
             initiator: request.initiator.clone(),
             approver: authorization.approver,
             reason: request.reason.clone(),
+            host_reference: None,
         };
         self.reversals
             .insert(request.idempotency_key.clone(), record.clone());
@@ -325,10 +372,17 @@ mod tests {
         let authorizer = StubAuthorizer::granting("T02");
 
         book.request(&request("T01"), &authorizer).unwrap();
-        let err = book.request(&request("T01"), &authorizer).unwrap_err();
 
-        assert_eq!(err, ReversalError::AlreadyReversed);
+        // 已授权、未确认：不能重复申请，但报的是"等确认"而不是"已冲正"
+        let err = book.request(&request("T01"), &authorizer).unwrap_err();
+        assert_eq!(err, ReversalError::AwaitingConfirmation);
         assert_eq!(authorizer.calls(), 1, "重复冲正不该再次请求授权");
+
+        // 主机确认后，再申请就是真正的重复冲正
+        book.confirm("TX-001", "HOST-1").unwrap();
+        let err = book.request(&request("T01"), &authorizer).unwrap_err();
+        assert_eq!(err, ReversalError::AlreadyReversed);
+        assert_eq!(authorizer.calls(), 1, "已确认后也不该再打扰主管");
     }
 
     // S-06 待处置清单顺序稳定（按幂等键排序）。
@@ -354,6 +408,32 @@ mod tests {
         assert!(book.reversal_of("TX-001").is_none());
         // 它仍然是待处置的（方向未定，等人判断）
         assert_eq!(book.outstanding().len(), 1);
+    }
+
+    #[test]
+    fn confirm_requires_a_pending_reversal_and_happens_once() {
+        let mut book = ReversalBook::new();
+        assert_eq!(
+            book.confirm("nope", "HOST-1").unwrap_err(),
+            ReversalError::NoPendingReversal
+        );
+
+        book.mark("TX-001", ExceptionKind::MarkedForReversal);
+        book.request(&request("T01"), &StubAuthorizer::granting("T02"))
+            .unwrap();
+        book.confirm("TX-001", "HOST-1").unwrap();
+        assert_eq!(
+            book.confirm("TX-001", "HOST-2").unwrap_err(),
+            ReversalError::AlreadyConfirmed,
+            "同一笔不能确认两次——第二次的流水号会覆盖真实回执"
+        );
+        assert_eq!(
+            book.reversal_of("TX-001")
+                .unwrap()
+                .host_reference
+                .as_deref(),
+            Some("HOST-1")
+        );
     }
 
     #[test]
@@ -388,10 +468,19 @@ mod tests {
                 initiator: "T01".to_string(),
                 approver: "T02".to_string(),
                 reason: request("T01").reason,
+                host_reference: None,
             }
         );
         assert_eq!(book.reversal_of("TX-001"), Some(&record));
-        assert!(book.outstanding().is_empty(), "已冲正的交易不再待处置");
+        assert!(
+            !book.outstanding().is_empty(),
+            "授权完但主机未确认，不能算处置完成"
+        );
+
+        // 主机回执后才从待办里消失
+        book.confirm("TX-001", "HOST-42").unwrap();
+        assert!(book.is_confirmed("TX-001"));
+        assert!(book.outstanding().is_empty(), "主机确认后不再待处置");
         // 决策：标记不删除（它记录的是"当初为何异常"，且是 AlreadyReversed 的判断依据），
         // 待办状态由 `outstanding` 扣除已冲正的交易来表达。
         assert_eq!(
