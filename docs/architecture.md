@@ -144,9 +144,9 @@
 
 | 项 | 现状 | 目标 | 严重度 |
 |---|---|---|---|
-| 用例层 | ❌ 不存在，编排写在 `commands.rs` | `app.rs` 的 `ShellApp` | 高 |
+| 用例层 | ✅ `app.rs::ShellApp`；`commands.rs` 只剩加锁 → 用例 → DTO 映射 | — | 完成 |
 | 远端端口 | ✅ `RemoteBanking` 已定义并接线（`ports.rs`），菜单/登录/交易全部走它 | 补 `HttpRemote` 适配器（按 `contracts/remote-api.md`） | 中 |
-| 时钟 | ⚠️ `Clock` 端口已定义，命令层仍直接取 `SystemTime` | 命令层改为注入 | 中 |
+| 时钟 | ✅ 注入到 `AppState.clock`，用例层只读端口；测试用冻结时钟验证 | — | 完成 |
 | 前端门面 | ✅ `platform/client.ts` 接口 + `tauri.ts`/`mock.ts` 两个实现；`check-boundaries` 强制"只有 tauri.ts 能碰 invoke" | — | 完成 |
 | IPC DTO 与领域类型 | ⚠️ 混用 | 保留混用但**记录理由**：DTO 已由 ts-rs 生成并门禁，加映射层会多一层无收益转换 | 低 |
 | 远端契约 | ✅ `contracts/remote-api.md`（含幂等、504 状态不明、错误模型） | 补 OpenAPI 生成（可选） | 完成 |
@@ -156,8 +156,8 @@
 | 规则 | 检查方式 |
 |---|---|
 | L1 不得出现命令名字符串 | ✅ 已实现：`src/**` 禁止 `@tauri-apps/api` 与 `invoke(`，只有 `platform/tauri.ts` 例外 |
-| L2 不得直接调领域函数做编排 | 新增 `check-layering`：`commands.rs` 里禁止 `filter_visible`/`scan_dir`/`run_once` 等直接调用 |
-| L3 不得依赖具体适配器 | 同上：`app.rs` 禁止 `SqliteJournal`、`reqwest` |
+| L2 不得直接调领域函数做编排 | ✅ 已实现：`check-boundaries` 禁止 `commands.rs` 出现 `sync::boot_load(`/`filter::filter_visible(`/`pkg::scan_dir(`/`run_once(`/`.ensure_allowed(` |
+| L3 不得依赖具体适配器 | ⚠️ 待补：`app.rs` 目前仍直接调 `state.tx`/`state.devices`（它们是端口实例，可以接受，但需在评审时确认） |
 | L4 不得引入 IO | 已有：core 不得依赖 tauri；扩展为禁止 `std::fs`/`std::net` |
 
 ## 9. 反模式（评审直接打回）
