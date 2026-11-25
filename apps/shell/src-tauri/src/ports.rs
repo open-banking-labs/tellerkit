@@ -1,0 +1,288 @@
+//! 出站端口（L3 应用层依赖它们，不依赖实现）。
+//!
+//! 这里的每个 trait 对应一条边界或一个可替换资源：
+//!
+//! | 端口 | 边界 | 实现 |
+//! |---|---|---|
+//! | [`RemoteBanking`] | ③ 桌面 ↔ 服务端 | `adapters::mock_remote`（当前）/ `adapters::http_remote`（目标） |
+//! | [`Clock`] | 进程外部（时间） | `SystemClock` / 测试用 `FrozenClock` |
+//! | `TxJournal` | 本地磁盘 | `packages/journal-sqlite` |
+//! | 设备四 trait | 本地硬件 | `packages/core::device` 的 mock |
+//!
+//! 规则：端口 trait 里**不得出现具体实现类型**（`reqwest::Error`、`rusqlite::Connection`）。
+//! 违反它，这层抽象就白抽了。
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use tellerkit_core::mock::{DemoRole, MockHost};
+use tellerkit_core::perm::PermSnapshot;
+use tellerkit_core::tx::{HostError, TxHost, TxRequest};
+use tellerkit_core::Version;
+
+/// 远端调用的错误。**不携带 HTTP 细节**：应用层只需要知道"可重试 / 不可重试 / 需要重新登录"。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteError {
+    /// 网络不可达或超时：可以重试。
+    Unavailable(String),
+    /// 服务端明确拒绝：不必重试。
+    Rejected(String),
+    /// 凭据失效：需要重新登录。
+    Unauthorized,
+}
+
+impl std::fmt::Display for RemoteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RemoteError::Unavailable(m) => write!(f, "服务端不可达：{m}"),
+            RemoteError::Rejected(m) => write!(f, "服务端拒绝：{m}"),
+            RemoteError::Unauthorized => write!(f, "登录已失效，请重新登录"),
+        }
+    }
+}
+
+/// 菜单版本探测结果。体积必须很小：它是启动后的第一个后台请求。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuVersionProbe {
+    pub latest: u64,
+    pub shell_compat_min: u16,
+    pub shell_compat_max: u16,
+}
+
+/// ③ 边界：桌面应用看到的"银行后台"。
+///
+/// 继承 [`TxHost`]：交易提交与菜单/登录走同一套远端，分成两个对象只会让
+/// 应用层多持有一个引用，没有收益。
+pub trait RemoteBanking: TxHost + Send + Sync {
+    /// 探测菜单版本。实现应保证只传版本号、返回极小响应。
+    fn probe_menu(&self) -> Result<MenuVersionProbe, RemoteError>;
+
+    /// 下载菜单包（已签名，本地负责验签）。
+    fn download_menu(&self) -> Result<Vec<u8>, RemoteError>;
+
+    /// 登录换取权限快照。
+    fn login(&self, role_id: &str, perm_version: u64) -> Result<PermSnapshot, RemoteError>;
+}
+
+/// 时钟端口。锁屏、退避、审计都依赖时间，注入才能把测试从 `sleep` 里救出来。
+pub trait Clock: Send + Sync {
+    fn now_secs(&self) -> u64;
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now_secs(&self) -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+}
+
+/// 演示用远端：把"在线 / 离线 / 坏包 / 业务拒绝"做成可切换的开关。
+///
+/// 它是**适配器**，不是领域逻辑——放在 ports 模块旁边是为了让替换点集中在一处。
+pub struct MockRemote {
+    state: Mutex<MockRemoteState>,
+    tx_seq: AtomicU64,
+}
+
+#[derive(Debug, Clone)]
+struct MockRemoteState {
+    offline: bool,
+    tampered: bool,
+    menu_version: u64,
+    /// 业务拒绝的下单原因；None 表示正常受理。
+    reject_reason: Option<String>,
+}
+
+impl Default for MockRemote {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(MockRemoteState {
+                offline: false,
+                tampered: false,
+                menu_version: 7,
+                reject_reason: None,
+            }),
+            tx_seq: AtomicU64::new(0),
+        }
+    }
+}
+
+impl MockRemote {
+    /// 演示开关：断网 / 下发坏包 / 服务器菜单版本。
+    pub fn set_offline(&self, offline: bool) {
+        self.with_state(|s| s.offline = offline);
+    }
+
+    pub fn set_tampered(&self, tampered: bool) {
+        self.with_state(|s| s.tampered = tampered);
+    }
+
+    pub fn bump_menu_version(&self) -> u64 {
+        self.with_state(|s| {
+            s.menu_version += 1;
+            s.menu_version
+        })
+    }
+
+    /// 业务拒绝开关：`Some(原因)` 后所有交易都被主机拒绝。
+    pub fn set_reject_reason(&self, reason: Option<String>) {
+        self.with_state(|s| s.reject_reason = reason);
+    }
+
+    pub fn menu_version(&self) -> u64 {
+        self.state
+            .lock()
+            .map(|s| s.menu_version)
+            .unwrap_or_default()
+    }
+
+    pub fn offline(&self) -> bool {
+        self.state.lock().map(|s| s.offline).unwrap_or(false)
+    }
+
+    pub fn tampered(&self) -> bool {
+        self.state.lock().map(|s| s.tampered).unwrap_or(false)
+    }
+
+    /// 锁中毒时**不**取内部数据：宁可报错，也不在可疑状态上继续。
+    fn with_state<T>(&self, f: impl FnOnce(&mut MockRemoteState) -> T) -> T
+    where
+        T: Default,
+    {
+        match self.state.lock() {
+            Ok(mut guard) => f(&mut guard),
+            Err(_) => T::default(),
+        }
+    }
+
+    fn snapshot(&self) -> MockRemoteState {
+        self.state
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_else(|_| MockRemoteState {
+                offline: true,
+                tampered: false,
+                menu_version: 0,
+                reject_reason: Some("演示远端状态不可用".into()),
+            })
+    }
+
+    /// 菜单同步沿用现有的 `sync` 函数，它们接受 `MockHost`。
+    /// 这里给出**同一份状态**的快照，避免 offline 出现在两处。
+    pub fn menu_host(&self) -> MockHost {
+        let state = self.snapshot();
+        self.mock_host(&state)
+    }
+
+    fn mock_host(&self, state: &MockRemoteState) -> MockHost {
+        MockHost {
+            menu_version: state.menu_version,
+            offline: state.offline,
+            serve_tampered: state.tampered,
+        }
+    }
+}
+
+impl RemoteBanking for MockRemote {
+    fn probe_menu(&self) -> Result<MenuVersionProbe, RemoteError> {
+        let state = self.snapshot();
+        self.mock_host(&state)
+            .probe()
+            .map(|p| MenuVersionProbe {
+                latest: p.latest,
+                shell_compat_min: p.shell_compat_min,
+                shell_compat_max: p.shell_compat_max,
+            })
+            .map_err(|e| RemoteError::Unavailable(e.to_string()))
+    }
+
+    fn download_menu(&self) -> Result<Vec<u8>, RemoteError> {
+        let state = self.snapshot();
+        self.mock_host(&state)
+            .download()
+            .map_err(|e| RemoteError::Unavailable(e.to_string()))
+    }
+
+    fn login(&self, role_id: &str, perm_version: u64) -> Result<PermSnapshot, RemoteError> {
+        let state = self.snapshot();
+        if state.offline {
+            return Err(RemoteError::Unavailable("断网".into()));
+        }
+        self.mock_host(&state)
+            .login(role_id, perm_version)
+            .ok_or(RemoteError::Rejected(format!("未知角色：{role_id}")))
+    }
+}
+
+impl TxHost for MockRemote {
+    fn submit(&self, _request: &TxRequest) -> Result<String, HostError> {
+        let state = self.snapshot();
+        if state.offline {
+            return Err(HostError::Unavailable);
+        }
+        if let Some(reason) = state.reject_reason {
+            return Err(HostError::Rejected(reason));
+        }
+        let n = self.tx_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        Ok(format!("TX{n:08}"))
+    }
+}
+
+/// 演示角色列表（真实环境由服务端下发）。
+pub fn demo_roles() -> Vec<(&'static str, &'static str)> {
+    DemoRole::ALL
+        .iter()
+        .map(|r| (r.id(), r.label()))
+        .collect()
+}
+
+/// 主壳版本，用于业务包兼容判定。
+pub fn shell_version() -> Version {
+    Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or(Version {
+        major: 0,
+        minor: 0,
+        patch: 0,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mock_remote_goes_offline_and_back() {
+        let remote = MockRemote::default();
+        assert!(remote.probe_menu().is_ok());
+        remote.set_offline(true);
+        assert!(matches!(
+            remote.probe_menu(),
+            Err(RemoteError::Unavailable(_))
+        ));
+        remote.set_offline(false);
+        assert!(remote.probe_menu().is_ok());
+    }
+
+    #[test]
+    fn mock_remote_rejects_transactions_when_configured() {
+        let remote = MockRemote::default();
+        let req = TxRequest::new("account.deposit", "k1");
+        assert!(remote.submit(&req).is_ok());
+        remote.set_reject_reason(Some("余额不足".into()));
+        assert_eq!(
+            remote.submit(&req),
+            Err(HostError::Rejected("余额不足".into()))
+        );
+    }
+
+    #[test]
+    fn clock_reports_wall_time_in_seconds() {
+        let now = SystemClock.now_secs();
+        assert!(now > 1_700_000_000, "应是 2023 年之后的秒级时间戳");
+    }
+}

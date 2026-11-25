@@ -342,28 +342,28 @@ function checkUpdate(): Promise<void> {
 
 function toggleOffline(): Promise<void> {
   return run(async () => {
-    dev.value = await api.devSetOffline(!dev.value?.offline);
+    dev.value = await api.dev.setOffline(!dev.value?.offline);
     log("warn", dev.value.offline ? "已模拟断网：版本探测将失败，但本地菜单仍可用" : "已恢复网络");
   });
 }
 
 function toggleTampered(): Promise<void> {
   return run(async () => {
-    dev.value = await api.devSetTampered(!dev.value?.tampered);
+    dev.value = await api.dev.setTampered(!dev.value?.tampered);
     log("warn", dev.value.tampered ? "服务端将下发签名错误的菜单包（用于验证下载侧验签）" : "服务端已恢复下发正确包");
   });
 }
 
 function bumpVersion(): Promise<void> {
   return run(async () => {
-    dev.value = await api.devBumpServerVersion();
+    dev.value = await api.dev.bumpServerVersion();
     log("info", `服务端菜单版本提升到 v${dev.value.server_version}`);
   });
 }
 
 function corruptLocal(): Promise<void> {
   return run(async () => {
-    const msg = await api.devCorruptLocal();
+    const msg = await api.dev.corruptLocal();
     log("warn", msg);
   });
 }
@@ -381,7 +381,7 @@ function reload(): Promise<void> {
 
 function resetLocal(): Promise<void> {
   return run(async () => {
-    dev.value = await api.devResetLocal();
+    dev.value = await api.dev.resetLocal();
     log("warn", "已删除本地菜单包，重新执行启动流程（相当于首次启动）");
     const info = await api.boot();
     bootInfo.value = info;
