@@ -3,7 +3,11 @@
 //! 为什么单独成包：`tellerkit-core` 必须能脱离磁盘做纯逻辑测试（宪法第 2 条）。
 //! 数据库依赖放在这里，core 只留 `TxJournal` 端口。
 
+mod cipher;
+
 use rusqlite::{params, Connection};
+
+pub use cipher::LedgerCipher;
 use std::path::Path;
 use std::sync::Mutex;
 use tellerkit_core::tx::{TxJournal, TxRequest, TxResult, TxStatus};
@@ -23,24 +27,31 @@ pub struct AuditEvent {
 }
 
 /// 本地账本。一个进程一个连接，用 Mutex 串行化（柜面终端是单柜员场景）。
+///
+/// 交易要素（`tx_queue.elements`）落盘前加密：账号不该以明文躺在磁盘上。
+/// 加密的边界与局限见 [`cipher`] 模块文档——**它防的是单文件泄露，不是本地攻击者**。
 pub struct SqliteJournal {
     conn: Mutex<Connection>,
+    cipher: LedgerCipher,
 }
 
 impl SqliteJournal {
     /// 打开（或创建）账本并建表。
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
+        let path = path.as_ref();
         let conn = Connection::open(path).map_err(|e| format!("打开账本失败：{e}"))?;
-        Self::init(conn)
+        let key_path = path.with_file_name("ledger.key");
+        let cipher = LedgerCipher::open_or_create(&key_path)?;
+        Self::init(conn, cipher)
     }
 
-    /// 内存账本，测试用。
+    /// 内存账本，测试用。密钥不落盘。
     pub fn in_memory() -> Result<Self, String> {
         let conn = Connection::open_in_memory().map_err(|e| format!("打开内存账本失败：{e}"))?;
-        Self::init(conn)
+        Self::init(conn, LedgerCipher::ephemeral()?)
     }
 
-    fn init(conn: Connection) -> Result<Self, String> {
+    fn init(conn: Connection, cipher: LedgerCipher) -> Result<Self, String> {
         conn.execute_batch(
             r#"
             PRAGMA journal_mode = WAL;
@@ -79,6 +90,7 @@ impl SqliteJournal {
         .map_err(|e| format!("建表失败：{e}"))?;
         Ok(Self {
             conn: Mutex::new(conn),
+            cipher,
         })
     }
 
@@ -191,8 +203,10 @@ impl TxJournal for SqliteJournal {
     }
 
     fn enqueue(&self, request: &TxRequest) -> Result<(), String> {
-        let elements = serde_json::to_string(&request.elements)
-            .map_err(|e| format!("序列化交易要素失败：{e}"))?;
+        let elements = self.cipher.seal(
+            &serde_json::to_string(&request.elements)
+                .map_err(|e| format!("序列化交易要素失败：{e}"))?,
+        )?;
         self.lock()
             .execute(
                 "INSERT OR REPLACE INTO tx_queue
@@ -244,12 +258,16 @@ impl TxJournal for SqliteJournal {
 
         let mut out = Vec::new();
         for row in rows {
-            let (key, tx_code, amount_cents, elements, offline) = row.map_err(|e| e.to_string())?;
+            let (key, tx_code, amount_cents, stored, offline) = row.map_err(|e| e.to_string())?;
+            // 解密失败必须报错，不能默认成空要素——那样会把交易变成另一笔交易
+            let plain = self.cipher.open(&stored)?;
+            let elements = serde_json::from_str(&plain)
+                .map_err(|e| format!("交易要素解析失败（{key}）：{e}"))?;
             out.push(TxRequest {
                 idempotency_key: key,
                 tx_code,
                 amount_cents,
-                elements: serde_json::from_str(&elements).unwrap_or_default(),
+                elements,
                 offline_capable: offline != 0,
             });
         }
@@ -329,6 +347,60 @@ mod tests {
             .map(|r| r.idempotency_key)
             .collect();
         assert_eq!(keys, vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn elements_are_encrypted_at_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tx.db");
+        let account = "6222021234567890123";
+        {
+            let j = SqliteJournal::open(&path).unwrap();
+            let mut r = req("k-enc").offline(true);
+            r.elements.insert("account".into(), account.into());
+            j.enqueue(&r).unwrap();
+        }
+
+        // 直接扫磁盘字节（含 WAL）：卡号不得以明文出现
+        let needle = account.as_bytes();
+        for entry in std::fs::read_dir(dir.path()).unwrap() {
+            let p = entry.unwrap().path();
+            let raw = std::fs::read(&p).unwrap_or_default();
+            assert!(
+                !raw.windows(needle.len()).any(|w| w == needle),
+                "{} 里出现了明文卡号",
+                p.display()
+            );
+        }
+
+        // 但重新打开必须能解出来（加密不能变成丢数据）
+        let j = SqliteJournal::open(&path).unwrap();
+        assert_eq!(j.pending().unwrap()[0].elements["account"], account);
+    }
+
+    #[test]
+    fn corrupt_ciphertext_fails_loudly_instead_of_dropping_elements() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tx.db");
+        {
+            let j = SqliteJournal::open(&path).unwrap();
+            let mut r = req("k-bad").offline(true);
+            r.elements.insert("account".into(), "6222".into());
+            j.enqueue(&r).unwrap();
+        }
+        // 把密文改成不合法的格式
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute(
+                "UPDATE tx_queue SET elements = 'v1:zz:zz' WHERE idempotency_key = 'k-bad'",
+                [],
+            )
+            .unwrap();
+        }
+
+        let j = SqliteJournal::open(&path).unwrap();
+        let err = j.pending().unwrap_err();
+        assert!(err.contains("nonce") || err.contains("密文"), "实际：{err}");
     }
 
     #[test]

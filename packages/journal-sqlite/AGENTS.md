@@ -6,7 +6,7 @@
 
 ## 允许依赖
 
-`tellerkit-core`（端口定义）· `rusqlite`（bundled）· `serde_json`
+`tellerkit-core`（端口定义）· `rusqlite`（bundled）· `serde_json` · `ring`（账本字段加密）· `hex`
 
 ## 禁止
 

@@ -26,3 +26,13 @@
 ```bash
 cargo test -p tellerkit-journal-sqlite   # 或 scripts/remote-build.sh 同样命令
 ```
+
+## 加密
+
+`tx_queue.elements`（账号、户名、摘要）用 AES-256-GCM 加密后入库，格式
+`v1:<hex nonce>:<hex ciphertext>`。密钥在 `<appdata>/ledger.key`（Unix 0600）。
+
+**局限**：密钥与库同目录，能执行代码者可一并拿走。它防的是"只拷走数据库"这类泄露，
+不是"账本安全了"。详见 `changes/010-ledger-encryption.md`。
+
+旧库无需迁移：没有 `v1:` 前缀的记录按明文读取。
