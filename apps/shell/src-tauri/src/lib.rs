@@ -6,6 +6,7 @@
 //! - 启动路径上**没有**任何网络等待：本地包 → 验签 → 反序列化；
 //!   版本探测是渲染之后的独立调用。
 
+pub mod app;
 pub mod commands;
 pub mod ports;
 
@@ -13,6 +14,7 @@ use std::sync::Mutex;
 
 use std::sync::Arc;
 
+use std::sync::Arc as StdArc;
 use tellerkit_core::device::{mock_devices, DevicePolicy, Devices};
 use tellerkit_core::mock::demo_verifying_key;
 use tellerkit_core::model::MenuTree;
@@ -36,7 +38,6 @@ pub struct AppState {
     pub snapshot: Option<PermSnapshot>,
     /// 全量菜单树（不做权限过滤），供每次过滤复用。
     pub menu: Option<MenuTree>,
-    pub last_load: Option<commands::LoadReport>,
     pub appdata_dir: String,
     /// 账本打不开时的告警。柜面宁可"能开但提示异常"，也不要"打不开"。
     pub journal_warning: Option<String>,
@@ -52,6 +53,8 @@ pub struct AppState {
     pub policy: DevicePolicy,
     /// 会话锁屏状态。`None` 表示未登录。
     pub session: Option<SessionGuard>,
+    /// 时钟端口。锁屏/退避/审计都靠它，注入才能在测试里控制时间。
+    pub clock: StdArc<dyn ports::Clock>,
     /// 自动重放调度。挂起交易按退避节奏逐笔重试，不再一次全推。
     pub replay: ReplayScheduler,
 }
@@ -69,7 +72,6 @@ impl AppState {
             store,
             snapshot: None,
             menu: None,
-            last_load: None,
             appdata_dir,
             journal_warning,
             tx,
@@ -78,6 +80,7 @@ impl AppState {
             audit,
             policy: DevicePolicy::allow_mocks(),
             session: None,
+            clock: StdArc::new(ports::SystemClock),
             replay: ReplayScheduler::new(ReplayPolicy::default()),
         }
     }
