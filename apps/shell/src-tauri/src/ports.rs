@@ -236,10 +236,7 @@ impl TxHost for MockRemote {
 
 /// 演示角色列表（真实环境由服务端下发）。
 pub fn demo_roles() -> Vec<(&'static str, &'static str)> {
-    DemoRole::ALL
-        .iter()
-        .map(|r| (r.id(), r.label()))
-        .collect()
+    DemoRole::ALL.iter().map(|r| (r.id(), r.label())).collect()
 }
 
 /// 主壳版本，用于业务包兼容判定。
