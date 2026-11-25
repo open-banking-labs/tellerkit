@@ -26,6 +26,7 @@ cd "$ROOT"
 echo "→ 同步源码到 $HOST:~/$DIR_REL"
 rsync -az --delete \
   --exclude target --exclude node_modules --exclude dist --exclude .git \
+  --exclude .agents/worktrees \
   ./ "$HOST:$DIR_REL/"
 
 echo "→ 远端执行：$CMD"

@@ -24,6 +24,9 @@ function walkAll(dir, out = []) {
   for (const name of entries) {
     if (["node_modules", "target", ".git", "dist", "gen"].includes(name)) continue;
     const p = join(dir, name);
+    // .agents/worktrees 是别的分支的完整检出，不属于本工作区；扫它会把他人的
+    // 调试残留算到当前仓库头上（AI-04 记录的 149 处误报就是这么来的）。
+    if (p === join(ROOT, ".agents/worktrees")) continue;
     if (statSync(p).isDirectory()) walkAll(p, out);
     else out.push(p);
   }

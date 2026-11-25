@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+# 提交前最后一道：具体银行名称/缩写不得进入历史。
+# 规则与词表见 tools/bank-names.json；完整门禁仍是 `npm run gate`。
+set -eu
+exec node tools/check-bank-names.mjs

@@ -17,11 +17,11 @@
 6. 命令层不得 `unwrap()`；错误必须翻译成人能看懂的文案。
 7. 权限快照不落盘；菜单隐藏 ≠ 安全。
 8. 端侧 AI 只预留契约位置，不写实现。
+9. 提交前跑 `node tools/check-bank-names.mjs`；不得出现具体银行名称/缩写。
 
 ## 编译纪律
 
-**不在本机跑 cargo。** 编译一律走 `scripts/remote-build.sh`（经 Tailscale 到首尔构建机），
-Windows / Ubuntu / macOS 产物都在那台机器上验证。本地只跑 `npm run gate` 的 node 部分。
+**不在本机跑 cargo。** 编译一律走 `scripts/remote-build.sh`（经 Tailscale 到首尔构建机），Windows / Ubuntu / macOS 产物都在那台机器上验证；本地只跑 `npm run gate` 的 node 部分。
 
 ## 分支纪律
 
