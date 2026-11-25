@@ -125,6 +125,17 @@ fn dev_state_of(st: &AppState) -> DevState {
 }
 
 /// 演示开关只在 mock 模式下有意义：接入真实端点后没有"离线开关"。
+/// 演示开关只在开发构建可用。
+///
+/// 正式构建里暴露"断网/篡改本地包"这类开关，等于给攻击者一个现成的降级按钮。
+fn dev_only() -> Result<(), String> {
+    if cfg!(debug_assertions) {
+        Ok(())
+    } else {
+        Err("演示开关只在开发构建中可用".to_string())
+    }
+}
+
 fn mock_handle(st: &AppState) -> Result<&std::sync::Arc<crate::ports::MockRemote>, String> {
     st.mock
         .as_ref()
@@ -295,6 +306,11 @@ pub fn dev_set_offline(
     offline: bool,
     state: State<'_, Mutex<AppState>>,
 ) -> Result<DevState, String> {
+    dev_only()?;
+    dev_only()?;
+    dev_only()?;
+    dev_only()?;
+    dev_only()?;
     let st = lock(&state)?;
     mock_handle(&st)?.set_offline(offline);
     Ok(dev_state_of(&st))
@@ -305,6 +321,11 @@ pub fn dev_set_tampered(
     tampered: bool,
     state: State<'_, Mutex<AppState>>,
 ) -> Result<DevState, String> {
+    dev_only()?;
+    dev_only()?;
+    dev_only()?;
+    dev_only()?;
+    dev_only()?;
     let st = lock(&state)?;
     mock_handle(&st)?.set_tampered(tampered);
     Ok(dev_state_of(&st))
@@ -312,6 +333,11 @@ pub fn dev_set_tampered(
 
 #[tauri::command]
 pub fn dev_bump_server_version(state: State<'_, Mutex<AppState>>) -> Result<DevState, String> {
+    dev_only()?;
+    dev_only()?;
+    dev_only()?;
+    dev_only()?;
+    dev_only()?;
     let st = lock(&state)?;
     mock_handle(&st)?.bump_menu_version();
     Ok(dev_state_of(&st))
@@ -319,6 +345,7 @@ pub fn dev_bump_server_version(state: State<'_, Mutex<AppState>>) -> Result<DevS
 
 #[tauri::command]
 pub fn dev_corrupt_local(state: State<'_, Mutex<AppState>>) -> Result<String, String> {
+    dev_only()?;
     let st = lock(&state)?;
     let version = st.store.current_version().ok_or("本地没有菜单包可篡改")?;
     let path = st.store.pack_path(version);
@@ -338,6 +365,7 @@ pub fn dev_corrupt_local(state: State<'_, Mutex<AppState>>) -> Result<String, St
 
 #[tauri::command]
 pub fn dev_reset_local(state: State<'_, Mutex<AppState>>) -> Result<DevState, String> {
+    dev_only()?;
     let st = lock(&state)?;
     for version in st.store.list_versions() {
         let _ = std::fs::remove_file(st.store.pack_path(version));

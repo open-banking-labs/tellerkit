@@ -157,6 +157,7 @@
 ```
 
 - `transport`：`http` | `tcp`
+- `timeout_ms`：单次调用的超时，**由端点配置决定**（同一传输可服务多个端点，各自不同）
 - `codec`：`json` | `raw` | `fixed-width`
 - 解析失败或文件缺失 → **回退内置 mock**，并在启动 notes 里写明原因
 - **完整性**：`endpoints.json.sig`（对文件原始字节的 Ed25519 签名，hex）。

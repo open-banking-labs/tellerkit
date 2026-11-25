@@ -26,6 +26,8 @@ const busy = ref(false);
 const fatal = ref("");
 const dev = ref<DevState | null>(null);
 const update = ref<UpdateReport | null>(null);
+/** 开发构建才显示演示开关；后端 `dev_only()` 也会拒绝，两层防护。 */
+const showDevTools = !import.meta.env.PROD;
 const locked = ref(false);
 const lockReason = ref<string | null>(null);
 let sessionTimer: number | undefined;
@@ -562,7 +564,9 @@ onUnmounted(() => {
         <div v-else class="placeholder">选择左侧菜单开始。</div>
       </main>
 
+      <!-- 演示开关只在开发构建显示：正式包里后端也会拒绝这些命令（双保险） -->
       <DevPanel
+        v-if="showDevTools"
         :boot="bootInfo"
         :session="session"
         :dev="dev"
