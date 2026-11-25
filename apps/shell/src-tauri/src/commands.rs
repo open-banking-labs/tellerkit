@@ -15,7 +15,7 @@ use tellerkit_core::filter::MenuView;
 use tellerkit_core::tx::{TxRequest, TxResult};
 use tellerkit_core::PermSnapshot;
 
-use crate::app::{LoginOutcome, SessionSlot, ShellApp};
+use crate::app::{LoginOutcome, SessionSlot, ShellApp, SubmitPrep};
 use crate::{AppState, SharedSession};
 
 /// 托管状态的共享句柄。
@@ -395,14 +395,37 @@ pub async fn submit_transaction(
     offline_capable: bool,
     state: State<'_, SharedState>,
 ) -> Result<TxResult, String> {
-    with_state(&state, move |app| {
-        ShellApp::new(app).submit_transaction(TxRequest {
+    let shared = Arc::clone(state.inner());
+    blocking(move || {
+        let request = TxRequest {
             tx_code,
             idempotency_key,
             amount_cents,
             elements,
             offline_capable,
-        })
+        };
+
+        // 阶段一（锁内）：会话闸门、审计写前留痕、包能力/主机契约校验、
+        // 写前意图落盘，并占住该幂等键的"在途"位。
+        let prep = {
+            let mut guard = lock(&shared)?;
+            ShellApp::new(&mut guard).prepare_submit(request)?
+        };
+        let prepared = match prep {
+            SubmitPrep::Done(result) => return Ok(result),
+            SubmitPrep::Proceed(prepared) => prepared,
+        };
+
+        // 阶段二（**不持锁**）：主机调用。这一行就是 P0-10 的"网络调用不持全局锁"。
+        // 期间别的命令（锁屏 tick、对账、审计查询）可以正常拿锁；
+        // 同一笔再来会被阶段一已占的在途位拒绝。
+        let outcome = prepared.call_host();
+
+        // 阶段三（重新加锁）：落结论 + 写结论审计。
+        // 拿不到锁也必须说清"钱可能已经动了"，不能只报一句状态已损坏。
+        let mut guard = lock(&shared)
+            .map_err(|e| format!("{e}；主机调用可能已经受理，请立即查账确认，不要重复提交"))?;
+        ShellApp::new(&mut guard).complete_submit(prepared, outcome)
     })
     .await
 }

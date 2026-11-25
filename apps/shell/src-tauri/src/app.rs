@@ -21,7 +21,7 @@ use tellerkit_core::recovery::{exception_kind_str, RecoveryJournal};
 use tellerkit_core::reversal::{Authorization, Authorizer, ExceptionKind, ReversalRequest};
 use tellerkit_core::session::{LockReason, SessionGuard, SessionPolicy};
 use tellerkit_core::sync;
-use tellerkit_core::tx::{SubmitStart, TxHost, TxRequest, TxResult, TxStatus};
+use tellerkit_core::tx::{HostError, SubmitStart, TxHost, TxRequest, TxResult, TxStatus};
 use tellerkit_core::{filter, LoadSource};
 use tellerkit_journal_sqlite::{AuditEvent, SqliteJournal};
 
@@ -309,6 +309,46 @@ impl Authorizer for DemoSupervisor {
             reason: "演示：主管授权".to_string(),
         }
     }
+}
+
+/// 两阶段提交的上下文：放锁之后仍然需要的值，**不含任何 `&AppState` 引用**。
+///
+/// 为什么只带值：阶段二（打主机）期间状态锁是放开的，下一个命令可能已经换了菜单、
+/// 锁了屏、甚至登了出；这时再回头读状态字段，审计就会记错人、记错账。
+pub struct SubmitContext {
+    /// 幂等键。阶段一占住"在途"位，阶段三释放——期间同一笔再来会被拒。
+    key: String,
+    tx_code: String,
+    amount_cents: i64,
+    actor: String,
+    /// 包身份前缀（`pkg=... `），非包调用时为空。审计里要能看出是谁发起的。
+    origin: String,
+}
+
+/// 已通过校验、可以打主机的提交。
+pub struct PreparedSubmit {
+    context: SubmitContext,
+    request: TxRequest,
+    signature: String,
+    remote: Arc<dyn RemoteBanking>,
+}
+
+impl PreparedSubmit {
+    /// 阶段二：打主机。**不碰任何锁**——拆两阶段的理由就是这个（P0-10）。
+    ///
+    /// 这期间幂等键仍占着"在途"位：同一笔再提交会被 `begin_submit` 直接拒绝。
+    pub fn call_host(&self) -> Result<String, HostError> {
+        let host: &dyn TxHost = self.remote.as_ref();
+        host.submit(&self.request)
+    }
+}
+
+/// 提交阶段一的结果。
+pub enum SubmitPrep {
+    /// 可以打主机。
+    Proceed(PreparedSubmit),
+    /// 不必打主机：结论已落账并写完审计（重复提交、幂等键冲突、在途、校验失败）。
+    Done(TxResult),
 }
 
 /// 用例执行器。借用请求期间的应用状态，并持有端口句柄。
@@ -660,7 +700,11 @@ impl<'a> ShellApp<'a> {
         Ok(host_reference)
     }
 
-    pub fn submit_transaction(&mut self, mut request: TxRequest) -> Result<TxResult, String> {
+    /// 提交阶段一（锁内）：会话闸门、审计写前留痕、包能力与主机契约校验、
+    /// 写前意图落盘 + 占住"在途"位。
+    ///
+    /// 产物里没有任何状态引用，所以调用方可以放掉锁去打主机（`commands` 就是这么做的）。
+    pub fn prepare_submit(&mut self, mut request: TxRequest) -> Result<SubmitPrep, String> {
         self.require_unlocked("submit_tx")?;
         self.require_auditable("submit_tx", &request.tx_code)?;
         let identity = match PackageCall::take_from(&mut request.elements) {
@@ -695,35 +739,59 @@ impl<'a> ShellApp<'a> {
                 "该主机未声明幂等支持，不能离线挂起交易（请联系管理员确认主机契约）".to_string(),
             );
         }
-        let amount_cents = request.amount_cents;
-        let code = request.tx_code.clone();
-        let key = request.idempotency_key.clone();
-        let actor = self.actor();
 
-        // 两阶段：先落写前意图并占住在途位，再打主机，最后落结论。
-        // 此刻两段仍在同一把锁内；第 2b 步会把中间这次主机调用挪到锁外。
-        let result = match self.state.tx.begin_submit(&request) {
-            SubmitStart::ShortCircuited(result) => result,
-            SubmitStart::Proceed { signature } => {
-                let host: &dyn TxHost = self.remote.as_ref();
-                let outcome = host.submit(&request);
-                self.state.tx.finish_submit(&request, &signature, outcome)
+        let context = SubmitContext {
+            key: request.idempotency_key.clone(),
+            tx_code: request.tx_code.clone(),
+            amount_cents: request.amount_cents,
+            actor: self.actor(),
+            origin: identity
+                .as_ref()
+                .map(|call| format!("pkg={} ", call.label()))
+                .unwrap_or_default(),
+        };
+
+        let signature = match self.state.tx.begin_submit(&request) {
+            SubmitStart::Proceed { signature } => signature,
+            SubmitStart::ShortCircuited(result) => {
+                // 没有主机调用，但结论照样要落审计、照样要标待冲正——口径与走完主机一致。
+                return Ok(SubmitPrep::Done(self.conclude(&context, result)?));
             }
         };
-        self.mark_if_uncertain(&key, &result);
+        Ok(SubmitPrep::Proceed(PreparedSubmit {
+            context,
+            request,
+            signature,
+            remote: Arc::clone(&self.remote),
+        }))
+    }
 
-        let origin = identity
-            .as_ref()
-            .map(|call| format!("pkg={} ", call.label()))
-            .unwrap_or_default();
+    /// 提交阶段三（重新上锁后）：把主机结论落成账，并写结论审计。
+    pub fn complete_submit(
+        &mut self,
+        prepared: PreparedSubmit,
+        outcome: Result<String, HostError>,
+    ) -> Result<TxResult, String> {
+        let result = self
+            .state
+            .tx
+            .finish_submit(&prepared.request, &prepared.signature, outcome);
+        self.conclude(&prepared.context, result)
+    }
+
+    /// 结论收口：待冲正标记 + 结论审计。
+    ///
+    /// 短路路径与走完主机的路径共用这里，避免两条路写出不同的审计口径。
+    fn conclude(&mut self, context: &SubmitContext, result: TxResult) -> Result<TxResult, String> {
+        self.mark_if_uncertain(&context.key, &result);
         let detail = format!(
-            "{origin}status={:?} amount_cents={amount_cents}",
-            result.status
+            "{}status={:?} amount_cents={}",
+            context.origin, result.status, context.amount_cents
         );
         self.audit_checked(
-            &actor,
+            &context.actor,
             "submit_tx",
-            &code,
+            &context.tx_code,
             if result.status == TxStatus::Committed {
                 "ok"
             } else {
@@ -732,6 +800,20 @@ impl<'a> ShellApp<'a> {
             &detail,
         )?;
         Ok(result)
+    }
+
+    /// 锁内一次做完提交（测试、重放与旧调用点用）。
+    ///
+    /// 命令层不走这条路：它要的是"两阶段 + 中间放锁"，
+    /// 见 `commands::submit_transaction`。
+    pub fn submit_transaction(&mut self, request: TxRequest) -> Result<TxResult, String> {
+        match self.prepare_submit(request)? {
+            SubmitPrep::Done(result) => Ok(result),
+            SubmitPrep::Proceed(prepared) => {
+                let outcome = prepared.call_host();
+                self.complete_submit(prepared, outcome)
+            }
+        }
     }
 
     /// 重放进度写回：先删已不在调度表的键，再 upsert 当前进度。
@@ -1203,6 +1285,42 @@ mod tests {
 
         drop(slot);
         drop(held);
+    }
+
+    /// P0-10 第 2b 步的验收点：主机调用发生在锁**外**。
+    ///
+    /// 阶段一返回后锁必须已经放掉——否则"网络调用不持全局锁"只是句口号。
+    /// 这里用 `try_lock` 断言而不是"看代码"：真回归时会红，而不是把 CI 挂死。
+    #[test]
+    fn host_call_between_phases_does_not_hold_the_app_state_lock() {
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let state = state_with(clock);
+        let shared = std::sync::Mutex::new(state);
+
+        let prepared = {
+            let mut guard = shared.lock().expect("测试里 AppState 锁不应中毒");
+            match ShellApp::new(&mut guard)
+                .prepare_submit(TxRequest::new("account.deposit", "k-two-phase"))
+                .expect("阶段一不应失败")
+            {
+                SubmitPrep::Proceed(prepared) => prepared,
+                SubmitPrep::Done(result) => panic!("首笔应放行，实际：{}", result.message),
+            }
+        };
+
+        // 阶段一结束后锁已释放：锁屏 tick、对账、审计查询都能正常拿锁。
+        assert!(
+            shared.try_lock().is_ok(),
+            "主机调用期间不能还握着 AppState 锁"
+        );
+
+        // 阶段二：不持锁打主机；阶段三：重新加锁落结论。
+        let outcome = prepared.call_host();
+        let mut guard = shared.lock().expect("测试里 AppState 锁不应中毒");
+        let result = ShellApp::new(&mut guard)
+            .complete_submit(prepared, outcome)
+            .expect("阶段三不应失败");
+        assert_eq!(result.status, TxStatus::Committed);
     }
 
     #[test]
