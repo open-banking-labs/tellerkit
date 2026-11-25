@@ -244,9 +244,23 @@ impl<'a> ShellApp<'a> {
                 "已加载业务包 {} v{}",
                 package.manifest.id, package.manifest.version
             ));
+            self.audit(
+                "system",
+                "package_load",
+                &package.manifest.id,
+                "ok",
+                &format!("v{}", package.manifest.version),
+            );
         }
         for failure in &failures {
             notes.push(format!("跳过业务包 {}：{}", failure.id, failure.reason));
+            self.audit(
+                "system",
+                "package_load",
+                &failure.id,
+                "failed",
+                &failure.reason.to_string(),
+            );
         }
         for conflict in &conflicts {
             notes.push(format!("业务包菜单冲突，保留主壳版本：{conflict}"));
@@ -274,7 +288,42 @@ impl<'a> ShellApp<'a> {
     }
 
     /// 登录：取快照 → 本地剪枝 → 建会话。全程无网络往返（mock 除外）。
+    /// 登录。所有失败（未知角色 / 主机拒绝 / 菜单未就绪）统一计入安全事件审计（S-15/T-13）。
     pub fn login(&mut self, role_id: &str) -> Result<LoginOutcome, String> {
+        let result = self.try_login(role_id);
+        if let Err(reason) = &result {
+            self.record_login_failure(role_id, reason);
+        }
+        result
+    }
+
+    /// 累计次数以审计日志为准，不在进程内另存一份会漂移的计数。
+    fn failed_login_count(&self) -> usize {
+        self.state
+            .audit
+            .as_ref()
+            .and_then(|journal| journal.audit_tail(usize::MAX).ok())
+            .map(|events| {
+                events
+                    .iter()
+                    .filter(|e| e.action == "login" && e.result == "failed")
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    fn record_login_failure(&self, role_id: &str, reason: &str) {
+        let count = self.failed_login_count() + 1;
+        self.audit(
+            role_id,
+            "login",
+            "",
+            "failed",
+            &format!("累计第 {count} 次登录失败：{reason}"),
+        );
+    }
+
+    fn try_login(&mut self, role_id: &str) -> Result<LoginOutcome, String> {
         let role = DemoRole::from_id(role_id).ok_or("未知角色")?;
         let role_index = DemoRole::ALL.iter().position(|r| *r == role).unwrap_or(0) as u64;
         let perm_version = self.mock_menu_version() * 100 + role_index;
@@ -402,6 +451,7 @@ impl<'a> ShellApp<'a> {
     /// 申请冲正：本地授权 → 主机受理 → 拿到流水号后才算处置完成。
     pub fn request_reversal(&mut self, key: &str, reason: &str) -> Result<String, String> {
         self.require_unlocked("reversal")?;
+        self.require_auditable("reversal", key)?;
         let actor = self.actor();
         // 冲正要素必须从原交易回捞，不能让柜员凭记忆填；账本里查不到就拒绝冲正。
         let (original, lookup_error) = match self.state.audit.as_deref() {
@@ -459,12 +509,13 @@ impl<'a> ShellApp<'a> {
             }
         }
 
-        self.audit(&actor, "reversal", key, "ok", &host_reference);
+        self.audit_checked(&actor, "reversal", key, "ok", &host_reference)?;
         Ok(host_reference)
     }
 
     pub fn submit_transaction(&mut self, mut request: TxRequest) -> Result<TxResult, String> {
         self.require_unlocked("submit_tx")?;
+        self.require_auditable("submit_tx", &request.tx_code)?;
         let identity = match PackageCall::take_from(&mut request.elements) {
             Ok(identity) => identity,
             Err(message) => {
@@ -513,7 +564,7 @@ impl<'a> ShellApp<'a> {
             "{origin}status={:?} amount_cents={amount_cents}",
             result.status
         );
-        self.audit(
+        self.audit_checked(
             &actor,
             "submit_tx",
             &code,
@@ -523,7 +574,7 @@ impl<'a> ShellApp<'a> {
                 "failed"
             },
             &detail,
-        );
+        )?;
         Ok(result)
     }
 
@@ -841,11 +892,33 @@ impl<'a> ShellApp<'a> {
             .collect())
     }
 
-    /// 记一条审计。写不进去不影响业务，但要暴露出来（审计坏了不能静默）。
-    fn audit(&self, actor: &str, action: &str, target: &str, result: &str, detail: &str) {
-        let Some(journal) = &self.state.audit else {
-            return;
-        };
+    /// S-09：资金类操作触达主机**之前**的闸门。
+    /// 先证明"审计能写进去"——账本打不开或写前留痕失败就拒绝，绝不只打印日志后继续成交。
+    /// 这里不跑 `audit_verify()` 全表校验：那是 O(n) 扫描，放进每笔交易会退化成 O(n²)
+    /// （见架构评审 C 类）；链头一致性由 `journal.audit()` 的写事务内读取保证，
+    /// 全量篡改检测属于启动自检与日终对账，不在本闸门。
+    fn require_auditable(&self, action: &str, target: &str) -> Result<(), String> {
+        self.state.audit.as_ref().ok_or_else(|| {
+            format!("审计账本不可用，已拒绝 {action}（未触达主机）：请检查账本文件与磁盘后重启终端")
+        })?;
+        self.audit_write(&self.actor(), action, target, "attempt", "写前留痕")
+            .map_err(|e| format!("审计写前留痕失败，已拒绝 {action}（未触达主机）：{e}"))
+    }
+
+    /// 真正的落盘动作，错误可传递。供闸门与结论审计共用；`at` 由账本覆盖，业务层不能伪造时间。
+    fn audit_write(
+        &self,
+        actor: &str,
+        action: &str,
+        target: &str,
+        result: &str,
+        detail: &str,
+    ) -> Result<(), String> {
+        let journal = self
+            .state
+            .audit
+            .as_ref()
+            .ok_or_else(|| "审计日志不可用：账本未能打开".to_string())?;
         let event = AuditEvent {
             actor: actor.to_string(),
             action: action.to_string(),
@@ -854,7 +927,26 @@ impl<'a> ShellApp<'a> {
             detail: detail.to_string(),
             at: String::new(),
         };
-        if let Err(e) = journal.audit(&event) {
+        journal.audit(&event)
+    }
+
+    /// S-09：资金类操作的结论审计必须能落盘。写失败就返回可读错误，
+    /// 不能像普通日志那样吞掉后当成成交成功——业务已发生，明确要求柜员查账。
+    fn audit_checked(
+        &self,
+        actor: &str,
+        action: &str,
+        target: &str,
+        result: &str,
+        detail: &str,
+    ) -> Result<(), String> {
+        self.audit_write(actor, action, target, result, detail)
+            .map_err(|e| format!("审计结论写入失败：{e}；业务已发生，请立即查账，不要重复提交"))
+    }
+
+    /// 记一条审计。写不进去不影响业务，但要暴露出来（审计坏了不能静默）。
+    fn audit(&self, actor: &str, action: &str, target: &str, result: &str, detail: &str) {
+        if let Err(e) = self.audit_write(actor, action, target, result, detail) {
             eprintln!("审计写入失败：{e}");
         }
     }
@@ -915,7 +1007,9 @@ mod tests {
             "unused".into(),
             TxEngine::new(),
             None,
-            None,
+            Some(Arc::new(
+                tellerkit_journal_sqlite::SqliteJournal::in_memory().unwrap(),
+            )),
             crate::ports::RemoteChoice {
                 remote: Arc::clone(&mock) as Arc<dyn RemoteBanking>,
                 mock: Some(mock),
@@ -1182,5 +1276,69 @@ mod tests {
             .submit_transaction(malformed)
             .unwrap_err();
         assert!(err.contains("身份格式非法"), "实际：{err}");
+    }
+
+    /// S-09/T-12：账本不可用时，资金类操作在触达主机**之前**被拒绝，
+    /// 返回的是可读错误，不是"打印日志后继续成交"。
+    #[test]
+    fn missing_audit_refuses_fund_operations_before_host() {
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let mut state = state_with(Arc::clone(&clock));
+        state.audit = None;
+
+        let err = ShellApp::new(&mut state)
+            .submit_transaction(TxRequest::new("account.deposit", "k-no-audit"))
+            .unwrap_err();
+        assert!(err.contains("审计账本不可用"), "实际：{err}");
+        assert!(err.contains("未触达主机"), "实际：{err}");
+
+        let err = ShellApp::new(&mut state)
+            .request_reversal("k-no-audit", "冲正")
+            .unwrap_err();
+        assert!(err.contains("审计账本不可用"), "实际：{err}");
+        assert!(err.contains("未触达主机"), "实际：{err}");
+    }
+
+    /// 闸门不是"一律拒绝"：账本可用时交易照常到主机，写前留痕 + 结论两条都在。
+    #[test]
+    fn healthy_audit_records_attempt_and_conclusion() {
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let mut state = state_with(Arc::clone(&clock));
+        let result = ShellApp::new(&mut state)
+            .submit_transaction(TxRequest::new("account.deposit", "k-audited"))
+            .expect("账本可用时应放行到主机");
+        assert_eq!(result.status, TxStatus::Committed);
+
+        let tail = ShellApp::new(&mut state).audit_tail(20).unwrap();
+        let entries = tail
+            .iter()
+            .filter(|line| line.contains("submit_tx"))
+            .count();
+        assert_eq!(entries, 2, "应有 attempt 与结论两条：{tail:?}");
+        assert!(
+            tail.iter().any(|line| line.contains("attempt")),
+            "实际：{tail:?}"
+        );
+    }
+
+    /// S-15/T-13：每次登录失败都留痕，且带累计次数。
+    #[test]
+    fn login_failures_are_audited_with_cumulative_count() {
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let mut state = state_with(Arc::clone(&clock));
+        for _ in 0..3 {
+            assert!(ShellApp::new(&mut state).login("not-a-role").is_err());
+        }
+        let tail = ShellApp::new(&mut state).audit_tail(20).unwrap();
+        let failed: Vec<_> = tail.iter().filter(|line| line.contains("login")).collect();
+        assert_eq!(failed.len(), 3, "三次失败逐条可见：{tail:?}");
+        for n in 1..=3 {
+            assert!(
+                failed
+                    .iter()
+                    .any(|l| l.contains(&format!("累计第 {n} 次登录失败"))),
+                "缺第 {n} 次：{tail:?}"
+            );
+        }
     }
 }
