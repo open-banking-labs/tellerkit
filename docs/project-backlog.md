@@ -39,7 +39,7 @@
 | P0-6 | 会话与锁屏真门 | A-02 安全 P0-3 | `ShellApp::require_unlocked` 只信 Rust 侧会话状态；锁定/未登录时资金/打印/冲正/重放/业务包入口一律 Err 且不触达主机，拒绝写审计；后台重放同门；负向用例 5 命令全拒 + 解锁放行对照 | ✅ 已完成（Rust 闸门；前端卸载包宿主留 UX-08 批次） |
 | P0-7 | 业务包能力执行 | 安全 P0-4 | 未声明的交易码被拒绝；包身份进审计；能力白名单按包而非方法名 | ✅ 已完成（能力执行；调用来源不可伪造需契约字段，见 changes/017） |
 | P0-8 | 写前意图与恢复 | A-04 | 先记 intent 再发远端；崩溃后 `in_flight` 转异常；两条自动提交路径都有事务 | ✅ 已完成（结论单事务收口；P0-9 的幂等落盘另计） |
-| P0-9 | 幂等、待冲正、重放落盘 | 规模 P0-02/P0-03 安全 P1-8 B-03 B-02 | 重启后同键拒绝异内容；待冲正清单不丢；重放次数不重置；冲正带原交易要素 | 2 |
+| P0-9 | 幂等、待冲正、重放落盘 | 规模 P0-02/P0-03 安全 P1-8 B-03 B-02 | 重启后同键拒绝异内容；待冲正清单不丢；重放次数不重置；冲正带原交易要素 | ✅ 已完成（幂等索引/异常/冲正记录/重放 attempts/原交易要素全部落盘并启动读回；PR #42） |
 | P0-10 | IPC 并发 | A-03 规模 P0-01 | 网络调用不持全局锁；锁屏 tick 不被交易阻塞；单飞防重复提交 | 2 |
 | P0-11 | 审计不可抵赖 | B-07 安全 P1-6 规模 P0-10 | 哈希链 + 单调序号；审计失败阻断资金操作；安全事件必审计 | 部分完成（哈希链 + 全表校验已落；审计失败阻断与必审计待集成；外部锚定留批次 4） |
 | P1-1 | 交付链 | A-05 | 正式 identifier、可安装包、签名、更新器、SBOM、release 流程 | 3 |
@@ -109,6 +109,7 @@ P0-1 命名门禁 + 本台账 + 评审/待办入库。
 11. 并行化：P0-7 / P0-11 文件集互斥，分别在独立 worktree 并行实现；远端构建共用单一路径，必须串行验证（rsync --delete 会互相删文件，且远端仅余约 26G）。P0-7 初版靠 map 保留键传包身份，经审查指出 Rust 无法独立证明调用来源，改为明确信任边界（Tauri 主框架独占 IPC + iframe 无 same-origin + 闭包身份覆盖）并写入 changes/017；一等来源身份留契约提案。两项均远端 clippy + 全量测试通过。
 12. P0-11 审计哈希链：`seq` 单调 + `prev_hash` + `hash`，链头单独存表以防尾部删行；域分隔长度前缀 SHA256；单事务推进；旧库 ALTER TABLE 迁移保留 legacy 行；`audit_verify()` 可检出字段篡改、删行、重排、链头不符。远端 27 passed / clippy 干净。417 行超阈值按「同一控制点不可拆」裁决接受。
 13. P0-8 写前意图：`TxJournal` 增 `record_intent`/`settle`/`in_flight_intents`；提交前先落意图，失败即拒绝且不触主机；结论单事务写日志 + 清意图 + 入/出队；启动把遗留意图转 `MarkedForReversal` 提示查账，不自动重发。远端 176（core）+ 29（ledger）passed，clippy 干净。经验：`rsync -az` 保留 mtime，切 worktree 后须先 touch 源文件，否则 cargo 误判为最新。
+14. P0-9 状态跨重启持久化：`TxJournal` 增 `load_idempotent`/`save_idempotent`，`cache_result` 统一三处写入；新建 `packages/core/src/recovery.rs`（`RecoveryJournal` 端口 + 异常种类稳定字符串 + 解析），`ReversalBook::restore` / `ReplayScheduler::restore/snapshot`；账本新增 5 张表（tx_idempotent/tx_exception/tx_reversal/replay_attempt/tx_request_elements，要素加密），`record_intent` 单事务同写原交易要素供冲正回捞；主壳启动读回异常/冲正/重放进度，冲正从账本取 `tx_code`/`amount_cents`（查不到即拒绝「请先查账」），重放后落盘 attempts。远端 clippy 干净、54+177+6+32+10 passed / 0 failed；本地 `npm run gate` exit 0。8 文件 662 行超 300 阈值，按「同一控制点不可拆（拆出中间态无法自洽）」裁决接受，PR 描述写明按三段评审。修过的坑：`tx_request` 返回 `Result<Option<TxRequest>, String>`，误写 `Ok(request) => (Some(request), None)` 造成 `Option<Option<TxRequest>>` 双重包装，clippy 报 `no field tx_code on type Option<TxRequest>`。
 
 ## 7. 维护方式
 
