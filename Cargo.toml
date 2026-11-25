@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "apps/shell/src-tauri",
     "packages/core",
+    "packages/fake-bank",
     "packages/journal-sqlite",
     "packages/transport-net",
     "tools/mtree-tool",

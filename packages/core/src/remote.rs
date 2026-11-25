@@ -154,6 +154,8 @@ pub struct RouteError {
     pub service: String,
     pub attempts: usize,
     pub detail: String,
+    /// 是否属于"换个端点可能成功"。全为不可重试错误时为 false。
+    pub retryable: bool,
 }
 
 /// 按服务名路由，按优先级主备切换。
@@ -206,10 +208,12 @@ impl Router {
                 service: request.service.clone(),
                 attempts: 0,
                 detail: "没有为该服务登记任何端点".to_string(),
+                retryable: false,
             });
         }
 
         let mut failures = Vec::new();
+        let mut all_retryable = true;
         for endpoint in &candidates {
             let wire = match endpoint.codec.encode(request) {
                 Ok(w) => w,
@@ -219,6 +223,7 @@ impl Router {
                         service: request.service.clone(),
                         attempts: failures.len() + 1,
                         detail: format!("{} 编码失败：{e}", endpoint.codec.name()),
+                        retryable: false,
                     });
                 }
             };
@@ -245,6 +250,7 @@ impl Router {
                     continue;
                 }
                 Err(e) => {
+                    all_retryable = false;
                     failures.push(format!(
                         "{}@{} {}",
                         endpoint.transport.name(),
@@ -260,6 +266,7 @@ impl Router {
             service: request.service.clone(),
             attempts: failures.len(),
             detail: failures.join("；"),
+            retryable: all_retryable,
         })
     }
 }
@@ -450,6 +457,37 @@ impl Codec for FixedWidthCodec {
             map.insert(field.name.clone(), value);
         }
         Ok(Body::Json(Value::Object(map)))
+    }
+}
+
+/// 原样透传编解码：请求体即线上体，响应当二进制返回。
+///
+/// 用于"下载签名菜单包"这类**非结构化**载荷。和 `JsonCodec` 放同一个抽象里，
+/// 是为了让同一套路由既能处理 JSON 接口、又能处理二进制下载。
+#[derive(Debug, Default, Clone)]
+pub struct RawCodec;
+
+impl Codec for RawCodec {
+    fn name(&self) -> &'static str {
+        "raw"
+    }
+
+    fn encode(&self, request: &Request) -> Result<WireMessage, CodecError> {
+        match &request.body {
+            Body::Binary(b) => {
+                let mut head = BTreeMap::new();
+                head.insert("x-op".to_string(), request.op.clone());
+                Ok(WireMessage {
+                    head,
+                    body: b.clone(),
+                })
+            }
+            _ => Err(CodecError::Encode("raw 编解码只接受二进制载荷".to_string())),
+        }
+    }
+
+    fn decode(&self, wire: &WireMessage) -> Result<Body, CodecError> {
+        Ok(Body::Binary(wire.body.clone()))
     }
 }
 

@@ -107,13 +107,16 @@ impl TxResult {
 }
 
 /// 主机返回的错误。区分"没送到"与"送到了但业务拒绝"——两者的处置完全不同。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HostError {
     /// 超时 / 网络不可达：不知道主机是否处理了。
+    #[error("主机超时")]
     Timeout,
     /// 明确不可达（连接被拒）。
+    #[error("主机不可达")]
     Unavailable,
     /// 主机已受理并明确拒绝（如余额不足）。
+    #[error("主机拒绝：{0}")]
     Rejected(String),
 }
 

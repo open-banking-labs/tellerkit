@@ -28,13 +28,23 @@
 
 ### 错误模型
 
+失败响应统一用**错误信封**，包在 `payload` 里：
+
 ```jsonc
 {
-  "code": "TX_DUPLICATE_KEY",      // 稳定的机器可读码
-  "message": "该幂等键已用于另一笔交易",  // 可直接展示给柜员（中文）
-  "retryable": false
+  "payload": {
+    "error": {
+      "code": "TX_DUPLICATE_KEY",      // 稳定的机器可读码
+      "message": "该幂等键已用于另一笔交易",  // 可直接展示给柜员（中文）
+      "retryable": false
+    }
+  }
 }
 ```
+
+客户端 `RoutedBanking` 先看 `error` 再看成功字段。这条顺序是必须的：
+反过来会把业务拒绝误报成"响应缺少 reference"，柜员看到的是技术错误而不是"余额不足"。
+（端到端用例 `business_rejection_surfaces_as_rejected_not_unavailable` 守着这条。）
 
 `code` 是契约的一部分，客户端按它分支；`message` 允许服务端调整文案。
 
