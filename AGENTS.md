@@ -1,7 +1,7 @@
 # AGENTS.md
 
-人 + AI 共同维护的柜面终端平台。**进场先读本文件，再读离目标目录最近的 AGENTS.md。**
-完整规则见 [docs/constitution.md](docs/constitution.md)；团队分工见 [docs/team.md](docs/team.md)。
+人 + AI 共同维护的柜面终端平台。**进场先读本文件**（README 是给人看的，别当规则）。
+阅读顺序逐级下发：[docs/constitution.md](docs/constitution.md)（完整规则）→ [docs/team.md](docs/team.md)（角色分工）→ 目标目录最近的 `AGENTS.md` → 该目录 `README.md` → 任务所在 `.specify/specs/<id>/`。
 
 ## 只读区（AI 不得修改）
 

@@ -203,20 +203,18 @@ RoutedBanking → Router → TcpTransport → 假后台（真 socket）
 | 单独 `Amount` newtype | ❌ | 只有 `i64` 一处语义，无单位混用风险 → 抽了是噪音 |
 | 每个错误一个 struct | ❌ | 枚举变体已表达；拆 struct 只增加 import → 不抽 |
 
-## 7. 现状差距（迁移清单）
+## 7. 架构债务（与上生产阻断无关）
 
-| 项 | 现状 | 目标 | 严重度 |
-|---|---|---|---|
-| 用例层 | ✅ `app.rs::ShellApp`；`commands.rs` 只剩加锁 → 用例 → DTO 映射 | — | 完成 |
-| 远端端口 | ✅ `RemoteBanking` 已接线；底层已有 `Router` + `Transport` + `Codec` 三层 | 写 `RoutedBanking`（把 `RemoteBanking` 落到 Router 上） | 中 |
-| 时钟 | ✅ 注入到 `AppState.clock`，用例层只读端口；测试用冻结时钟验证 | — | 完成 |
-| 前端门面 | ✅ `platform/client.ts` 接口 + `tauri.ts`/`mock.ts` 两个实现；`check-boundaries` 强制"只有 tauri.ts 能碰 invoke" | — | 完成 |
-| IPC DTO 与领域类型 | ⚠️ 混用 | 保留混用但**记录理由**：DTO 已由 ts-rs 生成并门禁，加映射层会多一层无收益转换 | 低 |
-| 远端契约 | ✅ `contracts/remote-api.md`（含幂等、504 状态不明、错误模型、端点绑定表） | 补 OpenAPI 生成（可选） | 完成 |
-| 远端三层 | ✅ `remote.rs` + `transport-net` + `banking.rs`（`RoutedBanking`） | TLS、连接池 | 中 |
-| 端点配置 | ✅ `endpoint_config.rs`（`TK_ENDPOINTS` / `endpoints.json` → Router），非法配置回退 mock | — | 完成 |
-| 配置完整性 | ✅ `config_sig.rs`：Ed25519 分离签名，先验签后解析；配了公钥就必须签 | — | 完成 |
-| 传输加密 | ✅ `rustls` + 内置根证书；`https` 自动启用，`TK_REQUIRE_TLS=1` 拒绝明文 | 证书吊销/企业 CA（P4） | 完成 |
+四层与三条边界**已迁移完成**。下面只列架构层面还欠的，别和上生产阻断混在一起
+（后者在 [production-readiness.md](production-readiness.md)）。
+
+| 项 | 现状 | 要不要做 |
+|---|---|---|
+| L3 直接持有端口实例 | `app.rs` 调 `state.tx` / `state.devices`——是端口不是具体适配器，可接受 | 评审时确认，不预抽 |
+| IPC DTO 与领域类型混用 | DTO 已由 ts-rs 生成并门禁；加映射层是纯转换 | 不做，理由记录在此 |
+| 连接复用 | TCP 短连接是设计要求；HTTP 每次新建，未做连接池 | 量上来再说 |
+| OpenAPI 生成 | 契约手写并门禁，未从 OpenAPI 生成 | 可选 |
+| 证书吊销 | 只有内置根 + 可选额外根 | 见 readiness B6 |
 
 ## 8. 可检查的规则（要加进门禁）
 
