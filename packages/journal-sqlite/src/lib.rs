@@ -2,6 +2,10 @@
 //!
 //! 为什么单独成包：`tellerkit-core` 必须能脱离磁盘做纯逻辑测试（宪法第 2 条）。
 //! 数据库依赖放在这里，core 只留 `TxJournal` 端口。
+//!
+//! 审计表带哈希链：`seq` 单调、`prev_hash` 指向上一条的 `hash`，
+//! [`SqliteJournal::audit_verify`] 全表扫描可发现改字段/删行/重排。
+//! 链头单独存在 `audit_chain_state`，以便发现**尾部删行**。
 
 mod cipher;
 
@@ -11,6 +15,9 @@ pub use cipher::LedgerCipher;
 use std::path::Path;
 use std::sync::Mutex;
 use tellerkit_core::tx::{TxJournal, TxRequest, TxResult, TxStatus};
+
+/// 哈希域分隔符：防止域外数据被拼进本链的哈希输入。
+const CHAIN_DOMAIN: &[u8] = b"tellerkit-audit-chain-v1\0";
 
 /// 一条管理审计事件：谁、在什么时候、对什么、做了什么、结果如何。
 ///
@@ -24,6 +31,33 @@ pub struct AuditEvent {
     pub result: String,
     pub detail: String,
     pub at: String,
+}
+
+/// 全表校验时发现的第一处问题（按 `audit_log.id` 升序）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AuditChainIssue {
+    /// 出问题的行号；链头不一致时为 0。
+    pub id: i64,
+    /// 该行记录的序号；链头不一致时为链头期待的序号。
+    pub seq: i64,
+    /// 机器可读的问题类型：`sequence_gap` / `broken_prev_hash` / `hash_mismatch` /
+    /// `legacy_in_chain` / `head_mismatch`。
+    pub kind: String,
+    /// 给人看的中文说明。
+    pub message: String,
+}
+
+/// 审计链全表校验结果。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AuditVerifyReport {
+    /// 带哈希的链条完整且链头一致。旧库迁移前的行不计入（见 `legacy`）。
+    pub ok: bool,
+    /// 本次真正校验过的带哈希事件数。
+    pub checked: usize,
+    /// 迁移前没有哈希、因而无法证明不可篡改的行数。
+    pub legacy: usize,
+    /// 第一处篡改/断链位置；`ok` 为真时为空。
+    pub first_issue: Option<AuditChainIssue>,
 }
 
 /// 本地账本。一个进程一个连接，用 Mutex 串行化（柜面终端是单柜员场景）。
@@ -51,11 +85,14 @@ impl SqliteJournal {
         Self::init(conn, LedgerCipher::ephemeral()?)
     }
 
-    fn init(conn: Connection, cipher: LedgerCipher) -> Result<Self, String> {
-        conn.execute_batch(
+    fn init(mut conn: Connection, cipher: LedgerCipher) -> Result<Self, String> {
+        conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;")
+            .map_err(|e| format!("设置账本模式失败：{e}"))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("升级账本失败：{e}"))?;
+        tx.execute_batch(
             r#"
-            PRAGMA journal_mode = WAL;
-            PRAGMA synchronous = FULL;
             CREATE TABLE IF NOT EXISTS tx_log (
                 id               INTEGER PRIMARY KEY AUTOINCREMENT,
                 idempotency_key  TEXT    NOT NULL,
@@ -76,18 +113,31 @@ impl SqliteJournal {
             );
             -- 管理审计：只增表。本类型刻意不提供 update/delete/clear，
             -- 能删的审计等于没有审计（见 docs/security-boundary.md §4）。
+            -- seq/prev_hash/hash 默认空：旧库升级后原有行仍是"无哈希旧行"。
             CREATE TABLE IF NOT EXISTS audit_log (
-                id      INTEGER PRIMARY KEY AUTOINCREMENT,
-                actor   TEXT    NOT NULL,
-                action  TEXT    NOT NULL,
-                target  TEXT    NOT NULL,
-                result  TEXT    NOT NULL,
-                detail  TEXT    NOT NULL,
-                at      TEXT    NOT NULL
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                actor     TEXT    NOT NULL,
+                action    TEXT    NOT NULL,
+                target    TEXT    NOT NULL,
+                result    TEXT    NOT NULL,
+                detail    TEXT    NOT NULL,
+                at        TEXT    NOT NULL,
+                seq       INTEGER NOT NULL DEFAULT 0,
+                prev_hash TEXT    NOT NULL DEFAULT '',
+                hash      TEXT    NOT NULL DEFAULT ''
             );
+            -- 链头放在审计表之外：尾部删行也能被发现；它只是元数据，不是事件。
+            CREATE TABLE IF NOT EXISTS audit_chain_state (
+                id        INTEGER PRIMARY KEY CHECK (id = 1),
+                last_seq  INTEGER NOT NULL,
+                last_hash TEXT    NOT NULL
+            );
+            INSERT OR IGNORE INTO audit_chain_state (id, last_seq, last_hash) VALUES (1, 0, '');
             "#,
         )
         .map_err(|e| format!("建表失败：{e}"))?;
+        ensure_audit_chain_columns(&tx)?;
+        tx.commit().map_err(|e| format!("升级账本失败：{e}"))?;
         Ok(Self {
             conn: Mutex::new(conn),
             cipher,
@@ -121,22 +171,47 @@ impl SqliteJournal {
     /// 追加一条审计事件。`at` 由这里写入，调用方传什么都会被覆盖。
     ///
     /// 只有追加，没有修改与删除——这是审计日志的意义所在。
+    /// 写事件与推进链头在同一事务里，避免中途失败留下断链。
     pub fn audit(&self, event: &AuditEvent) -> Result<(), String> {
-        self.lock()
-            .execute(
-                "INSERT INTO audit_log (actor, action, target, result, detail, at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    event.actor,
-                    event.action,
-                    event.target,
-                    event.result,
-                    event.detail,
-                    now(),
-                ],
+        let mut conn = self.lock();
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("开启审计事务失败：{e}"))?;
+        let (last_seq, last_hash): (i64, String) = tx
+            .query_row(
+                "SELECT last_seq, last_hash FROM audit_chain_state WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
-            .map(|_| ())
-            .map_err(|e| format!("追加审计日志失败：{e}"))
+            .map_err(|e| format!("读取审计链头失败：{e}"))?;
+        let seq = last_seq
+            .checked_add(1)
+            .ok_or_else(|| "审计序号溢出，拒绝写入".to_string())?;
+        let at = now();
+        let hash = chain_hash(seq, &last_hash, event, &at);
+
+        tx.execute(
+            "INSERT INTO audit_log (actor, action, target, result, detail, at, seq, prev_hash, hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                event.actor,
+                event.action,
+                event.target,
+                event.result,
+                event.detail,
+                at,
+                seq,
+                last_hash,
+                hash,
+            ],
+        )
+        .map_err(|e| format!("追加审计日志失败：{e}"))?;
+        tx.execute(
+            "UPDATE audit_chain_state SET last_seq = ?1, last_hash = ?2 WHERE id = 1",
+            params![seq, hash],
+        )
+        .map_err(|e| format!("推进审计链头失败：{e}"))?;
+        tx.commit().map_err(|e| format!("提交审计日志失败：{e}"))
     }
 
     /// 按时间倒序取最近 `limit` 条。同一秒内按自增 id 倒序，顺序稳定。
@@ -171,6 +246,159 @@ impl SqliteJournal {
             .query_row("SELECT COUNT(*) FROM audit_log", [], |r| r.get(0))
             .map_err(|e| format!("统计审计日志失败：{e}"))
     }
+
+    /// 扫描全表校验哈希链，报告第一处篡改/断链位置。只读，不修链、不删行。
+    ///
+    /// 旧库迁移前的行没有哈希，计入 `legacy` 且不算篡改；但它们无法证明不可抵赖，
+    /// 调用方若要求全量可验，应同时要求 `legacy == 0`。
+    pub fn audit_verify(&self) -> Result<AuditVerifyReport, String> {
+        let mut conn = self.lock();
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("开启审计校验失败：{e}"))?;
+        let (head_seq, head_hash): (i64, String) = tx
+            .query_row(
+                "SELECT last_seq, last_hash FROM audit_chain_state WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|e| format!("读取审计链头失败：{e}"))?;
+
+        let mut stmt = tx
+            .prepare(
+                "SELECT id, seq, prev_hash, hash, actor, action, target, result, detail, at
+                 FROM audit_log ORDER BY id",
+            )
+            .map_err(|e| format!("读取审计链失败：{e}"))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    AuditEvent {
+                        actor: r.get(4)?,
+                        action: r.get(5)?,
+                        target: r.get(6)?,
+                        result: r.get(7)?,
+                        detail: r.get(8)?,
+                        at: r.get(9)?,
+                    },
+                ))
+            })
+            .map_err(|e| format!("读取审计链失败：{e}"))?;
+
+        let mut report = AuditVerifyReport {
+            ok: true,
+            checked: 0,
+            legacy: 0,
+            first_issue: None,
+        };
+        let mut expected_seq = 0i64;
+        let mut expected_prev = String::new();
+        let mut seen_chained = false;
+
+        for row in rows {
+            let (id, seq, prev_hash, hash, event) =
+                row.map_err(|e| format!("读取审计链失败：{e}"))?;
+            if hash.is_empty() {
+                report.legacy += 1;
+                if seen_chained && report.first_issue.is_none() {
+                    report.first_issue = Some(AuditChainIssue {
+                        id,
+                        seq,
+                        kind: "legacy_in_chain".into(),
+                        message: format!("审计链中间混入无哈希的旧行（id={id}）"),
+                    });
+                }
+                continue;
+            }
+            seen_chained = true;
+            let issue = if seq != expected_seq + 1 {
+                Some(AuditChainIssue {
+                    id,
+                    seq,
+                    kind: "sequence_gap".into(),
+                    message: format!("序号断档：期待 {}，实际 {seq}", expected_seq + 1),
+                })
+            } else if prev_hash != expected_prev {
+                Some(AuditChainIssue {
+                    id,
+                    seq,
+                    kind: "broken_prev_hash".into(),
+                    message: format!("前序哈希不衔接（id={id}）：疑似删行或重排"),
+                })
+            } else if chain_hash(seq, &prev_hash, &event, &event.at) != hash {
+                Some(AuditChainIssue {
+                    id,
+                    seq,
+                    kind: "hash_mismatch".into(),
+                    message: format!("本条内容被改（id={id}）：重算哈希与存储不符"),
+                })
+            } else {
+                None
+            };
+            match issue {
+                Some(issue) if report.first_issue.is_none() => report.first_issue = Some(issue),
+                None => {
+                    expected_seq = seq;
+                    expected_prev = hash;
+                    report.checked += 1;
+                }
+                _ => {}
+            }
+        }
+
+        // 链头比对放在最后：只删尾部时，其余各行自身都合法。
+        if report.first_issue.is_none() && (expected_seq != head_seq || expected_prev != head_hash)
+        {
+            report.first_issue = Some(AuditChainIssue {
+                id: 0,
+                seq: head_seq,
+                kind: "head_mismatch".into(),
+                message: format!(
+                    "链头与末条不符（链头 seq={head_seq}，末条 seq={expected_seq}）：疑似尾部删行"
+                ),
+            });
+        }
+        report.ok = report.first_issue.is_none();
+        Ok(report)
+    }
+}
+
+/// 旧库的 `audit_log` 没有链字段；逐列补齐，默认值空表示"迁移前的行"。
+fn ensure_audit_chain_columns(conn: &Connection) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(audit_log)")
+        .map_err(|e| format!("读取审计表结构失败：{e}"))?;
+    let cols = stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(|e| format!("读取审计表结构失败：{e}"))?;
+    let mut names = Vec::new();
+    for col in cols {
+        names.push(col.map_err(|e| format!("读取审计表结构失败：{e}"))?);
+    }
+    for (name, ddl) in [
+        (
+            "seq",
+            "ALTER TABLE audit_log ADD COLUMN seq INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "prev_hash",
+            "ALTER TABLE audit_log ADD COLUMN prev_hash TEXT NOT NULL DEFAULT ''",
+        ),
+        (
+            "hash",
+            "ALTER TABLE audit_log ADD COLUMN hash TEXT NOT NULL DEFAULT ''",
+        ),
+    ] {
+        if !names.iter().any(|n| n == name) {
+            conn.execute(ddl, [])
+                .map_err(|e| format!("升级审计字段 {name} 失败：{e}"))?;
+        }
+    }
+    Ok(())
 }
 
 fn status_str(status: TxStatus) -> &'static str {
@@ -356,6 +584,28 @@ impl TxJournal for SqliteJournal {
         }
         Ok(out)
     }
+}
+
+/// 本条哈希 = SHA256(域分隔 || seq || prev_hash || 六个事件字段)。
+/// 每字段带 8 字节长度前缀，避免 `("ab","c")` 与 `("a","bc")` 拼出同一串。
+fn chain_hash(seq: i64, prev_hash: &str, event: &AuditEvent, at: &str) -> String {
+    let seq_bytes = seq.to_be_bytes();
+    let mut buf = Vec::new();
+    buf.extend_from_slice(CHAIN_DOMAIN);
+    for field in [
+        &seq_bytes[..],
+        prev_hash.as_bytes(),
+        event.actor.as_bytes(),
+        event.action.as_bytes(),
+        event.target.as_bytes(),
+        event.result.as_bytes(),
+        event.detail.as_bytes(),
+        at.as_bytes(),
+    ] {
+        buf.extend_from_slice(&(field.len() as u64).to_be_bytes());
+        buf.extend_from_slice(field);
+    }
+    hex::encode(ring::digest::digest(&ring::digest::SHA256, &buf).as_ref())
 }
 
 /// 时间戳只用于排序与审计，不参与业务判断。
@@ -679,5 +929,147 @@ mod tests {
         let json = serde_json::to_string(&stored).unwrap();
         let back: AuditEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(back, stored);
+    }
+
+    fn chain_rows(j: &SqliteJournal) -> Vec<(i64, String, String)> {
+        let conn = j.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stmt = conn
+            .prepare("SELECT seq, prev_hash, hash FROM audit_log ORDER BY id")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    }
+
+    fn with_three_events() -> SqliteJournal {
+        let j = SqliteJournal::in_memory().unwrap();
+        for target in ["m1", "m2", "m3"] {
+            j.audit(&audit_event("menu_access", target)).unwrap();
+        }
+        j
+    }
+
+    #[test]
+    fn audit_chain_links_and_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chain.db");
+        {
+            let j = SqliteJournal::open(&path).unwrap();
+            for target in ["m1", "m2"] {
+                j.audit(&audit_event("menu_access", target)).unwrap();
+            }
+        }
+        let j = SqliteJournal::open(&path).unwrap();
+        j.audit(&audit_event("submit_tx", "t3")).unwrap();
+
+        let rows = chain_rows(&j);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            (rows[0].0, rows[1].0, rows[2].0),
+            (1, 2, 3),
+            "序号必须单调连续"
+        );
+        assert_eq!(rows[0].1, "", "创世行的 prev_hash 为空");
+        assert_eq!(rows[1].1, rows[0].2, "第二条指向第一条的哈希");
+        assert_eq!(rows[2].1, rows[1].2, "重启后仍接在原链尾");
+        assert_ne!(rows[0].2, rows[1].2, "内容不同则哈希不同");
+
+        let report = j.audit_verify().unwrap();
+        assert!(report.ok, "{:?}", report.first_issue);
+        assert_eq!(report.checked, 3);
+        assert_eq!(report.legacy, 0);
+    }
+
+    #[test]
+    fn audit_verify_detects_field_tampering() {
+        let j = with_three_events();
+        j.conn
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .execute("UPDATE audit_log SET detail = 'tampered' WHERE id = 2", [])
+            .unwrap();
+
+        let report = j.audit_verify().unwrap();
+        assert!(!report.ok, "改字段必须校验失败");
+        let issue = report.first_issue.unwrap();
+        assert_eq!(issue.id, 2, "必须报出被改的行号");
+        assert_eq!(issue.kind, "hash_mismatch");
+        assert!(issue.message.contains("内容被改"), "{}", issue.message);
+    }
+
+    #[test]
+    fn audit_verify_detects_deletions_and_reorder() {
+        // 中间删行：序号断档
+        let j = with_three_events();
+        j.conn
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .execute("DELETE FROM audit_log WHERE id = 2", [])
+            .unwrap();
+        let issue = j.audit_verify().unwrap().first_issue.unwrap();
+        assert_eq!(issue.kind, "sequence_gap");
+
+        // 尾部删行：剩下各行自身合法，只能靠链头发现
+        let j = with_three_events();
+        j.conn
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .execute("DELETE FROM audit_log WHERE id = 3", [])
+            .unwrap();
+        let issue = j.audit_verify().unwrap().first_issue.unwrap();
+        assert_eq!(issue.kind, "head_mismatch");
+        assert_eq!(issue.seq, 3, "链头仍指向被删的第三行");
+
+        // 重排：交换前两行的 id，按 id 扫描时序号倒退
+        let j = with_three_events();
+        let conn = j.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.execute("UPDATE audit_log SET id = 99 WHERE id = 1", [])
+            .unwrap();
+        conn.execute("UPDATE audit_log SET id = 1 WHERE id = 2", [])
+            .unwrap();
+        conn.execute("UPDATE audit_log SET id = 2 WHERE id = 99", [])
+            .unwrap();
+        drop(conn);
+        let issue = j.audit_verify().unwrap().first_issue.unwrap();
+        assert_eq!(issue.kind, "sequence_gap");
+    }
+
+    #[test]
+    fn old_audit_db_migrates_and_new_rows_are_chained() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL,
+                    result TEXT NOT NULL, detail TEXT NOT NULL, at TEXT NOT NULL
+                 );
+                 INSERT INTO audit_log (actor, action, target, result, detail, at) VALUES
+                    ('u1', 'login', 'u1', 'ok', '', '00000000000000000001'),
+                    ('u1', 'menu_access', 'm1', 'ok', '', '00000000000000000002');",
+            )
+            .unwrap();
+        }
+
+        let j = SqliteJournal::open(&path).unwrap();
+        let report = j.audit_verify().unwrap();
+        assert!(report.ok);
+        assert_eq!(report.legacy, 2, "旧行无哈希，必须如实计入 legacy");
+        assert_eq!(report.checked, 0);
+        j.audit(&audit_event("submit_tx", "t1")).unwrap();
+
+        let j = SqliteJournal::open(&path).unwrap();
+        assert_eq!(j.audit_count().unwrap(), 3, "迁移不能丢旧行");
+        let rows = chain_rows(&j);
+        assert_eq!(rows[0].0, 0, "旧行仍是 seq=0");
+        assert_eq!(rows[2].0, 1, "新链从 1 开始");
+        let report = j.audit_verify().unwrap();
+        assert!(report.ok, "{:?}", report.first_issue);
+        assert_eq!(report.legacy, 2);
+        assert_eq!(report.checked, 1, "只有新行参与哈希校验");
+        assert_eq!(j.audit_tail(1).unwrap()[0].target, "t1", "旧接口保持可用");
     }
 }
