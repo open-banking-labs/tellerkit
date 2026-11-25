@@ -19,6 +19,46 @@ use tellerkit_core::replay::ReplayAttempt;
 use tellerkit_core::reversal::ReversalRecord;
 use tellerkit_core::tx::{TxJournal, TxRequest, TxResult, TxStatus};
 
+/// 打开账本失败。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenError {
+    /// 另一个进程正占着同一账本（排他锁拿不到）。
+    Busy(String),
+    /// 其它原因：磁盘、权限、密钥、schema 升级……
+    Other(String),
+}
+
+impl std::fmt::Display for OpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OpenError::Busy(message) => write!(f, "账本已被另一个实例占用：{message}"),
+            OpenError::Other(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for OpenError {}
+
+/// 把 SQLite 错误分成"被别的进程占着"与"其它"。
+///
+/// 只有 Busy 需要上层拒绝启动：其它原因按既有策略降级为"能开但提示异常"。
+fn classify(err: rusqlite::Error, context: &str) -> OpenError {
+    let busy = matches!(
+        &err,
+        rusqlite::Error::SqliteFailure(inner, _)
+            if matches!(
+                inner.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    );
+    let message = format!("{context}：{err}");
+    if busy {
+        OpenError::Busy(message)
+    } else {
+        OpenError::Other(message)
+    }
+}
+
 /// 哈希域分隔符：防止域外数据被拼进本链的哈希输入。
 const CHAIN_DOMAIN: &[u8] = b"tellerkit-audit-chain-v1\0";
 
@@ -75,11 +115,37 @@ pub struct SqliteJournal {
 impl SqliteJournal {
     /// 打开（或创建）账本并建表。
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
+        Self::open_with(path, false).map_err(|e| e.to_string())
+    }
+
+    /// 打开账本并取得**排他**锁：同一账本只允许一个进程持有。
+    ///
+    /// 与 [`Self::open`] 只差一件事：`locking_mode = EXCLUSIVE` + 一次空写事务，
+    /// 把排他锁在连接生命周期内一直握住。第二个进程会在 `BEGIN IMMEDIATE` 上
+    /// 拿到 `SQLITE_BUSY`（200ms 内），由上层拒绝启动——而不是两个进程各写一半。
+    ///
+    /// 为什么用 SQLite 自己的锁而不用 PID 文件：锁随进程退出（含崩溃）由操作系统
+    /// 释放，不会留下"假死锁"。
+    pub fn open_exclusive(path: impl AsRef<Path>) -> Result<Self, OpenError> {
+        Self::open_with(path, true)
+    }
+
+    fn open_with(path: impl AsRef<Path>, exclusive: bool) -> Result<Self, OpenError> {
         let path = path.as_ref();
-        let conn = Connection::open(path).map_err(|e| format!("打开账本失败：{e}"))?;
+        let conn =
+            Connection::open(path).map_err(|e| OpenError::Other(format!("打开账本失败：{e}")))?;
+        if exclusive {
+            // 只等 200ms：柜员宁可看到"另一个实例在跑"，也不要盯着白屏等锁。
+            let _ = conn.busy_timeout(std::time::Duration::from_millis(200));
+            conn.execute_batch("PRAGMA locking_mode = EXCLUSIVE;")
+                .map_err(|e| classify(e, "设置账本排他模式失败"))?;
+            // 空写事务的唯一目的就是真正取得排他锁；exclusive 模式下拿到就不放。
+            conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")
+                .map_err(|e| classify(e, "取得账本排他锁失败"))?;
+        }
         let key_path = path.with_file_name("ledger.key");
-        let cipher = LedgerCipher::open_or_create(&key_path)?;
-        Self::init(conn, cipher)
+        let cipher = LedgerCipher::open_or_create(&key_path).map_err(OpenError::Other)?;
+        Self::init(conn, cipher).map_err(OpenError::Other)
     }
 
     /// 内存账本，测试用。密钥不落盘。
@@ -1218,6 +1284,26 @@ mod tests {
         let j = SqliteJournal::open(&path).unwrap();
         let err = j.pending().unwrap_err();
         assert!(err.contains("nonce") || err.contains("密文"), "实际：{err}");
+    }
+
+    // P1-2：同一账本不能被两个进程（连接）同时持有。
+    #[test]
+    fn exclusive_open_refuses_a_second_holder() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let path = dir.path().join("tx.db");
+
+        let first = SqliteJournal::open_exclusive(&path).expect("首个连接应拿到排他锁");
+        let err = match SqliteJournal::open_exclusive(&path) {
+            Ok(_) => panic!("第二个连接必须被拒"),
+            Err(err) => err,
+        };
+        assert!(
+            matches!(err, OpenError::Busy(_)),
+            "必须识别成「被占用」而不是普通 IO 错误：{err:?}"
+        );
+
+        drop(first);
+        SqliteJournal::open_exclusive(&path).expect("释放后应能再次打开");
     }
 
     #[test]

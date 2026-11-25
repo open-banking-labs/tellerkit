@@ -11,6 +11,7 @@ pub mod bootstrap;
 pub mod commands;
 pub mod config_sig;
 pub mod endpoint_config;
+pub mod instance;
 pub mod ports;
 
 use std::sync::{Arc, Mutex};
@@ -28,7 +29,7 @@ use tellerkit_core::reversal::{ExceptionKind, ReversalBook};
 use tellerkit_core::store::MenuStore;
 use tellerkit_core::tx::TxEngine;
 use tellerkit_core::tx::{TxJournal, TxRequest, TxResult};
-use tellerkit_journal_sqlite::SqliteJournal;
+use tellerkit_journal_sqlite::{OpenError, SqliteJournal};
 
 use bootstrap::StartupFatal;
 use ed25519_dalek::VerifyingKey;
@@ -89,6 +90,10 @@ pub struct AppState {
     /// 更新检查（探测 + 下载 + 安装）现在跑在锁外，两次并发检查会同时写同一个
     /// 临时包文件——写入不是原子的，可能把包写坏。标记挡住第二次。
     pub updating: bool,
+    /// 单实例锁。持有到进程结束——放掉它等于允许第二个进程进来。
+    ///
+    /// `None` 表示没拿到（已有实例在跑），此时 `startup_fatal` 一定非空。
+    pub instance_lock: Option<instance::InstanceLock>,
     /// 菜单包 / 业务包的验签公钥。
     ///
     /// 生产由构建期 `TK_MENU_PUBKEY_HEX` 注入；调试构建没有注入时才回退演示公钥。
@@ -132,6 +137,7 @@ impl AppState {
             replay: ReplayScheduler::new(ReplayPolicy::default()),
             reversal: ReversalBook::new(),
             updating: false,
+            instance_lock: None,
             verifying_key,
         }
     }
@@ -289,23 +295,52 @@ pub fn run() {
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
             let store = MenuStore::new(menu_dir, verifying_key);
 
-            // 交易账本：打不开也不阻断启动，但要留下告警让上层显示。
+            // P1-2 单实例：同一个数据目录只允许一个进程。没拿到锁也把进程起起来——
+            // 只有起来，才能把"为什么被拒绝"显示成人能读的页面（P0-5 同款理由）。
+            let (instance_lock, instance_error) = match instance::acquire(&appdata) {
+                Ok(lock) => (Some(lock), None),
+                Err(reason) => (None, Some(reason)),
+            };
+
+            // 交易账本：**排他**打开——同一账本不能被两个进程写。
+            // 打不开（非被占用）不阻断启动，但要留下告警让上层显示。
             // 同一个连接既做交易账本又做审计查询，所以用 Arc 共享。
-            let (tx, journal_warning, audit) = match SqliteJournal::open(appdata.join("tx.db")) {
-                Ok(journal) => {
-                    let shared = Arc::new(journal);
-                    let engine =
-                        TxEngine::new().with_journal(Box::new(ArcJournal(Arc::clone(&shared))));
-                    (engine, None, Some(shared))
-                }
-                Err(e) => (
+            let mut ledger_fatal: Option<String> = None;
+            let (tx, journal_warning, audit) = if instance_error.is_some() {
+                // 已有实例在跑：连账本都不碰——不读不改别人的数据。
+                (
                     TxEngine::new(),
-                    Some(format!("交易账本不可用（{e}）：本会话不会落盘")),
+                    Some("未打开交易账本：本进程不是唯一实例".to_string()),
                     None,
-                ),
+                )
+            } else {
+                match SqliteJournal::open_exclusive(appdata.join("tx.db")) {
+                    Ok(journal) => {
+                        let shared = Arc::new(journal);
+                        let engine =
+                            TxEngine::new().with_journal(Box::new(ArcJournal(Arc::clone(&shared))));
+                        (engine, None, Some(shared))
+                    }
+                    Err(OpenError::Busy(message)) => {
+                        // 账本被别的进程占着：这不是"降级运行"能接受的状态。
+                        ledger_fatal = Some(message.clone());
+                        (TxEngine::new(), Some(message), None)
+                    }
+                    Err(OpenError::Other(e)) => (
+                        TxEngine::new(),
+                        Some(format!("交易账本不可用（{e}）：本会话不会落盘")),
+                        None,
+                    ),
+                }
             };
             // 端点配置（changes/008）：release 缺配置/配置非法即拒绝启动
-            let (remote, remote_note, startup_fatal) = build_remote(&appdata);
+            let (remote, remote_note, mut startup_fatal) = build_remote(&appdata);
+            // 单实例与账本排他优先于端点配置：没有唯一实例，谈端点安全没有意义。
+            if let Some(reason) = instance_error {
+                startup_fatal = StartupFatal(Some(reason));
+            } else if let Some(reason) = ledger_fatal {
+                startup_fatal = StartupFatal(Some(reason));
+            }
             let app_handle = app.handle().clone();
             let mut state = AppState::new(
                 store,
@@ -317,6 +352,8 @@ pub fn run() {
                 verifying_key,
             );
             state.startup_fatal = startup_fatal;
+            // 必须存进状态：本地变量被丢掉就等于放锁，第二个进程马上能进来。
+            state.instance_lock = instance_lock;
             // 恢复跨重启状态：幂等索引已由 TxEngine::with_journal 读回；
             // 这里读异常/冲正清单与重放进度，失败只告警不阻断启动。
             let mut recovery_warnings: Vec<String> = Vec::new();
