@@ -78,18 +78,25 @@
 
 ---
 
-## 4.5 业务包模块不是沙箱
+## 4.5 业务包模块：已进 sandbox iframe
 
-业务包的前端模块（P2.2）与主壳**同源、同 WebView**，没有进程级隔离。
-它能访问 `window` 与 DOM，只是拿不到 `window.__TAURI__`——因为主壳不注入，
-能力必须经 `shell` 白名单方法。
+业务包模块跑在 `sandbox="allow-scripts"` 的 iframe 里（`platform/sandbox.ts`）。
+实测边界（Chromium 注入 hostile 包验证）：
 
-因此：
+| 能力 | 结果 |
+|---|---|
+| 父页面 DOM / `window.parent` | `SecurityError` |
+| `localStorage` / `cookie` | `SecurityError` |
+| `fetch` / XHR | CSP `connect-src 'none'` 拦截 |
+| `__TAURI__` / `invoke` | 不存在，能力只能走白名单 |
 
-- **已签名的包是可信代码**。签名解决"谁下发的"，不解决"它干了什么"。
-- 想跑不可信第三方代码，必须等 P3 的 Worker / iframe / WASM 隔离评估。
-- 不要对客户说"业务包被沙箱隔离了"。准确说法是："包必须由我们签名，
-  且只能调用主壳开放的接口。"
+白名单三项：`printVoucher`、`submitTransaction`、`log`，每项仍经 Rust 侧校验。
+
+**仍然同进程**：iframe 与主壳共享渲染进程内存，侧信道未防。真正的进程隔离
+（多 webview / 独立进程）是 P4。
+
+准确说法："业务包由我们签名，运行在受限沙箱里，只能调用主壳开放的三个接口。"
+不要说"业务包完全隔离"——同进程这一点必须承认。
 
 ## 5. 已知的 P0 简化（对上生产是硬阻断）
 
@@ -121,7 +128,7 @@
 | 企业自签 CA 支持 | 内网部署无法用内置根 | 按网点需求 |
 | 配置签名私钥的保管 | 谁持有谁就能改端点 | 流程问题，非代码 |
 | 账本仅字段级加密（`tx_queue.elements` AES-GCM） | 密钥与库同目录：能执行代码者可一并拿走；审计/交易日志仍明文 | P4 接 OS 钥匙串 |
-| 业务包模块无进程沙箱 | 签名包代码可访问 DOM/`window` | P3 |
+| 业务包与主壳同进程（iframe 隔离，非进程隔离） | 共享渲染进程内存；侧信道未防 | P4 多 webview/独立进程 |
 | 端侧后台重放 | ✅ 后台线程按 `TK_REPLAY_INTERVAL_SECS`（默认 60s）自动重放 | — |
 
 ---
