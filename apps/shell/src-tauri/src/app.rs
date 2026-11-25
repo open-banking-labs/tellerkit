@@ -65,6 +65,37 @@ pub struct SessionView {
     pub idle_secs: u64,
 }
 
+/// 对账视图：聚合 + 最近明细。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reconciliation {
+    /// 统计起点（当日 00:00 的秒级字符串）
+    pub since: String,
+    pub summary: Vec<StatusRow>,
+    pub recent: Vec<RecentTxView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusRow {
+    pub status: String,
+    pub count: i64,
+    pub amount_cents: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentTxView {
+    pub key: String,
+    pub tx_code: String,
+    pub amount_cents: i64,
+    pub status: String,
+    pub reference: Option<String>,
+}
+
+/// 当日 00:00 的秒级时间戳（零填充，与账本 `created_at` 同格式）。
+fn start_of_day(now_secs: u64) -> String {
+    let day = now_secs / 86_400 * 86_400;
+    format!("{day:020}")
+}
+
 /// 待处置异常交易的展示结构。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TxExceptionView {
@@ -505,6 +536,41 @@ impl<'a> ShellApp<'a> {
     }
 
     // ---------- 审计 ----------
+
+    /// 日终对账：按状态聚合 + 最近明细。
+    ///
+    /// 只读本地账本，不打主机。真正的对账以核心系统为准，
+    /// 这里解决的是"柜员关账前先自查一遍"。
+    pub fn reconciliation(&self) -> Result<Reconciliation, String> {
+        let Some(journal) = &self.state.audit else {
+            return Err("审计日志不可用：账本未能打开".to_string());
+        };
+        let today = start_of_day(self.clock.now_secs());
+        let rows = journal.summary(&today)?;
+        let recent = journal.recent(20)?;
+
+        Ok(Reconciliation {
+            since: today,
+            summary: rows
+                .into_iter()
+                .map(|r| StatusRow {
+                    status: r.status,
+                    count: r.count,
+                    amount_cents: r.amount_cents,
+                })
+                .collect(),
+            recent: recent
+                .into_iter()
+                .map(|r| RecentTxView {
+                    key: r.idempotency_key,
+                    tx_code: r.tx_code,
+                    amount_cents: r.amount_cents,
+                    status: r.status,
+                    reference: r.reference,
+                })
+                .collect(),
+        })
+    }
 
     pub fn audit_tail(&self, limit: usize) -> Result<Vec<String>, String> {
         let Some(journal) = &self.state.audit else {

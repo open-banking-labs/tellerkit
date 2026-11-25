@@ -1,3 +1,3 @@
 // 本文件由 tools/gen-bindings.mjs 生成，请勿手改。
 
-export type CommandName = "audit_tail" | "boot" | "check_update" | "current_menu" | "dev_bump_server_version" | "dev_corrupt_local" | "dev_reset_local" | "dev_set_offline" | "dev_set_tampered" | "login" | "logout" | "package_module" | "print_voucher" | "reload_from_disk" | "replay_pending" | "request_reversal" | "session_blur" | "session_tick" | "session_touch" | "submit_transaction" | "tx_exceptions" | "tx_pending_count";
+export type CommandName = "audit_tail" | "boot" | "check_update" | "current_menu" | "dev_bump_server_version" | "dev_corrupt_local" | "dev_reset_local" | "dev_set_offline" | "dev_set_tampered" | "login" | "logout" | "package_module" | "print_voucher" | "reload_from_disk" | "replay_pending" | "request_reversal" | "session_blur" | "session_tick" | "session_touch" | "submit_transaction" | "tx_exceptions" | "tx_pending_count" | "tx_reconciliation";

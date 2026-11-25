@@ -1,8 +1,8 @@
 {
   "generator": "tools/gen-bindings.mjs",
   "files": {
-    "index.ts": "523b3f368d7e36d1fa7a1196d6c1a456e1b9ada2a464d5bc70e0a7d854ebeb83",
-    "commands.ts": "c1369432cd5c6456961db797adde71e6af2614de4afe51c19a90a1a6b42c0131",
+    "index.ts": "515056834b5f67b138e64e059c1cd5301c18259611d1b11364339e5db7a0cc27",
+    "commands.ts": "8277dacdd9031358354e98e8126bda0da10cfd2908317a1f5e45053296b78adc",
     "BootInfo.ts": "b8027b31267b8fb0e5e105742aa472178101936139f5834bc1bf3342cee9988c",
     "DevState.ts": "b0fe4d7384ebcbe5c2db25cbdd5ac71202058cce08e704b4729e2e2976b3ab74",
     "LoadReport.ts": "20c5ddcf8be5c8e925bda86a923eac6c27cc44b9e50c9afcfbfc291c8978a009",
@@ -11,8 +11,11 @@
     "NodeType.ts": "a11feeac609427f2b5ed878077a63db47e99497cc91b55530420a9f356f40642",
     "PermSnapshot.ts": "68ab76388f9469243777db329ac861a485d78be412d602aeb6e164f2588c9fd2",
     "PrintReceipt.ts": "73ab2de644be8a4d8b77fb40a50b14c78b9fe4ae81d7fb924344e5e7bddc303c",
+    "RecentTx.ts": "8be5539131ae38d3c629c4926ce9abf8edf2c437f5c94120c70eef67d2af6e66",
+    "Reconciliation.ts": "797e3b76f3378b9a28ebdc1714764668ff20bdd1b5846ba33006f048b33c2e09",
     "ReloadReport.ts": "53df82df0632a97e59dbd624982696ef516f24562b1ec80d09aba9b779a7a55d",
     "SessionState.ts": "eb657118e61287e778fc761acee536c58889950b7226debd35f56fc0c8b8298c",
+    "StatusRow.ts": "03bcb5b6d1fb9c6ce8788cf3a087a6ecbcf3bbd281bedc4c0a6a83e32388077c",
     "TxException.ts": "bf638d0fdec6f47e724e9f6f493ee4336a70fdda1a40cae9901d3c49b308ecd4",
     "TxResult.ts": "4fc30539855ae8524deac964aef99956585e31cd671eccbb7ef5f629a5e37e75",
     "TxStatus.ts": "ccf5d8407b21b57e3fac70fd590f9a352569a4be44ce6a1aab43143bc48a18f6",

@@ -7,6 +7,7 @@ import type { BootInfo, DevState, LoginResult, MenuView, UpdateReport } from "./
 import type { LogEntry, MenuRow } from "./ui-types";
 import DevPanel from "./components/DevPanel.vue";
 import LockScreen from "./components/LockScreen.vue";
+import ReconcilePanel from "./components/ReconcilePanel.vue";
 import LoginView from "./components/LoginView.vue";
 import MenuList from "./components/MenuList.vue";
 import PackageHost from "./components/PackageHost.vue";
@@ -28,6 +29,7 @@ const dev = ref<DevState | null>(null);
 const update = ref<UpdateReport | null>(null);
 /** 开发构建才显示演示开关；后端 `dev_only()` 也会拒绝，两层防护。 */
 const showDevTools = !import.meta.env.PROD;
+const showReconcile = ref(false);
 const locked = ref(false);
 const lockReason = ref<string | null>(null);
 let sessionTimer: number | undefined;
@@ -589,6 +591,7 @@ onUnmounted(() => {
       :teller-no="session.snapshot.teller_no"
       :outlet="session.snapshot.outlet_code"
     />
+    <ReconcilePanel v-if="showReconcile" @close="showReconcile = false" />
     <LockScreen
       v-if="locked"
       :reason="lockReason"

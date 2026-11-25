@@ -98,6 +98,23 @@
     "TxException": [
       "key",
       "kind"
+    ],
+    "StatusRow": [
+      "status",
+      "count",
+      "amount_cents"
+    ],
+    "RecentTx": [
+      "key",
+      "tx_code",
+      "amount_cents",
+      "status",
+      "reference"
+    ],
+    "Reconciliation": [
+      "since",
+      "summary",
+      "recent"
     ]
   },
   "ts_interfaces": {
@@ -184,6 +201,23 @@
     "TxException": [
       "key",
       "kind"
+    ],
+    "StatusRow": [
+      "status",
+      "count",
+      "amount_cents"
+    ],
+    "RecentTx": [
+      "key",
+      "tx_code",
+      "amount_cents",
+      "status",
+      "reference"
+    ],
+    "Reconciliation": [
+      "since",
+      "summary",
+      "recent"
     ]
   },
   "commands": [
@@ -208,7 +242,8 @@
     "session_tick",
     "session_blur",
     "tx_exceptions",
-    "request_reversal"
+    "request_reversal",
+    "tx_reconciliation"
   ],
   "generated_types": [
     "NodeType",
@@ -224,6 +259,9 @@
     "TxResult",
     "PrintReceipt",
     "SessionState",
-    "TxException"
+    "TxException",
+    "StatusRow",
+    "RecentTx",
+    "Reconciliation"
   ]
 }

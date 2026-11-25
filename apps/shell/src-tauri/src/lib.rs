@@ -272,6 +272,7 @@ pub fn run() {
             commands::print_voucher,
             commands::tx_pending_count,
             commands::tx_exceptions,
+            commands::tx_reconciliation,
             commands::request_reversal,
             commands::replay_pending,
             commands::package_module,
