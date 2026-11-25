@@ -2,8 +2,4 @@
 import type { MenuView } from "./MenuView";
 import type { PermSnapshot } from "./PermSnapshot";
 
-export type LoginResult = { snapshot: PermSnapshot, menu: Array<MenuView>, 
-/**
- * 全量树递归剪枝耗时（毫秒），P0 验收要求 < 1ms 量级。
- */
-filter_ms: number, };
+export type LoginResult = { snapshot: PermSnapshot, menu: Array<MenuView>, filter_ms: number, };
