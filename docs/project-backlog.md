@@ -40,7 +40,7 @@
 | P0-7 | 业务包能力执行 | 安全 P0-4 | 未声明的交易码被拒绝；包身份进审计；能力白名单按包而非方法名 | ✅ 已完成（能力执行；调用来源不可伪造需契约字段，见 changes/017） |
 | P0-8 | 写前意图与恢复 | A-04 | 先记 intent 再发远端；崩溃后 `in_flight` 转异常；两条自动提交路径都有事务 | ✅ 已完成（结论单事务收口；P0-9 的幂等落盘另计） |
 | P0-9 | 幂等、待冲正、重放落盘 | 规模 P0-02/P0-03 安全 P1-8 B-03 B-02 | 重启后同键拒绝异内容；待冲正清单不丢；重放次数不重置；冲正带原交易要素 | ✅ 已完成（幂等索引/异常/冲正记录/重放 attempts/原交易要素全部落盘并启动读回；PR #42） |
-| P0-10 | IPC 并发 | A-03 规模 P0-01 | 网络调用不持全局锁；锁屏 tick 不被交易阻塞；单飞防重复提交 | 2 |
+| P0-10 | IPC 并发 | A-03 规模 P0-01 | 锁屏 tick 不被交易阻塞（#45）；单飞防重复提交（#46）；交易提交的网络调用不持锁（#47） | 2（进行中：1/2a/3/2b-提交路径已完成；冲正、重放、版本探测仍在锁内发请求，见 8.3。**不得标 ✅**） |
 | P0-11 | 审计不可抵赖 | B-07 安全 P1-6 规模 P0-10 | 哈希链 + 单调序号；审计失败阻断资金操作；安全事件必审计 | ✅ 已完成（哈希链+篡改校验 PR #38；写前闸门+结论审计可失败+登录失败/包加载必留痕 PR #43；外部锚定/服务端存证与配置变更审计留批次 4） |
 | P1-1 | 交付链 | A-05 | 正式 identifier、可安装包、签名、更新器、SBOM、release 流程 | 3 |
 | P1-2 | 单实例与账本排他 | A-07 规模 P0-11 | 第二个实例被拒；同一账本不能被两个进程写 | 3 |
@@ -113,6 +113,11 @@ P0-1 命名门禁 + 本台账 + 评审/待办入库。
 14. P0-9 状态跨重启持久化：`TxJournal` 增 `load_idempotent`/`save_idempotent`，`cache_result` 统一三处写入；新建 `packages/core/src/recovery.rs`（`RecoveryJournal` 端口 + 异常种类稳定字符串 + 解析），`ReversalBook::restore` / `ReplayScheduler::restore/snapshot`；账本新增 5 张表（tx_idempotent/tx_exception/tx_reversal/replay_attempt/tx_request_elements，要素加密），`record_intent` 单事务同写原交易要素供冲正回捞；主壳启动读回异常/冲正/重放进度，冲正从账本取 `tx_code`/`amount_cents`（查不到即拒绝「请先查账」），重放后落盘 attempts。远端 clippy 干净、54+177+6+32+10 passed / 0 failed；本地 `npm run gate` exit 0。8 文件 662 行超 300 阈值，按「同一控制点不可拆（拆出中间态无法自洽）」裁决接受，PR 描述写明按三段评审。修过的坑：`tx_request` 返回 `Result<Option<TxRequest>, String>`，误写 `Ok(request) => (Some(request), None)` 造成 `Option<Option<TxRequest>>` 双重包装，clippy 报 `no field tx_code on type Option<TxRequest>`。
 15. P0-11 收尾（S-09/S-15，PR #43，单文件 +168/-10）：`apps/shell/src-tauri/src/app.rs` 新增 `require_auditable()` 前置闸门——账本不可用或 `audit_write("attempt","写前留痕")` 失败即在**触达主机之前**拒绝；新增 `audit_write()`/`audit_checked()`，资金类操作结尾不再用吞错的 `audit()`，写失败返回「业务已发生，请立即查账，不要重复提交」。只 gate `submit_transaction` 与 `request_reversal`（S-09 GIVEN 原话）；`replay_pending` 由后台 worker 周期调用不能 gate，`print_voucher`/`package_module` 本期不 gate。闸门**不跑 `audit_verify()`**（全表 O(n) 扫描放热路径会退化成 O(n²)，架构评审 C 类已点名），链头一致性由 `journal.audit()` 写事务内读 `audit_chain_state` 保证。`login()` 包装 `try_login()`，未知角色/主机拒绝/菜单未就绪全部记审计，累计次数取自 `audit_tail` 而非进程内计数；`boot()` 包加载与跳过记 `package_load`；`audit=None` 不再静默。远端 clippy -D warnings + 全量测试 exit 0（57+177+6+32+10 passed），3 个新测试全绿；本地 `npm run gate` exit 0。范围外：配置变更审计（app.rs 无入口，需契约）、`audit_verify()` 接启动自检、打印/包模块/后台重放的闸门、外部锚定与服务端存证。
 
+16. P0-10 第 1 步（PR #44）：23 条 IPC 命令由同步 `pub fn` 改为 `pub async fn`，托管态改 `Arc<Mutex<AppState>>`，阻塞工作统一经 `with_state()` 进 `spawn_blocking`（Tauri 同步命令跑主线程，主机 3s 超时会冻界面）。锁在闭包内获取，`MutexGuard` 跨 `await` 直接编译不过。`check-contracts` 的命令扫描放宽到 `pub (?:async )?fn`（只放宽实现形态；负向用例改名 `logout` 仍 exit 1）。线程模型变更与 `docs/rust-style.md` §4.3「无 async」条款的例外写进 `changes/018` 待批。远端 clippy 干净、282 passed。
+17. P0-10 第 2a 步（PR #45）：新增 `app::SessionSlot`（guard + 柜员号 + clock + audit），会话独立托管 `Arc<Mutex<SessionSlot>>`，`session_touch/tick/blur` 只锁它、完全不碰 `AppState`；锁序固定 `AppState` → `SessionSlot`，禁止反向；会话锁中毒按「已锁定」处理。时钟注入改为 `AppState::set_clock` 两处一起换，避免 tick 用系统时钟造成假通过。回归测试 `session_tick_does_not_wait_for_app_state_lock` 用 `try_lock` 钉住两把锁分开（回归时红，不是挂死 CI）。远端 clippy 干净、58 passed。
+18. P0-10 第 3 步（PR #46，**排在 2b 之前**）：`TxEngine::submit` 拆成 `begin_submit`/`finish_submit`，新增 `submitting: HashMap<幂等键, 载荷签名>` 记「正在飞」——幂等索引记的是「结论」，覆盖不到「第一笔还没回来」的窗口。同键在途再提交 → 拒绝「正在处理中」；同键换要素 → 归入「幂等键已用于另一笔交易」；写前意图落盘失败回滚在途位。顺序理由：2b 把网络调用挪出锁后并发窗口才真正打开，先有去重才不是拿「不持锁」换「重复提交」。远端 clippy 干净、core 181 passed（含 4 个新测试）。
+19. P0-10 第 2b 步（PR #47）：`submit_transaction` 三段式——锁内校验 + 写前意图 + 占在途位 → **锁外** `PreparedSubmit::call_host()` → 重新加锁落结论。`PreparedSubmit` 只带值、不带 `&AppState` 引用（放锁期间状态可能被换菜单/锁屏/登出）。阶段三拿不到锁时返回「主机调用可能已经受理，请立即查账确认，不要重复提交」。两条结论路径共用 `conclude()`，避免审计口径漂移。回归测试 `host_call_between_phases_does_not_hold_the_app_state_lock`。远端 clippy 干净、shell 59 passed。
+
 ## 7. 维护方式
 
 - 每完成一个项目级控制点，更新本表“批次”为 ✅，并在源台账勾掉细项；不新开平行台账。
@@ -127,20 +132,26 @@ P0-1 命名门禁 + 本台账 + 评审/待办入库。
 
 链：`#31→main`，`#32→#31`，`#33→#32`，`#34→#33`，`#35→#34`，`#36→#35`，`#37→#36`，`#38→#36`，`#39→#36`，`#40→#39`，`#41→#37`，`#42→#40`，`#43→#42`。
 head 分支依次为 `chore/naming-and-backlog`、`chore/lockfile-reproducible`、`feat/menu-key-injection`、`fix/trajectory-gate-truthful`、`fix/fail-closed-startup`、`fix/session-lock-gate`、`fix/doc-truthfulness`、`agent/p11-audit-chain`、`agent/p07-package-capability`、`agent/p08-write-ahead`、`docs/backlog-progress`、`agent/p09-persistent-state`、`fix/audit-fails-closed`。
-合并顺序：线性链先合 #31 再逐层向下；#38/#39 与 #37 是兄弟，合并顺序无关（文件集互斥）。沿用 ready-for-review 惯例，等负责人合并。
+P0-10 追加线性链（接在 #43 之后）：`#44→#43`、`#45→#44`、`#46→#45`、`#47→#46`，head 依次为 `feat/ipc-async`、`feat/session-lock-split`、`feat/tx-singleflight`、`feat/ipc-network-out-of-lock`；台账更新单独一条 `docs/p0-10-progress`（只改本文件，可与 #44–#47 并行合并，但必须排在 #41 之后）。
+合并顺序：线性链先合 #31 再逐层向下；#38/#39 与 #37 是兄弟，合并顺序无关（文件集互斥）；#44–#47 必须按编号顺序合（每层都改上一层文件）。沿用 ready-for-review 惯例，等负责人合并。
 
 ### 8.2 完成度快照
 
-- 批次 1（P0-1…P0-6）全 ✅；批次 2（P0-7/P0-8/P0-9/P0-11）全 ✅。
-- **批次 2 唯一未完成：P0-10 IPC 并发**（第 3 节状态 `2`）。批次 3–5 未开始。
+- 批次 1（P0-1…P0-6）全 ✅；批次 2 里 P0-7/P0-8/P0-9/P0-11 全 ✅。
+- **批次 2 唯一未完成：P0-10 IPC 并发**（第 3 节状态 `2（进行中）`）。已完成 4 段：命令异步化（#44）、会话独立锁（#45）、在途单飞（#46）、提交路径网络调用放锁（#47）。剩尾巴：冲正、重放、版本探测仍在锁内发请求（见 8.3 第 5 条）。
+- 批次 3–5 未开始。
 
-### 8.3 P0-10 拆解（下一步就干这个，必须分 PR）
+### 8.3 P0-10 进度与剩余（必须分 PR）
 
-现状证据：`apps/shell/src-tauri/src/commands.rs` 23 条命令全为同步 `pub fn`，统一走 `lock()` 返回 `MutexGuard<AppState>` 并**跨网络调用持锁**；`apps/shell/src-tauri/src/lib.rs:274` 是 `app.manage(Mutex::new(state))`，`lib.rs:185` 的 `spawn_replay_worker` 周期调 `replay_pending`。这跨 3 个文件且必然超 300 行退回线，故按序拆：
+改造前基线证据：`apps/shell/src-tauri/src/commands.rs` 23 条命令全为同步 `pub fn`，统一走 `lock()` 返回 `MutexGuard<AppState>` 并**跨网络调用持锁**；`apps/shell/src-tauri/src/lib.rs:274` 是 `app.manage(Mutex::new(state))`，`lib.rs:185` 的 `spawn_replay_worker` 周期调 `replay_pending`。这跨 3 个文件且必然超 300 行退回线，故按序拆：
 
-1. **async 化**：`app.manage(Arc::new(Mutex::new(state)))`，23 条命令改 `pub async fn` + `tauri::async_runtime::spawn_blocking(move || …)`，把阻塞工作移出主线程（Tauri 2 同步命令跑主线程会冻 UI）。此步**不解决**锁竞争，PR 描述必须写清，不能冒充完成 P0-10。
-2. **拆锁**：把 `session` 从 `AppState` 拆成独立锁，`session_tick`/`session_touch`/`session_blur` 不再排队等交易；网络调用移出临界区。注意 `AppState::new` 已 7 参、卡 clippy `too_many_arguments (8/7)` 上限，别再加参数；`require_unlocked` 需同时持会话锁与状态锁。
-3. **单飞**：`submit_transaction` 按幂等键做 in-flight 去重，防超时重试点出两笔。P0-9 的持久化幂等索引是落盘去重，不覆盖并发窗口，两者互补。
+1. ✅ **async 化**（#44）：23 条命令改 `pub async fn` + `with_state()` → `spawn_blocking`，托管态 `Arc<Mutex<AppState>>`。
+2. ✅ **拆锁-会话**（#45，原第 2 步的前半）：会话独立成 `Arc<Mutex<SessionSlot>>`，tick/touch/blur 只锁它。锁序 `AppState` → `SessionSlot`，禁止反向。
+3. ✅ **单飞**（#46，原第 3 步）：`TxEngine` 两阶段 + `submitting` 表，同键在途再提交直接拒绝。
+4. ✅ **拆锁-网络-提交路径**（#47，原第 2 步的后半）：`submit_transaction` 三段式，主机调用放锁。
+5. ⏳ **剩余（2b-2）**：`request_reversal`、`replay_pending`（含后台 worker）、`check_update`、`boot` 本地无包兜底仍在锁内发请求。它们已在阻塞池里、不冻界面，但会让别的命令排队。改法与提交路径相同（锁内准备 → 锁外调用 → 锁内收口），但每个命令收口语义不同（冲正要回捞原交易要素、重放要逐笔推进调度表），逐个 PR 做。
+6. 顺序偏离说明：先做第 3 步单飞再做第 2 步的网络放锁。理由是**放锁之前必须先有在途去重**，否则等于拿「不持锁」换「重复提交」，与 P0-10 自己的验收项冲突。
+7. 第 2 步按风险拆成 2a（会话锁）与 2b（网络放锁）两条 PR，因为二者验证方式不同：2a 用 `try_lock` 证明两把锁分开，2b 要证明阶段之间确实放锁；合并成一条会让「部分完成」被误读成「全部完成」。
 
 ### 8.4 已登记但未做（不要重复发现）
 
@@ -148,6 +159,7 @@ head 分支依次为 `chore/naming-and-backlog`、`chore/lockfile-reproducible`�
 - 业务包：一等调用来源身份（`changes/017`，契约提案）、锁定时卸载包宿主与键盘屏蔽（UX-08）。
 - 交付/文档：D-06 runbook、C-07 文档路径全量校验（批次 3）；`changes/015`、`changes/016` 待负责人批准。
 - 前端：冲正原交易展示。
+- 并发：P0-10 尾巴——冲正/重放/版本探测/启动兜底仍在锁内发请求（见 8.3 第 5 条），未做；不要重复发现。
 - 第 5 节 B1–B7、T-01 阻塞项仍待人/契约，别当成漏做。
 
 ### 8.5 换机器后开工检查
