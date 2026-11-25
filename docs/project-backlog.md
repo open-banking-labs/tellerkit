@@ -44,7 +44,7 @@
 | P0-11 | 审计不可抵赖 | B-07 安全 P1-6 规模 P0-10 | 哈希链 + 单调序号；审计失败阻断资金操作；安全事件必审计 | ✅ 已完成（哈希链+篡改校验 PR #38；写前闸门+结论审计可失败+登录失败/包加载必留痕 PR #43；外部锚定/服务端存证与配置变更审计留批次 4） |
 | P1-1 | 交付链 | A-05 | 正式 identifier、可安装包、签名、更新器、SBOM、release 流程 | 3 |
 | P1-2 | 单实例与账本排他 | A-07 规模 P0-11 | 第二个实例被拒；同一账本不能被两个进程写 | ✅ 已完成（文件锁 + `locking_mode=EXCLUSIVE`，启动期拒绝并给可读原因；见 changes/019） |
-| P1-3 | 可观测性与灰度 | B-08 规模 P1 | tracing/轮转/诊断包；灰度急停与版本差分可用 | 3 |
+| P1-3 | 可观测性与灰度 | B-08 规模 P1 | 结构化日志+轮转+脱敏（#56）、request_id 贯穿（#57）、灰度急停（#58）已落地；诊断包导出与策略下发待 changes/020 批准；差分升级归 P1-1 | 3（进行中） |
 | P1-4 | 账本加密与国密 | B-06 规模 P0-07 | 密钥不进同目录；SM2/SM3/SM4 与国密 TLS 可切换 | 4 |
 | P1-5 | 主壳产品化 | UX-01…07 UX-09…13 B-09 | 两列工作台、任务优先、完成态冻结、真实会话区、无死按钮 | 4 |
 | P1-6 | 可访问性与细节 | UX-08 UX-14…19 | 对比度/字号/触控区达标；锁屏保留上下文；动效可关 | 4 |
@@ -125,6 +125,11 @@ P0-1 命名门禁 + 本台账 + 评审/待办入库。
 23. P0-10 第 2b-2c 步（PR #53）：`check_update` 三段式——锁内占「正在检查」标记并交出句柄 → **锁外**探测/下载/装包 → 锁内换内存菜单树并释放标记。新增 `AppState.updating` 挡并发检查（装包是「写临时文件 → rename」，两次并发会写同一个临时文件）。`boot` 的本地无包兜底**有意不拆**：只在首屏发生、界面正等 boot 返回，没有可保护的并发，拆它反而给启动路径（P0-5 fail-closed 所在）加中间态。shell 63 / core 184。
 24. P1-2（PR #54）：单实例 + 账本排他。`instance::InstanceLock` 用标准库 `File::try_lock` 给 `<appdata>/.instance.lock` 加建议性文件锁（锁随进程退出由 OS 释放，不用 PID 存活判断、不留假死锁；锁文件不删除，避免「刚拿到锁就被删」的双持窗口）。启动顺序：先取实例锁 → 没拿到就不碰账本、`startup_fatal` 显示「已有另一个柜面终端实例在运行」；账本用 `open_exclusive`（`locking_mode=EXCLUSIVE` + 空写事务），第二个连接 200ms 内 `SQLITE_BUSY` → 同样拒绝启动。新增 `OpenError{Busy,Other}` 区分「被占用」与「磁盘坏了」（前者拒绝启动，后者保持降级+告警）。行为变更写 changes/019。shell 65 / journal 33。
 
+25. P1-3 第 1 步（PR #56）：`logging` 模块——JSON 行（ts/level/target/request_id/msg）、写 `<appdata>/logs/client.log`、超 2MiB 轮转保留 5 份、`TK_LOG` 控级别、连续 ≥12 位数字脱敏（卡号/账号）、panic hook 落片、启动摘要一条 Info。不新增依赖（用已有的 serde_json），不新增契约。替换 shell 里 7 处 `eprintln!`（保留日志不可用时的 stderr 兜底）。新增约 460 行超 300 阈值，按「同一控制点不可拆」裁决接受。shell 71。
+26. P1-3 第 2 步（PR #57）：23 条命令接 `request_id`——`with_state`/`with_session` 生成 id 并放进阻塞池线程的 `RequestScope`，ShellApp 深层告警自动带同一 id；收尾分级：失败 Warn、慢于 1s Info、正常 Debug（刻意不每次写，避免 session_tick 每秒两行把现场信息淹没）。四条手写三段式的资金路径命令同接。shell 71。
+27. P1-3 第 3 步（PR #58）：灰度急停。`update::decide` 已有稳定分桶与比例，新增 `UpdateCandidate.kill_switch`，**排在通道/版本/灰度之前**判定——否则急停只对"恰好有新版本"的网点生效。2 个测试（压过升级候选、压过通道不符）。core 先行 186。
+28. P1-3 剩余写提案（PR #59，changes/020）：诊断包导出命令（目录形式不引压缩依赖；白名单只含 meta/日志/审计尾部计数；严禁 tx.db、ledger.key、卡号、金额明文；脱敏双保险）+ 更新策略下发字段（kill_switch/channel/rollout_percent 进契约，更新器执行 Skip/DownloadOnly/DownloadAndNotify，未登录不评估）。批准后才动 contracts/。
+
 ## 7. 维护方式
 
 - 每完成一个项目级控制点，更新本表“批次”为 ✅，并在源台账勾掉细项；不新开平行台账。
@@ -139,13 +144,13 @@ P0-1 命名门禁 + 本台账 + 评审/待办入库。
 
 链：`#31→main`，`#32→#31`，`#33→#32`，`#34→#33`，`#35→#34`，`#36→#35`，`#37→#36`，`#38→#36`，`#39→#36`，`#40→#39`，`#41→#37`，`#42→#40`，`#43→#42`。
 head 分支依次为 `chore/naming-and-backlog`、`chore/lockfile-reproducible`、`feat/menu-key-injection`、`fix/trajectory-gate-truthful`、`fix/fail-closed-startup`、`fix/session-lock-gate`、`fix/doc-truthfulness`、`agent/p11-audit-chain`、`agent/p07-package-capability`、`agent/p08-write-ahead`、`docs/backlog-progress`、`agent/p09-persistent-state`、`fix/audit-fails-closed`。
-P0-10 追加线性链（接在 #43 之后）：`#44→#43`、`#45→#44`、`#46→#45`、`#47→#46`，head 依次为 `feat/ipc-async`、`feat/session-lock-split`、`feat/tx-singleflight`、`feat/ipc-network-out-of-lock`、`feat/reversal-out-of-lock`、`feat/replay-two-phase-core`、`feat/replay-out-of-lock`、`feat/update-out-of-lock`、`feat/single-instance`（即 #44→#45→#46→#47→#49→#50→#51→#53→#54，必须按编号顺序合）；台账更新单独三条 `docs/p0-10-progress`（#48）、`docs/p0-10-progress-2`（#52）、`docs/p0-10-closeout`（#55），只改本文件，可与代码链并行合并，但必须排在 #41 之后。
+P0-10 追加线性链（接在 #43 之后）：`#44→#43`、`#45→#44`、`#46→#45`、`#47→#46`，head 依次为 `feat/ipc-async`、`feat/session-lock-split`、`feat/tx-singleflight`、`feat/ipc-network-out-of-lock`、`feat/reversal-out-of-lock`、`feat/replay-two-phase-core`、`feat/replay-out-of-lock`、`feat/update-out-of-lock`、`feat/single-instance`、`feat/observability-logging`、`feat/obs-command-trace`、`feat/update-kill-switch`、`docs/p1-3-proposal`（即 #44→#45→#46→#47→#49→#50→#51→#53→#54→#56→#57→#58→#59，必须按编号顺序合）；台账更新单独四条 `docs/p0-10-progress`（#48）、`docs/p0-10-progress-2`（#52）、`docs/p0-10-closeout`（#55）、`docs/p1-3-progress`（#60），只改本文件，可与代码链并行合并，但必须排在 #41 之后。
 合并顺序：线性链先合 #31 再逐层向下；#38/#39 与 #37 是兄弟，合并顺序无关（文件集互斥）；#44–#47 必须按编号顺序合（每层都改上一层文件）。沿用 ready-for-review 惯例，等负责人合并。
 
 ### 8.2 完成度快照
 
 - **批次 2 全部 ✅**（P0-7…P0-11）；P0-10 收口在 #53，口径见 8.3 第 8 条。
-- **批次 3 进行中**：P1-2 单实例与账本排他已 ✅（#54）；P1-1 交付链、P1-3 可观测性与灰度未开始。
+- **批次 3 进行中**：P1-2 ✅（#54）；P1-3 端侧部分 ✅（日志/追踪/急停，见 8.3 之后新增的 P1-3 段），剩诊断包导出与策略下发等 changes/020 批准、差分升级归 P1-1；P1-1 交付链未开始（等证书与发布决策）。
 - 批次 4–5 未开始。
 
 ### 8.3 P0-10 进度与剩余（必须分 PR）
@@ -171,6 +176,7 @@ P0-10 追加线性链（接在 #43 之后）：`#44→#43`、`#45→#44`、`#46�
 - 前端：冲正原交易展示。
 - 并发：`login` 与 `boot` 兜底仍持锁（见 8.3 第 8 条），按口径接受，不要当漏做；稳态路径已全部放锁。
 - 实例互斥：第二实例被拒时不会唤起已有窗口（需平台窗口管理，属 P1-5）。
+- 可观测性：诊断包导出（`export_diagnostics`）与更新策略下发等 changes/020 批准；差分升级归 P1-1；崩溃/心跳/错误码上报归 P1-16/P1-10。
 - 第 5 节 B1–B7、T-01 阻塞项仍待人/契约，别当成漏做。
 
 ### 8.5 换机器后开工检查
