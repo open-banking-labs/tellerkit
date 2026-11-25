@@ -884,3 +884,26 @@ code,
   font-size: 12px;
   line-height: 1.6;
 }
+
+/* ---------- 待冲正交易 ---------- */
+.tx-exceptions {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--line);
+}
+
+.tx-exception-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+}
+
+.tx-exception-row code {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.tx-exception-row .btn {
+  margin-left: auto;
+}

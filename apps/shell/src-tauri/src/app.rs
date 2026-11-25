@@ -15,6 +15,7 @@ use tellerkit_core::filter::MenuView;
 use tellerkit_core::mock::DemoRole;
 use tellerkit_core::model::MenuTree;
 use tellerkit_core::pkg;
+use tellerkit_core::reversal::{Authorization, Authorizer, ExceptionKind, ReversalRequest};
 use tellerkit_core::session::{SessionGuard, SessionPolicy};
 use tellerkit_core::sync;
 use tellerkit_core::tx::{TxRequest, TxResult, TxStatus};
@@ -62,6 +63,29 @@ pub struct SessionView {
     pub locked: bool,
     pub reason: Option<String>,
     pub idle_secs: u64,
+}
+
+/// 待处置异常交易的展示结构。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TxExceptionView {
+    pub key: String,
+    /// `marked_for_reversal` | `marked_for_roll_forward`
+    pub kind: String,
+}
+
+/// 演示用授权端口：固定由"主管 T0101"批准。
+///
+/// 接 IAM 后替换为真实授权（主管刷卡/指纹），届时 `Authorizer` 的实现会去调远端。
+struct DemoSupervisor;
+
+impl Authorizer for DemoSupervisor {
+    fn authorize(&self, _request: &ReversalRequest) -> Authorization {
+        Authorization {
+            approver: "T0101".to_string(),
+            granted: true,
+            reason: "演示：主管授权".to_string(),
+        }
+    }
 }
 
 /// 用例执行器。借用请求期间的应用状态，并持有端口句柄。
@@ -240,6 +264,65 @@ impl<'a> ShellApp<'a> {
 
     // ---------- 交易 ----------
 
+    /// 状态不明的交易：标记待冲正。这是超时后的**唯一**正确处置。
+    fn mark_if_uncertain(&mut self, key: &str, result: &TxResult) {
+        if result.status == TxStatus::MarkedForReversal {
+            self.state
+                .reversal
+                .mark(key, ExceptionKind::MarkedForReversal);
+        }
+    }
+
+    /// 待处置的异常交易。
+    pub fn tx_exceptions(&self) -> Vec<TxExceptionView> {
+        self.state
+            .reversal
+            .outstanding()
+            .into_iter()
+            .map(|(key, kind)| TxExceptionView {
+                key,
+                kind: match kind {
+                    ExceptionKind::MarkedForReversal => "marked_for_reversal",
+                    ExceptionKind::MarkedForRollForward => "marked_for_roll_forward",
+                }
+                .to_string(),
+            })
+            .collect()
+    }
+
+    /// 申请冲正：本地授权 → 主机受理 → 拿到流水号后才算处置完成。
+    pub fn request_reversal(&mut self, key: &str, reason: &str) -> Result<String, String> {
+        let actor = self.actor();
+        let request = ReversalRequest {
+            idempotency_key: key.to_string(),
+            initiator: actor.clone(),
+            tx_code: String::new(),
+            amount_cents: 0,
+            reason: reason.to_string(),
+        };
+
+        // 1. 授权（当前是演示主管；接 IAM 后换成真实授权端口）
+        self.state
+            .reversal
+            .request(&request, &DemoSupervisor)
+            .map_err(|e| e.to_string())?;
+
+        // 2. 主机受理。失败时保留"已授权未确认"，柜员可以重试
+        let host_reference = self
+            .remote
+            .reverse(key, reason)
+            .map_err(|e| e.to_string())?;
+
+        // 3. 主机回了流水号才算处置完成
+        self.state
+            .reversal
+            .confirm(key, &host_reference)
+            .map_err(|e| e.to_string())?;
+
+        self.audit(&actor, "reversal", key, "ok", &host_reference);
+        Ok(host_reference)
+    }
+
     pub fn submit_transaction(&mut self, request: TxRequest) -> Result<TxResult, String> {
         // 契约 lifecycle.md 不变量 7：主机没声明幂等，就不许离线挂起。
         // 挂起意味着"以后一定会重发"，而重发只有服务端按幂等键去重才不会重复入账。
@@ -259,9 +342,11 @@ impl<'a> ShellApp<'a> {
         }
         let amount_cents = request.amount_cents;
         let code = request.tx_code.clone();
+        let key = request.idempotency_key.clone();
         let actor = self.actor();
 
         let result = self.state.tx.submit(self.remote.as_ref(), request);
+        self.mark_if_uncertain(&key, &result);
 
         let detail = format!("status={:?} amount_cents={amount_cents}", result.status);
         self.audit(

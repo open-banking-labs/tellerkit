@@ -24,6 +24,7 @@ use tellerkit_core::model::MenuTree;
 use tellerkit_core::perm::PermSnapshot;
 use tellerkit_core::pkg::BizPackage;
 use tellerkit_core::replay::{ReplayPolicy, ReplayScheduler};
+use tellerkit_core::reversal::ReversalBook;
 use tellerkit_core::session::SessionGuard;
 use tellerkit_core::store::MenuStore;
 use tellerkit_core::tx::TxEngine;
@@ -64,6 +65,8 @@ pub struct AppState {
     pub clock: StdArc<dyn ports::Clock>,
     /// 自动重放调度。挂起交易按退避节奏逐笔重试，不再一次全推。
     pub replay: ReplayScheduler,
+    /// 冲正账本：记录"状态不明"的交易与冲正申请。
+    pub reversal: ReversalBook,
 }
 
 impl AppState {
@@ -92,6 +95,7 @@ impl AppState {
             session: None,
             clock: StdArc::new(ports::SystemClock),
             replay: ReplayScheduler::new(ReplayPolicy::default()),
+            reversal: ReversalBook::new(),
         }
     }
 
@@ -267,6 +271,8 @@ pub fn run() {
             commands::submit_transaction,
             commands::print_voucher,
             commands::tx_pending_count,
+            commands::tx_exceptions,
+            commands::request_reversal,
             commands::replay_pending,
             commands::package_module,
             commands::audit_tail,

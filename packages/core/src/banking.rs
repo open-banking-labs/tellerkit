@@ -46,6 +46,12 @@ pub trait MenuSource: Send + Sync {
 /// 分成两个对象只会让应用层多持有一个引用，没有收益。
 pub trait RemoteBanking: MenuSource + TxHost + Send + Sync {
     fn login(&self, role_id: &str, perm_version: u64) -> Result<PermSnapshot, RemoteError>;
+
+    /// 请求主机关闭一笔状态不明的交易，返回主机流水号。
+    ///
+    /// 这是**账务操作**：客户端只发请求，冲正是否成立由主机决定。
+    /// 返回的流水号必须写回 `ReversalBook::confirm`，本地才算处置完成。
+    fn reverse(&self, idempotency_key: &str, reason: &str) -> Result<String, RemoteError>;
 }
 
 /// 服务名。路由键是服务而不是模块：同一个模块可以调多个服务。
@@ -177,6 +183,19 @@ impl RemoteBanking for RoutedBanking {
         )?;
         serde_json::from_value(value)
             .map_err(|e| RemoteError::Rejected(format!("登录响应不合法：{e}")))
+    }
+
+    fn reverse(&self, idempotency_key: &str, reason: &str) -> Result<String, RemoteError> {
+        let value = self.call_json(
+            &self.services.tx,
+            "reverse",
+            serde_json::json!({ "idempotency_key": idempotency_key, "reason": reason }),
+        )?;
+        value
+            .get("reference")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| RemoteError::Rejected("冲正响应缺少 reference".to_string()))
     }
 }
 
@@ -323,6 +342,37 @@ mod tests {
             HostError::Rejected(msg) => assert!(msg.contains("余额不足")),
             other => panic!("应映射为 Rejected，实际 {other:?}"),
         }
+    }
+
+    #[test]
+    fn reverse_routes_to_tx_service_and_requires_reference() {
+        let acct = Arc::new(MockTransport::new(
+            "acct",
+            vec![Ok(reply(serde_json::json!({
+                "payload": { "reference": "REV-9" }
+            })))],
+        ));
+        let router = Router::new(vec![endpoint(
+            "acct.core",
+            acct.clone(),
+            Arc::new(JsonCodec),
+        )]);
+        let banking = RoutedBanking::new(router);
+        assert_eq!(banking.reverse("k1", "状态不明").unwrap(), "REV-9");
+        assert_eq!(acct.calls(), 1);
+
+        // 主机没回 reference：必须报错，不能假装成功
+        let acct2 = Arc::new(MockTransport::new(
+            "acct",
+            vec![Ok(reply(serde_json::json!({ "payload": { "ok": true } })))],
+        ));
+        let banking2 = RoutedBanking::new(Router::new(vec![endpoint(
+            "acct.core",
+            acct2,
+            Arc::new(JsonCodec),
+        )]));
+        let err = banking2.reverse("k1", "x").unwrap_err();
+        assert!(err.to_string().contains("reference"));
     }
 
     #[test]

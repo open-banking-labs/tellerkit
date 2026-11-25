@@ -3,7 +3,7 @@
 /**
  * 一笔交易对柜员而言只有三种可见状态。
  *
- * 刻意不做 `Unknown`：状态不明是最坏的情况，客户端不该有"我不知道"这种终态，
- * 要么挂起可重放（Pending），要么拒绝（Rejected）。
+ * 刻意不做 `Unknown`：状态不明必须有一个**明确处置**（挂起重放，或标记待冲正），
+ * 客户端不该有"我不知道"这种既不重试也不查账的终态。
  */
-export type TxStatus = "committed" | "pending" | "rejected";
+export type TxStatus = "committed" | "pending" | "rejected" | "marked_for_reversal";

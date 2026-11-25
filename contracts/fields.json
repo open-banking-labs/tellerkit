@@ -94,6 +94,10 @@
       "locked",
       "reason",
       "idle_secs"
+    ],
+    "TxException": [
+      "key",
+      "kind"
     ]
   },
   "ts_interfaces": {
@@ -176,6 +180,10 @@
       "locked",
       "reason",
       "idle_secs"
+    ],
+    "TxException": [
+      "key",
+      "kind"
     ]
   },
   "commands": [
@@ -198,7 +206,9 @@
     "audit_tail",
     "session_touch",
     "session_tick",
-    "session_blur"
+    "session_blur",
+    "tx_exceptions",
+    "request_reversal"
   ],
   "generated_types": [
     "NodeType",
@@ -213,6 +223,7 @@
     "TxStatus",
     "TxResult",
     "PrintReceipt",
-    "SessionState"
+    "SessionState",
+    "TxException"
   ]
 }
