@@ -12,18 +12,24 @@ use ts_rs::TS;
 
 /// 一笔交易对柜员而言只有三种可见状态。
 ///
-/// 刻意不做 `Unknown`：状态不明是最坏的情况，客户端不该有"我不知道"这种终态，
-/// 要么挂起可重放（Pending），要么拒绝（Rejected）。
+/// 刻意不做 `Unknown`：状态不明必须有一个**明确处置**（挂起重放，或标记待冲正），
+/// 客户端不该有"我不知道"这种既不重试也不查账的终态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
 #[ts(export)]
 pub enum TxStatus {
     /// 主机已受理，拿到流水号。
     Committed,
     /// 网络不可用且该交易允许离线：已挂起，等待重放。
     Pending,
-    /// 明确失败：业务拒绝，或不允许离线的交易遇到断网。
+    /// 明确失败：业务拒绝。
     Rejected,
+    /// **状态不明**：超时/不可达，且该交易不允许离线。
+    ///
+    /// 这不是"失败"——主机可能已经入账了。把它报成 Rejected 会让柜员重做一笔，
+    /// 而主机可能已经扣过款。正确处置是标记待冲正、查账确认（`core::reversal`）。
+    MarkedForReversal,
 }
 
 /// 交易请求。幂等键由**客户端**生成——断网时拿不到服务端 ID。
@@ -291,9 +297,15 @@ impl TxEngine {
                 )
             }
             Err(HostError::Timeout) | Err(HostError::Unavailable) => (
-                TxResult::rejected(
-                    "网络不可用，且该交易不支持离线：请用同一笔业务重试（服务端按幂等键去重）",
-                ),
+                // 状态不明，不是拒绝。不缓存幂等索引（cacheable=false），
+                // 由上层标记待冲正并查账。
+                TxResult {
+                    status: TxStatus::MarkedForReversal,
+                    reference: None,
+                    message: "网络不可用且该交易不支持离线：状态不明，已标记待冲正，请查账确认"
+                        .to_string(),
+                    replayable: false,
+                },
                 false,
             ),
         };
@@ -515,14 +527,16 @@ mod tests {
 
     // S-03
     #[test]
-    fn offline_without_capability_is_rejected_and_not_queued() {
+    fn offline_without_capability_is_marked_for_reversal_not_rejected() {
         let host = ScriptedHost::always(Err(HostError::Unavailable));
         let mut engine = TxEngine::new();
         let result = engine.submit(&host, req("k-off"));
 
-        assert_eq!(result.status, TxStatus::Rejected);
+        // 超时/不可达 = 状态不明，绝不能报"拒绝"——那会让柜员重做一笔
+        assert_eq!(result.status, TxStatus::MarkedForReversal);
         assert!(!result.replayable);
-        assert!(result.message.contains("不支持离线"));
+        assert!(result.message.contains("状态不明"));
+        assert!(result.message.contains("待冲正"));
         assert!(
             engine.pending_requests().is_empty(),
             "不允许离线的交易不得入队"
@@ -772,8 +786,8 @@ mod tests {
         let mut engine = TxEngine::new();
 
         let first = engine.submit(&host, req("k-dup-off"));
-        assert_eq!(first.status, TxStatus::Rejected);
-        assert!(first.message.contains("不支持离线"));
+        assert_eq!(first.status, TxStatus::MarkedForReversal);
+        assert!(first.message.contains("待冲正"));
 
         // 网络恢复后，同一幂等键必须能真正重试——不能被"首次拒绝"永久缓存挡住。
         // 若这里返回缓存的 Rejected，柜员就只能换新键重试，那才可能重复扣账。

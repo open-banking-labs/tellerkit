@@ -184,6 +184,13 @@ fn serve_op(op: &str, request: &Value, config: &FakeBankConfig) -> Value {
             };
             serde_json::to_value(snapshot).unwrap_or(Value::Null)
         }
+        "reverse" => {
+            let key = request
+                .pointer("/payload/idempotency_key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            json!({ "reference": format!("REV-{key}") })
+        }
         "submit_tx" => match &config.reject_reason {
             Some(reason) => json!({
                 "error": { "code": "TX_REJECTED", "message": reason, "retryable": false }

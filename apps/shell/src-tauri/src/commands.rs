@@ -115,6 +115,39 @@ impl From<crate::app::SessionView> for SessionState {
     }
 }
 
+/// 待处置的异常交易（状态不明，需查账/冲正）。
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct TxException {
+    pub key: String,
+    /// `marked_for_reversal` | `marked_for_roll_forward`
+    pub kind: String,
+}
+
+#[tauri::command]
+pub fn tx_exceptions(state: State<'_, Mutex<AppState>>) -> Result<Vec<TxException>, String> {
+    let mut guard = lock(&state)?;
+    Ok(ShellApp::new(&mut guard)
+        .tx_exceptions()
+        .into_iter()
+        .map(|v| TxException {
+            key: v.key,
+            kind: v.kind,
+        })
+        .collect())
+}
+
+/// 申请冲正：本地授权 → 主机受理 → 返回主机流水号。
+#[tauri::command]
+pub fn request_reversal(
+    key: String,
+    reason: String,
+    state: State<'_, Mutex<AppState>>,
+) -> Result<String, String> {
+    let mut guard = lock(&state)?;
+    ShellApp::new(&mut guard).request_reversal(&key, &reason)
+}
+
 fn dev_state_of(st: &AppState) -> DevState {
     DevState {
         offline: st.mock.as_ref().map(|m| m.offline()).unwrap_or(false),

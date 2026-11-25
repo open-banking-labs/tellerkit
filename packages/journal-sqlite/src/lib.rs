@@ -178,6 +178,8 @@ fn status_str(status: TxStatus) -> &'static str {
         TxStatus::Committed => "committed",
         TxStatus::Pending => "pending",
         TxStatus::Rejected => "rejected",
+        // 状态不明：账本里必须与"明确拒绝"区分开，否则对账时看不出这笔需要查证
+        TxStatus::MarkedForReversal => "marked_for_reversal",
     }
 }
 

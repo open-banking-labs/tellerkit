@@ -184,6 +184,13 @@ impl RemoteBanking for MockRemote {
             .login(role_id, perm_version)
             .ok_or(RemoteError::Rejected(format!("未知角色：{role_id}")))
     }
+
+    fn reverse(&self, idempotency_key: &str, _reason: &str) -> Result<String, RemoteError> {
+        if self.snapshot().offline {
+            return Err(RemoteError::Unavailable("断网：无法冲正".into()));
+        }
+        Ok(format!("REV-{idempotency_key}"))
+    }
 }
 
 impl TxHost for MockRemote {

@@ -16,6 +16,7 @@ import type {
   PrintReceipt,
   ReloadReport,
   SessionState,
+  TxException,
   TxResult,
   UpdateReport,
 } from "../generated";
@@ -50,6 +51,8 @@ export const tauriClient: ShellClient = {
     call<TxResult>("submit_transaction", { ...req }),
   printVoucher: (req: PrintVoucherRequest) => call<PrintReceipt>("print_voucher", { ...req }),
   txPendingCount: () => call<number>("tx_pending_count"),
+  txExceptions: () => call<TxException[]>("tx_exceptions"),
+  requestReversal: (key, reason) => call<string>("request_reversal", { key, reason }),
   replayPending: () => call<string>("replay_pending"),
 
   auditTail: (limit = 20) => call<string[]>("audit_tail", { limit }),

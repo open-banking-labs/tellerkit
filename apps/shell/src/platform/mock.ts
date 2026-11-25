@@ -14,6 +14,7 @@ import type {
   PrintReceipt,
   ReloadReport,
   SessionState,
+  TxException,
   TxResult,
   UpdateReport,
 } from "../generated";
@@ -114,6 +115,14 @@ export const mockClient: ShellClient = {
 
   async txPendingCount(): Promise<number> {
     return 0;
+  },
+
+  async txExceptions(): Promise<TxException[]> {
+    return [];
+  },
+
+  async requestReversal(): Promise<string> {
+    throw new Error("浏览器预览没有真实主机：冲正需在 Tauri 客户端验证");
   },
 
   async replayPending(): Promise<string> {

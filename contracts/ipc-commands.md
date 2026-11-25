@@ -15,6 +15,8 @@
 | `submit_transaction` | `txCode, idempotencyKey, amountCents, elements, offlineCapable` | `TxResult` | 是（走主机） |
 | `print_voucher` | `template, txCode, reference?, fields` | `PrintReceipt` | 否（走设备） |
 | `tx_pending_count` | — | `number` | 否 |
+| `tx_exceptions` | — | `TxException[]` | 否 |
+| `request_reversal` | `key: string`、`reason: string` | `string`（主机流水号） | 是（向主机申请） |
 | `replay_pending` | — | `string`（人可读汇总） | 是（逐笔打主机） |
 | `package_module` | `route: string` | `string`（模块源码） | 否 |
 | `audit_tail` | `limit: number` | `string[]`（一行一条） | 否（读本地账本） |

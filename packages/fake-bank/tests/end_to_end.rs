@@ -133,6 +133,22 @@ fn backend_down_falls_back_to_secondary_endpoint() {
     );
 }
 
+/// 冲正必须打到主机并拿回流水号——客户端不能自己"假装冲完"。
+#[test]
+fn reversal_goes_to_the_host_and_returns_its_reference() {
+    let bank = FakeBank::start(FakeBankConfig::default());
+    let banking = RoutedBanking::new(router_for(&bank)).with_idempotency(true);
+
+    let reference = banking
+        .reverse("key-9", "状态不明，查账后冲正")
+        .expect("主机受理");
+    assert_eq!(reference, "REV-key-9");
+    assert!(
+        bank.ops().contains(&"reverse".to_string()),
+        "请求确实到了主机"
+    );
+}
+
 /// 契约 lifecycle.md 不变量 6：同键重复提交只入账一次，且返回同一流水号。
 ///
 /// 这是客户端所有重试/重放策略的前提。用真 socket 证明它，而不是写在文档里。

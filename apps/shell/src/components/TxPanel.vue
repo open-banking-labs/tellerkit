@@ -12,6 +12,8 @@ const busy = ref(false);
 const result = ref<TxResult | null>(null);
 const printed = ref<string | null>(null);
 const pending = ref(0);
+const exceptions = ref<{ key: string; kind: string }[]>([]);
+const reversalNote = ref<string | null>(null);
 const replayNote = ref<string | null>(null);
 
 /** 金额一律换算成"分"再发给后端：浮点进交易是事故来源。 */
@@ -25,12 +27,26 @@ const statusMeta: Record<TxStatus, { label: string; cls: string }> = {
   committed: { label: "交易成功", cls: "ok" },
   pending: { label: "已挂起，待重放", cls: "warn" },
   rejected: { label: "已拒绝", cls: "danger" },
+  marked_for_reversal: { label: "状态不明 · 待冲正", cls: "warn" },
 };
 
 const meta = computed(() => (result.value ? statusMeta[result.value.status] : null));
 
 async function refreshPending(): Promise<void> {
   pending.value = await api.txPendingCount();
+  exceptions.value = await api.txExceptions();
+}
+
+/** 冲正必须有人授权，且要主机回执；这里只负责发起。 */
+async function requestReversal(key: string): Promise<void> {
+  reversalNote.value = null;
+  try {
+    const reference = await api.requestReversal(key, "柜员确认状态不明，申请冲正");
+    reversalNote.value = `主机已受理冲正：${reference}`;
+  } catch (err) {
+    reversalNote.value = `冲正未完成：${String(err)}`;
+  }
+  await refreshPending();
 }
 
 async function replay(): Promise<void> {
@@ -120,6 +136,18 @@ void refreshPending();
   </div>
 
   <p v-if="replayNote" class="tx-hint" style="margin-top: 8px">{{ replayNote }}</p>
+
+  <div v-if="exceptions.length" class="tx-exceptions">
+    <p class="tx-hint">
+      <strong>{{ exceptions.length }}</strong> 笔交易状态不明，需查账确认后冲正：
+    </p>
+    <div v-for="item in exceptions" :key="item.key" class="tx-exception-row">
+      <code>{{ item.key.slice(0, 12) }}…</code>
+      <span class="tx-hint">{{ item.kind === "marked_for_reversal" ? "待冲正" : "待推进" }}</span>
+      <button class="btn" :disabled="busy" @click="requestReversal(item.key)">申请冲正</button>
+    </div>
+    <p v-if="reversalNote" class="tx-hint">{{ reversalNote }}</p>
+  </div>
 
   <div v-if="result && meta" class="card">
     <h2>交易结果</h2>

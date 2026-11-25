@@ -16,6 +16,7 @@ import type {
   PrintReceipt,
   ReloadReport,
   SessionState,
+  TxException,
   TxResult,
   UpdateReport,
 } from "../generated";
@@ -54,6 +55,10 @@ export interface ShellClient {
   submitTransaction(req: SubmitTransactionRequest): Promise<TxResult>;
   printVoucher(req: PrintVoucherRequest): Promise<PrintReceipt>;
   txPendingCount(): Promise<number>;
+  /** 状态不明、待处置的交易（需要查账/冲正）。 */
+  txExceptions(): Promise<TxException[]>;
+  /** 申请冲正：本地授权 → 主机受理 → 返回主机流水号。 */
+  requestReversal(key: string, reason: string): Promise<string>;
   replayPending(): Promise<string>;
   auditTail(limit?: number): Promise<string[]>;
   sessionTouch(): Promise<SessionState>;
