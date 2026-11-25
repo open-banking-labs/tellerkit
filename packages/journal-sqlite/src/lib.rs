@@ -111,6 +111,16 @@ impl SqliteJournal {
                 offline_capable  INTEGER NOT NULL,
                 created_at       TEXT    NOT NULL
             );
+            -- 写前意图：调用主机之前先落盘。只有 settle() 才会删除，
+            -- 崩溃遗留的行即"主机可能已受理但结论未记"的交易，启动时转异常。
+            CREATE TABLE IF NOT EXISTS tx_intent (
+                idempotency_key  TEXT PRIMARY KEY,
+                tx_code          TEXT    NOT NULL,
+                amount_cents     INTEGER NOT NULL,
+                elements         TEXT    NOT NULL,
+                offline_capable  INTEGER NOT NULL,
+                created_at       TEXT    NOT NULL
+            );
             -- 管理审计：只增表。本类型刻意不提供 update/delete/clear，
             -- 能删的审计等于没有审计（见 docs/security-boundary.md §4）。
             -- seq/prev_hash/hash 默认空：旧库升级后原有行仍是"无哈希旧行"。
@@ -492,7 +502,135 @@ pub struct RecentTx {
     pub at: String,
 }
 
+impl SqliteJournal {
+    /// 交易要素落盘前加密：账号不该以明文躺在磁盘上。
+    fn seal_elements(&self, request: &TxRequest) -> Result<String, String> {
+        self.cipher.seal(
+            &serde_json::to_string(&request.elements)
+                .map_err(|e| format!("序列化交易要素失败：{e}"))?,
+        )
+    }
+
+    /// 把落盘的密文还原为请求要素；已有 `enqueue`/`pending` 共用同一格式。
+    fn unseal_elements(
+        &self,
+        sealed: &str,
+    ) -> Result<std::collections::BTreeMap<String, String>, String> {
+        let plain = self.cipher.open(sealed)?;
+        serde_json::from_str(&plain).map_err(|e| format!("反序列化交易要素失败：{e}"))
+    }
+}
+
 impl TxJournal for SqliteJournal {
+    fn record_intent(&self, request: &TxRequest) -> Result<(), String> {
+        let elements = self.seal_elements(request)?;
+        self.lock()
+            .execute(
+                "INSERT OR REPLACE INTO tx_intent
+                 (idempotency_key, tx_code, amount_cents, elements, offline_capable, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    request.idempotency_key,
+                    request.tx_code,
+                    request.amount_cents,
+                    elements,
+                    request.offline_capable as i32,
+                    now(),
+                ],
+            )
+            .map(|_| ())
+            .map_err(|e| format!("写前意图落盘失败：{e}"))
+    }
+
+    fn settle(&self, request: &TxRequest, result: &TxResult) -> Result<(), String> {
+        let elements = if result.status == TxStatus::Pending {
+            Some(self.seal_elements(request)?)
+        } else {
+            None
+        };
+        let conn = self.lock();
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("结论落盘事务失败：{e}"))?;
+        tx.execute(
+            "INSERT INTO tx_log
+             (idempotency_key, tx_code, amount_cents, status, reference, message, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                request.idempotency_key,
+                request.tx_code,
+                request.amount_cents,
+                status_str(result.status),
+                result.reference,
+                result.message,
+                now(),
+            ],
+        )
+        .map_err(|e| format!("写审计日志失败：{e}"))?;
+        tx.execute(
+            "DELETE FROM tx_intent WHERE idempotency_key = ?1",
+            params![request.idempotency_key],
+        )
+        .map_err(|e| format!("清除写前意图失败：{e}"))?;
+        if let Some(elements) = elements {
+            tx.execute(
+                "INSERT OR REPLACE INTO tx_queue
+                 (idempotency_key, tx_code, amount_cents, elements, offline_capable, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    request.idempotency_key,
+                    request.tx_code,
+                    request.amount_cents,
+                    elements,
+                    request.offline_capable as i32,
+                    now(),
+                ],
+            )
+            .map_err(|e| format!("挂起请求入队失败：{e}"))?;
+        } else {
+            tx.execute(
+                "DELETE FROM tx_queue WHERE idempotency_key = ?1",
+                params![request.idempotency_key],
+            )
+            .map_err(|e| format!("挂起请求出队失败：{e}"))?;
+        }
+        tx.commit()
+            .map_err(|e| format!("提交结论落盘事务失败：{e}"))
+    }
+
+    fn in_flight_intents(&self) -> Result<Vec<TxRequest>, String> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT idempotency_key, tx_code, amount_cents, elements, offline_capable
+                 FROM tx_intent ORDER BY created_at, rowid",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, i32>(4)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (key, tx_code, amount_cents, elements, offline) = row.map_err(|e| e.to_string())?;
+            out.push(TxRequest {
+                idempotency_key: key,
+                tx_code,
+                amount_cents,
+                elements: self.unseal_elements(&elements)?,
+                offline_capable: offline != 0,
+            });
+        }
+        Ok(out)
+    }
+
     fn record(&self, request: &TxRequest, result: &TxResult) -> Result<(), String> {
         self.lock()
             .execute(
@@ -514,10 +652,7 @@ impl TxJournal for SqliteJournal {
     }
 
     fn enqueue(&self, request: &TxRequest) -> Result<(), String> {
-        let elements = self.cipher.seal(
-            &serde_json::to_string(&request.elements)
-                .map_err(|e| format!("序列化交易要素失败：{e}"))?,
-        )?;
+        let elements = self.seal_elements(request)?;
         self.lock()
             .execute(
                 "INSERT OR REPLACE INTO tx_queue
@@ -665,6 +800,46 @@ mod tests {
         assert_eq!(list[0].idempotency_key, "k2");
         assert_eq!(list[0].elements.get("to").map(String::as_str), Some("A"));
         assert!(list[0].offline_capable);
+    }
+
+    // S-08：崩溃窗口内只有意图，没有结论；重启必须能读出它并转异常。
+    #[test]
+    fn write_ahead_intent_survives_until_settled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tx.db");
+        let j = SqliteJournal::open(&path).unwrap();
+        let r = req("k-crash").offline(true);
+
+        j.record_intent(&r).unwrap();
+        drop(j);
+        let j = SqliteJournal::open(&path).unwrap();
+        let in_flight = j.in_flight_intents().unwrap();
+        assert_eq!(in_flight.len(), 1);
+        assert_eq!(in_flight[0].idempotency_key, "k-crash");
+        assert_eq!(in_flight[0].amount_cents, 10_000);
+
+        j.settle(&r, &committed()).unwrap();
+        assert!(j.in_flight_intents().unwrap().is_empty());
+        assert_eq!(j.log_count().unwrap(), 1, "结论只写一条，不与 intents 重复");
+    }
+
+    // Pending 时 settle 在同一事务里写结论并入队，意图不再遗留。
+    #[test]
+    fn settle_pending_moves_intent_to_queue_in_one_transaction() {
+        let j = SqliteJournal::in_memory().unwrap();
+        let r = req("k-pending").offline(true);
+        j.record_intent(&r).unwrap();
+
+        j.settle(&r, &pending()).unwrap();
+
+        assert!(j.in_flight_intents().unwrap().is_empty());
+        let keys: Vec<String> = j
+            .pending()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.idempotency_key)
+            .collect();
+        assert_eq!(keys, vec!["k-pending".to_string()]);
     }
 
     #[test]

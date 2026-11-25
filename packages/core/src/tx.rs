@@ -136,6 +136,27 @@ pub enum HostError {
 pub trait TxJournal: Send + Sync {
     /// 追加一条交易结论（审计日志，只增）。
     fn record(&self, request: &TxRequest, result: &TxResult) -> Result<(), String>;
+    /// 写前意图：调用主机**之前**落盘。
+    ///
+    /// 默认空实现给纯内存预览用；接了持久化账本的实现必须真正落盘，
+    /// 否则崩溃后无法区分"主机已受理但本地没记账"与"从未提交"。
+    fn record_intent(&self, _request: &TxRequest) -> Result<(), String> {
+        Ok(())
+    }
+    /// 结论落盘与意图收口放在同一个事务里。
+    ///
+    /// 默认退化为逐条 record + dequeue，仅用于没有事务能力的实现。
+    fn settle(&self, request: &TxRequest, result: &TxResult) -> Result<(), String> {
+        self.record(request, result)?;
+        if result.status != TxStatus::Pending {
+            self.dequeue(&request.idempotency_key)?;
+        }
+        Ok(())
+    }
+    /// 启动时读出上次崩溃遗留的在途意图，由上层转入异常队列。
+    fn in_flight_intents(&self) -> Result<Vec<TxRequest>, String> {
+        Ok(Vec::new())
+    }
     /// 挂起请求入队，供重启后重放。
     fn enqueue(&self, request: &TxRequest) -> Result<(), String>;
     /// 重放完成后出队。
@@ -225,6 +246,8 @@ pub struct TxEngine {
     journal: Option<Box<dyn TxJournal>>,
     /// 最近一次记账失败。不改变交易结论，但必须能被上层看见。
     journal_error: Option<String>,
+    /// 上次崩溃时未完成主机调用的交易，启动时读出等待上层转异常。
+    in_flight: Vec<TxRequest>,
 }
 
 impl std::fmt::Debug for TxEngine {
@@ -250,6 +273,10 @@ impl TxEngine {
             Ok(list) => self.pending = list,
             Err(e) => self.journal_error = Some(format!("读取待重放队列失败：{e}")),
         }
+        match journal.in_flight_intents() {
+            Ok(list) => self.in_flight = list,
+            Err(e) => self.journal_error = Some(format!("读取在途交易意图失败：{e}")),
+        }
         self.journal = Some(journal);
         self
     }
@@ -257,6 +284,11 @@ impl TxEngine {
     /// 取走最近一次记账错误（取走后清空，避免重复上报）。
     pub fn take_journal_error(&mut self) -> Option<String> {
         self.journal_error.take()
+    }
+
+    /// 取走上次崩溃遗留的在途交易，由上层转入异常队列处置。
+    pub fn take_in_flight(&mut self) -> Vec<TxRequest> {
+        std::mem::take(&mut self.in_flight)
     }
 
     /// 提交一笔交易。
@@ -278,6 +310,14 @@ impl TxEngine {
             let mut replay = previous.clone();
             replay.message = format!("重复提交：返回首次结果（{}）", previous.message);
             return replay;
+        }
+
+        // 写前意图必须先落盘：崩溃时至少能知道主机可能受理了哪一笔。
+        // 落盘失败就绝不碰主机——否则事故后没有任何证据可查。
+        if let Some(journal) = self.journal.as_deref() {
+            if let Err(e) = journal.record_intent(&request) {
+                return TxResult::rejected(&format!("写前意图落盘失败，交易未提交：{e}"));
+            }
         }
 
         // 瞬时失败（超时/不可达）**不写幂等索引**：
@@ -316,19 +356,10 @@ impl TxEngine {
         }
 
         // 记账失败不改变结论：交易已经发生，日志没写成是运维问题，不是业务问题。
-        let mut journal_err = None;
         if let Some(journal) = self.journal.as_deref() {
-            if let Err(e) = journal.record(&request, &result) {
-                journal_err = Some(e);
+            if let Err(e) = journal.settle(&request, &result) {
+                self.journal_error = Some(e);
             }
-            if result.status == TxStatus::Pending {
-                if let Err(e) = journal.enqueue(&request) {
-                    journal_err = Some(e);
-                }
-            }
-        }
-        if journal_err.is_some() {
-            self.journal_error = journal_err;
         }
         result
     }
@@ -367,19 +398,10 @@ impl TxEngine {
         self.idempotent
             .insert(key.clone(), (signature, result.clone()));
 
-        let mut journal_err = None;
         if let Some(journal) = self.journal.as_deref() {
-            if let Err(e) = journal.record(&request, &result) {
-                journal_err = Some(e);
+            if let Err(e) = journal.settle(&request, &result) {
+                self.journal_error = Some(e);
             }
-            if result.status == TxStatus::Committed {
-                if let Err(e) = journal.dequeue(&key) {
-                    journal_err = Some(e);
-                }
-            }
-        }
-        if journal_err.is_some() {
-            self.journal_error = journal_err;
         }
         Some((key, result))
     }
@@ -406,6 +428,11 @@ impl TxEngine {
             };
             self.idempotent
                 .insert(key.clone(), (signature, result.clone()));
+            if let Some(journal) = self.journal.as_deref() {
+                if let Err(e) = journal.settle(&request, &result) {
+                    self.journal_error = Some(e);
+                }
+            }
             outcomes.push((key, result));
         }
         outcomes
@@ -860,5 +887,36 @@ mod tests {
             .map(|request| request.idempotency_key.as_str())
             .collect();
         assert_eq!(keys, vec!["k-a", "k-b"], "两笔都应入队，顺序为提交顺序");
+    }
+
+    /// 写前意图落盘失败时，必须拒绝提交且绝不碰主机。
+    struct FailingIntentJournal;
+
+    impl TxJournal for FailingIntentJournal {
+        fn record(&self, _request: &TxRequest, _result: &TxResult) -> Result<(), String> {
+            Ok(())
+        }
+        fn record_intent(&self, _request: &TxRequest) -> Result<(), String> {
+            Err("磁盘已满".to_string())
+        }
+        fn enqueue(&self, _request: &TxRequest) -> Result<(), String> {
+            Ok(())
+        }
+        fn dequeue(&self, _key: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    // S-08：写前意图是提交的前置条件，不是事后补记。
+    #[test]
+    fn s08_failed_intent_write_refuses_submit_without_calling_host() {
+        let host = ScriptedHost::always(Ok("TX-1".to_string()));
+        let mut engine = TxEngine::new().with_journal(Box::new(FailingIntentJournal));
+
+        let result = engine.submit(&host, req("k-intent"));
+
+        assert_eq!(result.status, TxStatus::Rejected);
+        assert!(result.message.contains("写前意图落盘失败"));
+        assert_eq!(host.calls(), 0, "落盘失败时不得向主机发出任何请求");
     }
 }
