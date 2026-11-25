@@ -1,9 +1,11 @@
 //! 端点配置：把网点下发的 `endpoints.json` 变成 [`Router`]。
 //!
-//! 契约见 `changes/008-endpoint-config.md`。要点：
+//! 契约见 `changes/008-endpoint-config.md`，启动时的 fail-closed 行为见
+//! `changes/016-fail-closed-startup.md` 与 `bootstrap.rs`。要点：
 //! - 一个服务可有多条端点，按 `priority` 升序主备；
 //! - 不同服务可以用不同传输与编解码；
-//! - 配置缺失/非法 → 回退 mock，并在启动 notes 里写明原因（柜面宁可降级也不白屏）。
+//! - 本模块只负责"解析得对不对"；**配置不成立时是拒绝启动还是回退演示，
+//!   由 `bootstrap::resolve_remote` 按构建类型决定**，不在这里偷偷降级。
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -132,7 +134,7 @@ pub fn parse(raw: &str) -> Result<Router, String> {
     parse_full(raw, false).map(|loaded| loaded.router)
 }
 
-/// `require_tls` 为真时拒绝一切 `http://` 端点（生产环境应打开）。
+/// `require_tls` 为真时拒绝一切 `http://` 端点（release 构建强制为真）。
 pub fn parse_with(raw: &str, require_tls: bool) -> Result<Router, String> {
     parse_full(raw, require_tls).map(|loaded| loaded.router)
 }

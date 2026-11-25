@@ -34,8 +34,8 @@
 | P0-1 | 命名与提交门禁 | 本轮新增 | `npm run gate` 含银行名检查；pre-commit 同规则；全仓 0 命中 | ✅ 已完成 |
 | P0-2 | 裁决链可信 | C-01 C-02 C-05 | 故意让一条测试红，CI 必红；`--locked` 构建通过；门禁负向用例可复算 | 1（C-02/C-05 完成，C-01 待提案批准） |
 | P0-3 | 文档与事实一致 | C-07 D-02 D-05 D-06 | README 不再声称未实现的能力；伪门禁删除或接真数据；版本单一来源 | 1 |
-| P0-4 | 信任根：生产公钥 | A-01 安全 P0-1 | release 缺 `TK_MENU_PUBKEY_HEX` 构建失败（已验证）；启动摘要显示实际公钥指纹；演示公钥不进发布产物（随 P0-5 完成） | 1（注入完成，待 P0-5） |
-| P0-5 | 启动/配置 fail-closed | A-06 安全 P0-2 规模 P0-09 | 配置非法不得回退 mock；release 强制 TLS/签名；致命错误有可读页面 | 1 |
+| P0-4 | 信任根：生产公钥 | A-01 安全 P0-1 | release 缺 `TK_MENU_PUBKEY_HEX` 构建失败（已验证）；启动摘要显示实际公钥指纹；演示公钥不进发布产物（P0-5 后 release 不再回退 mock） | ✅ 已完成 |
+| P0-5 | 启动/配置 fail-closed | A-06 安全 P0-2 规模 P0-09 | release 缺端点/配置非法/未签名/明文端点一律拒绝启动并给可读错误页；非法开关值不静默当作关；debug 才回退演示远端且必须带 note | ✅ 已完成 |
 | P0-6 | 会话与锁屏真门 | A-02 安全 P0-3 | 命令层统一 `require_unlocked`；锁定时资金/打印/冲正/重放调用次数为 0；卸载包宿主 | 1 |
 | P0-7 | 业务包能力执行 | 安全 P0-4 | 未声明的交易码被拒绝；包身份进审计；能力白名单按包而非方法名 | 2 |
 | P0-8 | 写前意图与恢复 | A-04 | 先记 intent 再发远端；崩溃后 `in_flight` 转异常；两条自动提交路径都有事务 | 2 |
@@ -102,7 +102,8 @@ P0-1 命名门禁 + 本台账 + 评审/待办入库。
 4. 建立本台账；把四份评审/待办纳入版本控制。
 5. P0-4 注入完成：`lib.rs` 增加 `resolve_menu_verifying_key`，release 缺 `TK_MENU_PUBKEY_HEX` 时 `build.rs` 直接 panic；启动摘要报告实际公钥指纹。远端验收：无 key `cargo check --release` exit 101 + 预期文案；带 key 同一命令 exit 0；`cargo test --workspace --locked` 251 passed。
 6. P0-2 锁文件先行：远端解析出的 21 个缺失依赖已固化，CI/verify/远端构建统一 `--locked`；本轮 `--locked` 全量测试通过。
-7. P0-2 轨迹门禁转真：`check-trajectory` 不再对无法复算/指纹不符的记录放行；T-11 旧记录因预设更新已在 `.agents/dispatch-superseded.json` 显式作废（负向验证：去掉作废登记后 gate exit 1）。C-01 的宪法措辞矛盾写进 `changes/015-gate-adjudication.md`，等负责人批准。
+7. P0-2 轨迹门禁转真：`check-trajectory` 不再对无法复算/指纹不符的记录放行；T-11 旧记录因预设更新已在 `.agents/dispatch-superseded.json` 显式作废（负向验证：去掉作废登记后 gate exit 1）。C-01 的宪法措辞矛盾写进 `changes/015-gate-adjudication.md`，等负责人批准。派发提示词/输入哈希统一 LF + 新增 `.gitattributes`，消除 Windows CRLF 导致的跨平台指纹漂移。
+8. P0-5 启动 fail-closed：新增 `bootstrap.rs`（策略与判定纯函数），release 强制配置验签/TLS、缺端点/非法/未签名/明文一律拒绝进入业务界面；失败原因存入 `AppState.startup_fatal`，由唯一加锁入口 `lock()` 拦下全部 23 条命令与后台重放，前端错误页可读。debug 才回退演示远端且必须留 note。行为变更写进 `changes/016-fail-closed-startup.md`（提案）。远端验收：49 passed / 0 failed、clippy `-D warnings` 通过、`npm run gate` exit 0。
 
 ## 7. 维护方式
 

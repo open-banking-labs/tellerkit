@@ -7,6 +7,7 @@
 //!   版本探测是渲染之后的独立调用。
 
 pub mod app;
+pub mod bootstrap;
 pub mod commands;
 pub mod config_sig;
 pub mod endpoint_config;
@@ -32,6 +33,7 @@ use tellerkit_core::tx::TxEngine;
 use tellerkit_core::tx::{TxJournal, TxRequest, TxResult};
 use tellerkit_journal_sqlite::SqliteJournal;
 
+use bootstrap::StartupFatal;
 use ed25519_dalek::VerifyingKey;
 use tauri::Manager;
 
@@ -49,6 +51,11 @@ pub struct AppState {
     /// 全量菜单树（不做权限过滤），供每次过滤复用。
     pub menu: Option<MenuTree>,
     pub appdata_dir: String,
+    /// 启动被拒绝的原因。非空时**所有命令**都直接失败，只保留可读错误页。
+    ///
+    /// 放在这里而不是单独的托管状态：`lock()` 是所有命令的唯一入口，
+    /// 在这里拦一次，比在 23 个命令里各写一遍可靠。
+    pub startup_fatal: bootstrap::StartupFatal,
     /// 账本打不开时的告警。柜面宁可"能开但提示异常"，也不要"打不开"。
     pub journal_warning: Option<String>,
     /// 交易引擎：幂等索引 + 待重放队列（P1.4 会落盘）。
@@ -93,6 +100,7 @@ impl AppState {
             snapshot: None,
             menu: None,
             appdata_dir,
+            startup_fatal: bootstrap::StartupFatal::default(),
             journal_warning,
             tx,
             devices: mock_devices(),
@@ -136,61 +144,36 @@ fn menu_verifying_key() -> Result<VerifyingKey, String> {
     resolve_menu_verifying_key(option_env!("TK_MENU_PUBKEY_HEX"), cfg!(debug_assertions))
 }
 
-/// 选择远端实现：配置了端点就用 `RoutedBanking`，否则回退内置 mock。
+/// 选择远端实现。策略与判定在 [`bootstrap`]：这里只负责读环境、组装、落状态。
 ///
-/// 配置非法时**回退而不是崩溃**——柜面宁可跑在演示模式，也不能白屏。
-fn build_remote(appdata: &std::path::Path) -> (ports::RemoteChoice, Option<String>) {
+/// release 构建下，任何"配置不成立"都变成启动拒绝（可读错误页）；
+/// debug 构建才允许回退演示远端，并且一定带 note。
+fn build_remote(appdata: &std::path::Path) -> (ports::RemoteChoice, Option<String>, StartupFatal) {
+    let release = !cfg!(debug_assertions);
     let path = std::env::var("TK_ENDPOINTS")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| appdata.join("endpoints.json"));
 
-    if path.exists() {
-        match endpoint_config::load_router(&path) {
-            Ok(loaded) => {
-                let plaintext = !std::env::var("TK_REQUIRE_TLS")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false);
-                return (
-                    ports::RemoteChoice {
-                        remote: Arc::new(
-                            tellerkit_core::banking::RoutedBanking::new(loaded.router)
-                                .with_idempotency(loaded.idempotent_tx),
-                        ),
-                        mock: None,
-                    },
-                    Some(format!(
-                        "已按 {} 接入真实端点{}",
-                        path.display(),
-                        if plaintext {
-                            "（未强制 TLS：生产部署请设置 TK_REQUIRE_TLS=1 并补 TLS 支持）"
-                        } else {
-                            ""
-                        }
-                    )),
-                );
-            }
-            Err(e) => {
-                eprintln!("端点配置不可用，回退内置 mock：{e}");
-                let mock = Arc::new(ports::MockRemote::default());
-                return (
-                    ports::RemoteChoice {
-                        remote: Arc::clone(&mock) as Arc<dyn RemoteBanking>,
-                        mock: Some(mock),
-                    },
-                    Some(format!("端点配置无效（{e}），已回退内置 mock")),
-                );
-            }
+    let outcome = bootstrap::policy_from_env(release)
+        .and_then(|policy| bootstrap::resolve_remote(&path, release, &policy));
+
+    match outcome {
+        Ok(setup) => (setup.choice, setup.note, StartupFatal::default()),
+        Err(reason) => {
+            // 进程还要起来：只有起来，才能把"为什么被拒绝"显示成人能读的页面。
+            // 业务命令一律先过 `StartupFatal::check`，所以演示远端不会被真正使用。
+            eprintln!("启动被拒绝：{reason}");
+            let mock = Arc::new(ports::MockRemote::default());
+            (
+                ports::RemoteChoice {
+                    remote: Arc::clone(&mock) as Arc<dyn RemoteBanking>,
+                    mock: Some(mock),
+                },
+                None,
+                StartupFatal(Some(reason)),
+            )
         }
     }
-
-    let mock = Arc::new(ports::MockRemote::default());
-    (
-        ports::RemoteChoice {
-            remote: Arc::clone(&mock) as Arc<dyn RemoteBanking>,
-            mock: Some(mock),
-        },
-        None,
-    )
 }
 
 /// 后台重放线程。
@@ -214,6 +197,10 @@ fn spawn_replay_worker(handle: tauri::AppHandle) {
         let Ok(mut guard) = state.lock() else {
             continue;
         };
+        // 启动被拒绝时绝不重放：兜底的演示远端不能碰任何挂起交易。
+        if guard.startup_fatal.check().is_err() {
+            continue;
+        }
         // 未登录不重放：没有权限快照时重放会在审计里留下 unknown 操作者
         if guard.snapshot.is_none() {
             continue;
@@ -270,10 +257,10 @@ pub fn run() {
                     None,
                 ),
             };
-            // 端点配置（changes/008）：有配置就用真实路由，否则回退内置 mock
-            let (remote, remote_note) = build_remote(&appdata);
+            // 端点配置（changes/008）：release 缺配置/配置非法即拒绝启动
+            let (remote, remote_note, startup_fatal) = build_remote(&appdata);
             let app_handle = app.handle().clone();
-            let state = AppState::new(
+            let mut state = AppState::new(
                 store,
                 appdata.display().to_string(),
                 tx,
@@ -282,6 +269,7 @@ pub fn run() {
                 remote,
                 verifying_key,
             );
+            state.startup_fatal = startup_fatal;
             if let Some(note) = remote_note {
                 eprintln!("{note}");
             }

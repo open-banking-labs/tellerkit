@@ -21,9 +21,13 @@ use crate::AppState;
 fn lock<'a>(
     state: &'a State<'_, Mutex<AppState>>,
 ) -> Result<std::sync::MutexGuard<'a, AppState>, String> {
-    state
+    let guard = state
         .lock()
-        .map_err(|_| "应用状态已损坏，请重启客户端".to_string())
+        .map_err(|_| "应用状态已损坏，请重启客户端".to_string())?;
+    // 启动被拒绝时连 boot 在内一律失败：界面只能停在错误页，
+    // 不能让"降级成功的演示远端"被当成真实通道用。
+    guard.startup_fatal.check()?;
+    Ok(guard)
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
