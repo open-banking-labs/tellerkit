@@ -2,13 +2,16 @@
 
 [![gate](https://github.com/open-banking-labs/tellerkit/actions/workflows/gate.yml/badge.svg)](https://github.com/open-banking-labs/tellerkit/actions/workflows/gate.yml)
 [![Tauri 2](https://img.shields.io/badge/Tauri-2-24C8DB)](https://tauri.app)
-[![Rust tests](https://img.shields.io/badge/rust%20tests-56-brightgreen)](https://github.com/open-banking-labs/tellerkit)
+[![docs](https://img.shields.io/badge/docs-architecture%20%7C%20scope%20%7C%20readiness-blue)](docs/architecture.md)
 
 柜面终端客户端。目标形态是「主壳 + 基础菜单 + 可插拔业务包 + 服务端授权」。
+**账务、账户、授权都在远端核心系统；桌面端只负责终端行为与断网处置。**
 
-当前进度：**P0 已完成**（菜单权限闭环，53 个 Rust 测试 + 6 项人工验收）；
-仓库已迁到生产级团队形态（`apps/` + `packages/` + `contracts/` + `.specify/` + `.agents/`）。
-下一步是 **W2：契约即代码**——由 Rust 生成 TS 类型，消灭手写 `contracts.ts`。
+当前进度：**桌面端功能面已闭环**——菜单/权限/业务包沙箱、交易（提交/挂起/重放/冲正）、
+审计与日终对账、会话锁屏与水印、更新策略、远端通信三层抽象（HTTP/TCP/TLS）。
+
+**上生产还差 8 项阻断**，清单见 [docs/production-readiness.md](docs/production-readiness.md)。
+规模数字用 `npm run stats` 取，不手抄。
 
 ---
 
@@ -36,7 +39,7 @@ TellerKit/
 │       ├── src-tauri/            # AppState + IPC 命令
 │       └── dist/                 # 构建产物
 ├── packages/
-│   ├── core/                     # 纯 Rust 引擎，无 GUI 依赖，53 个测试
+│   ├── core/                     # 纯 Rust 引擎：菜单/权限/交易/设备/远端抽象
 │   │   ├── model.rs              # 菜单契约与结构校验
 │   │   ├── filter.rs             # filter_visible 递归剪枝
 │   │   ├── pack.rs               # .mtree 编解码 + Ed25519
@@ -171,7 +174,7 @@ npm run tauri:dev        # 开发模式（Vite + Tauri），在 apps/shell 内�
 ### 只用命令行验证核心逻辑
 
 ```bash
-cargo test --workspace             # 53 个测试：过滤、验签、篡改、原子替换、回滚、启动回退
+cargo test --workspace             # 全部单测（数字见 CI 与 `npm run stats`）
 bash scripts/verify-p0.sh          # P0 验收（含真实文件篡改）
 ```
 
