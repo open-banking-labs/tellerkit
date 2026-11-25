@@ -40,6 +40,7 @@ Windows / Ubuntu / macOS 产物都在那台机器上验证。本地只跑 `npm r
 | 业务包 | `packages/biz-*/` |
 | Agent 预设 | `.agents/presets/` |
 | 门禁与路径发现 | `tools/` |
+| Rust 写法 | `docs/rust-style.md`（Google Rust Style Guide 落地版） |
 
 ## 命令
 

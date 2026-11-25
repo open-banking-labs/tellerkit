@@ -97,7 +97,6 @@ pub struct DevState {
     pub offline: bool,
     pub tampered: bool,
     #[ts(type = "number")]
-    #[ts(type = "number")]
     pub server_version: u64,
     #[ts(type = "Array<number>")]
     pub local_versions: Vec<u64>,

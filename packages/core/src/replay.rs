@@ -108,10 +108,10 @@ impl ReplayScheduler {
         };
         // 先算退避再可变借用，避免同时借用 self 与 self.attempts。
         let next_at_secs = now_secs.saturating_add(self.backoff_for(attempts));
-        self.attempts
-            .get_mut(key)
-            .expect("record_failure 刚插入的条目必然存在")
-            .next_at_secs = next_at_secs;
+        // 用模式匹配而不是 expect：让编译器证明条目存在，而不是靠注释解释
+        if let Some(entry) = self.attempts.get_mut(key) {
+            entry.next_at_secs = next_at_secs;
+        }
         attempts
     }
 

@@ -169,14 +169,13 @@ impl MenuTree {
         }
         // Action 不能有子节点。
         for node in &self.nodes {
-            if node.node_type == NodeType::Action {
-                if self
+            if node.node_type == NodeType::Action
+                && self
                     .nodes
                     .iter()
                     .any(|n| n.parent_code.as_deref() == Some(node.code.as_str()))
-                {
-                    return Err(TreeError::ActionAsParent(node.code.clone()));
-                }
+            {
+                return Err(TreeError::ActionAsParent(node.code.clone()));
             }
         }
         Ok(())
