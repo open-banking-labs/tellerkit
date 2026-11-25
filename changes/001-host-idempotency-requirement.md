@@ -1,4 +1,4 @@
-# 001 契约需声明"主机按幂等键去重"
+# 001 契约需声明"主机按幂等键去重"（已实施）
 
 ## 现状
 
@@ -12,7 +12,15 @@
 
 两条路径都假定"服务端以幂等键去重"。如果服务端不去重，重放就会重复入账。
 
-## 建议
+## 落地情况（2026-11-25）
+
+- `contracts/lifecycle.md` 增加不变量 6、7；
+- `TxHost::supports_idempotency()` 默认 `false`，`RoutedBanking` 由配置 `idempotent_tx` 显式打开；
+- `ShellApp::submit_transaction` 在主机未声明幂等时**拒绝** `offline_capable`；
+- `fake-bank` 实现了真实去重，端到端用例证明"同键三次提交只入账一次、流水号相同"，
+  以及"未声明幂等的主机每次提交都扣账"（这就是客户端为什么必须拦）。
+
+## 建议（原始）
 
 在 `contracts/lifecycle.md` 增加一条不变量：
 

@@ -241,6 +241,22 @@ impl<'a> ShellApp<'a> {
     // ---------- 交易 ----------
 
     pub fn submit_transaction(&mut self, request: TxRequest) -> Result<TxResult, String> {
+        // 契约 lifecycle.md 不变量 7：主机没声明幂等，就不许离线挂起。
+        // 挂起意味着"以后一定会重发"，而重发只有服务端按幂等键去重才不会重复入账。
+        if request.offline_capable && !self.remote.supports_idempotency() {
+            let actor = self.actor();
+            let code = request.tx_code.clone();
+            self.audit(
+                &actor,
+                "submit_tx",
+                &code,
+                "failed",
+                "主机未声明幂等，拒绝离线挂起",
+            );
+            return Err(
+                "该主机未声明幂等支持，不能离线挂起交易（请联系管理员确认主机契约）".to_string(),
+            );
+        }
         let amount_cents = request.amount_cents;
         let code = request.tx_code.clone();
         let actor = self.actor();
@@ -533,6 +549,37 @@ mod tests {
         assert!(
             ShellApp::new(&mut state).session_tick().locked,
             "锁定状态应持续到显式解锁"
+        );
+    }
+
+    #[test]
+    fn offline_capable_is_refused_when_host_lacks_idempotency() {
+        // 主机声明"不支持幂等"：离线挂起意味着之后一定重发，重发就会重复入账
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let mut state = state_with(Arc::clone(&clock));
+        state.remote = Arc::new(tellerkit_core::banking::RoutedBanking::new(
+            tellerkit_core::remote::Router::new(vec![]),
+        ));
+
+        let mut req = TxRequest::new("account.deposit", "k-offline");
+        req.offline_capable = true;
+        let err = ShellApp::new(&mut state)
+            .submit_transaction(req)
+            .unwrap_err();
+        assert!(err.contains("未声明幂等"), "实际：{err}");
+
+        // 在线模式不走这条拦截：会一路到端点，端点不存在则是"主机拒绝"（交易结论），
+        // 不是 Err——状态机把失败表达成 TxResult，这一点不能被测试写反。
+        let mut online = TxRequest::new("account.deposit", "k-online");
+        online.offline_capable = false;
+        let result = ShellApp::new(&mut state)
+            .submit_transaction(online)
+            .expect("在线模式不应被幂等规则拦下");
+        assert_eq!(result.status, TxStatus::Rejected);
+        assert!(
+            result.message.contains("没有为该服务登记任何端点"),
+            "实际：{}",
+            result.message
         );
     }
 

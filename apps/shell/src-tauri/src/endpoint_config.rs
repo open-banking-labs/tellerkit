@@ -21,6 +21,18 @@ use tellerkit_transport_net::{HttpTransport, TcpTransport};
 #[derive(Debug, Deserialize)]
 pub struct EndpointConfig {
     pub services: BTreeMap<String, Vec<EndpointSpec>>,
+    /// 交易服务是否按幂等键去重（`changes/001`）。
+    ///
+    /// **默认 false**：没写就是没有。写错这一位会让离线挂起变成重复扣账。
+    #[serde(default)]
+    pub idempotent_tx: bool,
+}
+
+/// 加载结果：路由 + 交易服务是否声明幂等。
+#[derive(Debug)]
+pub struct LoadedEndpoints {
+    pub router: Router,
+    pub idempotent_tx: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,7 +74,7 @@ fn default_timeout() -> u64 {
 ///
 /// 顺序：先验签（如果要求），再解析。**先验签后解析**的原因：
 /// 未签名的配置可能被改成任意内容，解析它等于信任它。
-pub fn load_router(path: &Path) -> Result<Router, String> {
+pub fn load_router(path: &Path) -> Result<LoadedEndpoints, String> {
     load_router_with(path, &LoadPolicy::from_env())
 }
 
@@ -89,7 +101,7 @@ impl LoadPolicy {
     }
 }
 
-pub fn load_router_with(path: &Path, policy: &LoadPolicy) -> Result<Router, String> {
+pub fn load_router_with(path: &Path, policy: &LoadPolicy) -> Result<LoadedEndpoints, String> {
     let bytes =
         std::fs::read(path).map_err(|e| format!("读取端点配置失败（{}）：{e}", path.display()))?;
     let raw = String::from_utf8(bytes.clone()).map_err(|e| format!("端点配置不是 UTF-8：{e}"))?;
@@ -106,7 +118,7 @@ pub fn load_router_with(path: &Path, policy: &LoadPolicy) -> Result<Router, Stri
             .map_err(|e| format!("端点配置验签失败：{e}"))?;
     }
 
-    parse_with(&raw, policy.require_tls)
+    parse_full(&raw, policy.require_tls)
 }
 
 /// `endpoints.json` → `endpoints.json.sig`
@@ -117,11 +129,15 @@ fn signature_path(path: &Path) -> std::path::PathBuf {
 }
 
 pub fn parse(raw: &str) -> Result<Router, String> {
-    parse_with(raw, false)
+    parse_full(raw, false).map(|loaded| loaded.router)
 }
 
 /// `require_tls` 为真时拒绝一切 `http://` 端点（生产环境应打开）。
 pub fn parse_with(raw: &str, require_tls: bool) -> Result<Router, String> {
+    parse_full(raw, require_tls).map(|loaded| loaded.router)
+}
+
+pub fn parse_full(raw: &str, require_tls: bool) -> Result<LoadedEndpoints, String> {
     let config: EndpointConfig =
         serde_json::from_str(raw).map_err(|e| format!("端点配置不是合法 JSON：{e}"))?;
 
@@ -147,7 +163,10 @@ pub fn parse_with(raw: &str, require_tls: bool) -> Result<Router, String> {
             endpoints.push(build(service, spec)?);
         }
     }
-    Ok(Router::new(endpoints))
+    Ok(LoadedEndpoints {
+        router: Router::new(endpoints),
+        idempotent_tx: config.idempotent_tx,
+    })
 }
 
 fn build(service: &str, spec: &EndpointSpec) -> Result<Endpoint, String> {
@@ -270,6 +289,18 @@ mod tests {
             "fixed-width"
         );
         assert_eq!(router.endpoints_of("menu.core")[0].codec.name(), "json");
+    }
+
+    #[test]
+    fn idempotent_tx_defaults_to_false_and_can_be_enabled() {
+        let without = parse_full(OK, false).expect("合法");
+        assert!(!without.idempotent_tx, "没写就是没有");
+
+        let with = OK.replace(
+            "{\n      \"services\"",
+            "{\n      \"idempotent_tx\": true,\n      \"services\"",
+        );
+        assert!(parse_full(&with, false).expect("合法").idempotent_tx);
     }
 
     #[test]

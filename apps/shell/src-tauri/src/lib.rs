@@ -117,12 +117,15 @@ fn build_remote(
 
     if path.exists() {
         match endpoint_config::load_router(&path) {
-            Ok(router) => {
+            Ok(loaded) => {
                 let plaintext = !std::env::var("TK_REQUIRE_TLS")
                     .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                     .unwrap_or(false);
                 return (
-                    Arc::new(tellerkit_core::banking::RoutedBanking::new(router)),
+                    Arc::new(
+                        tellerkit_core::banking::RoutedBanking::new(loaded.router)
+                            .with_idempotency(loaded.idempotent_tx),
+                    ),
                     None,
                     Some(format!(
                         "已按 {} 接入真实端点{}",

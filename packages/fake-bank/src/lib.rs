@@ -27,6 +27,12 @@ pub struct FakeBankConfig {
     pub reject_reason: Option<String>,
     /// 收到多少次请求（按 op 累计）
     pub stats: Arc<Mutex<Vec<String>>>,
+    /// 是否按幂等键去重（真服务端必须这么做，见 `changes/001`）
+    pub idempotent: bool,
+    /// 幂等表：key → 流水号
+    pub accepted: Arc<Mutex<std::collections::BTreeMap<String, String>>>,
+    /// 实际"入账"次数。用来证明重复提交没有重复入账。
+    pub charged: Arc<Mutex<u32>>,
 }
 
 impl Default for FakeBankConfig {
@@ -36,6 +42,9 @@ impl Default for FakeBankConfig {
             pack_bytes: b"FAKE-MTREE-PACK".to_vec(),
             reject_reason: None,
             stats: Arc::new(Mutex::new(Vec::new())),
+            idempotent: true,
+            accepted: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            charged: Arc::new(Mutex::new(0)),
         }
     }
 }
@@ -184,7 +193,27 @@ fn serve_op(op: &str, request: &Value, config: &FakeBankConfig) -> Value {
                     .pointer("/payload/idempotency_key")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
-                json!({ "reference": format!("FAKE-{key}") })
+
+                if config.idempotent {
+                    if let Ok(mut map) = config.accepted.lock() {
+                        if let Some(existing) = map.get(key) {
+                            // 同键重复提交：返回同一个流水号，**不再入账**
+                            return json!({ "reference": existing });
+                        }
+                        let reference = format!("FAKE-{key}");
+                        map.insert(key.to_string(), reference.clone());
+                        if let Ok(mut n) = config.charged.lock() {
+                            *n += 1;
+                        }
+                        return json!({ "reference": reference });
+                    }
+                }
+
+                // 未声明幂等：每次都入账（用来证明客户端为什么不允许离线挂起）
+                if let Ok(mut n) = config.charged.lock() {
+                    *n += 1;
+                }
+                json!({ "reference": format!("FAKE-{key}-{}", *config.charged.lock().unwrap()) })
             }
         },
         _ => json!({ "code": "UNKNOWN_OP", "message": op }),
