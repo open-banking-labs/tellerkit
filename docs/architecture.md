@@ -87,6 +87,58 @@
 **读法**：想知道"提交交易"怎么走，看一行就知道它穿过了 UI 接口、一条 IPC 命令、
 一个用例、一个领域状态机、两个出站端口和一个远端端点。**不需要读实现。**
 
+## 3.1 远端通信：三层分离
+
+边界 ③ 不是一个 `HttpClient`，而是三层可独立替换的组合：
+
+```
+应用层调用   router.call(Request { service: "acct.core", op: "submit_tx", body })
+                │
+                ▼
+        Router（core::remote）  按 service 找端点，按 priority 主备切换，聚合失败原因
+                │
+        ┌───────┴────────┐
+        ▼                ▼
+   Codec            Transport
+   （报文长什么样）    （怎么送过去）
+   JsonCodec        TcpTransport（短连接 + 长度前缀）
+   FixedWidthCodec  HttpTransport（POST + Content-Length）
+                    MockTransport（测试）
+```
+
+**为什么必须分三层**：
+
+| 变化 | 只改哪层 |
+|---|---|
+| 后台从 REST 换成 TCP 自定义报文 | Transport + Codec，Router 与业务不动 |
+| 同一服务加一个备用机房 | 只加一条 `Endpoint`（改 priority） |
+| 报文从 JSON 改成定长 | 只换 Codec |
+| 某个业务模块走独立专线 | 给它单独的 service 名与端点 |
+
+### 一个业务模块对应多个服务端
+
+路由键是 **service**，不是模块名。所以：
+
+```rust
+// 账户模块：主用行内核心，备用同城灾备
+Endpoint { service: "acct.core",  addr: Http{..},   priority: 0, .. }
+Endpoint { service: "acct.core",  addr: Tcp{..},    priority: 1, .. }   // 换协议也能备
+// 同一个模块还要调卡系统：另一个 service，不同传输与编解码
+Endpoint { service: "card.auth",  addr: Tcp{..},    priority: 0, codec: FixedWidth, .. }
+```
+
+`Router::call` 只在**可重试**失败时切换（连接失败/超时），
+协议错误与服务端拒绝不切换——换台机器照样拒绝，切换只会把请求打到不该去的地方。
+
+### 编解码的两种形态
+
+- `JsonCodec`：`{"op":..., "payload":...}`，REST 后台；
+- `FixedWidthCodec`：`[4 字节长度][按 layout 拼接的字节定长字段]`，老系统报文。
+
+定长**按字节对齐**（不是字符数）。这条踩过坑：`format!("{:<8}", "柜面")` 按字符补齐，
+CJK 会算出 12 字节而不是 8，报文长度对不上。已加回归用例
+（`fixed_width_roundtrip_pads_numeric_and_text`）。
+
 ## 4. 三类 DTO 必须分开
 
 同一笔交易在三个边界上形状不同，混用会让某一侧的演进绑架另外两侧：
@@ -145,11 +197,12 @@
 | 项 | 现状 | 目标 | 严重度 |
 |---|---|---|---|
 | 用例层 | ✅ `app.rs::ShellApp`；`commands.rs` 只剩加锁 → 用例 → DTO 映射 | — | 完成 |
-| 远端端口 | ✅ `RemoteBanking` 已定义并接线（`ports.rs`），菜单/登录/交易全部走它 | 补 `HttpRemote` 适配器（按 `contracts/remote-api.md`） | 中 |
+| 远端端口 | ✅ `RemoteBanking` 已接线；底层已有 `Router` + `Transport` + `Codec` 三层 | 写 `RoutedBanking`（把 `RemoteBanking` 落到 Router 上） | 中 |
 | 时钟 | ✅ 注入到 `AppState.clock`，用例层只读端口；测试用冻结时钟验证 | — | 完成 |
 | 前端门面 | ✅ `platform/client.ts` 接口 + `tauri.ts`/`mock.ts` 两个实现；`check-boundaries` 强制"只有 tauri.ts 能碰 invoke" | — | 完成 |
 | IPC DTO 与领域类型 | ⚠️ 混用 | 保留混用但**记录理由**：DTO 已由 ts-rs 生成并门禁，加映射层会多一层无收益转换 | 低 |
-| 远端契约 | ✅ `contracts/remote-api.md`（含幂等、504 状态不明、错误模型） | 补 OpenAPI 生成（可选） | 完成 |
+| 远端契约 | ✅ `contracts/remote-api.md`（含幂等、504 状态不明、错误模型、端点绑定表） | 补 OpenAPI 生成（可选） | 完成 |
+| 远端三层 | ✅ `remote.rs`（Router/Codec/Transport）+ `transport-net`（TCP 短连接 / 最小 HTTP） | 写 `RoutedBanking` 把 `RemoteBanking` 落到 Router | 中 |
 
 ## 8. 可检查的规则（要加进门禁）
 

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true
 rmp-serde.workspace = true
 ed25519-dalek.workspace = true
 sha2.workspace = true
@@ -14,6 +15,5 @@ thiserror.workspace = true
 ts-rs.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
 rand.workspace = true
 tempfile = "3"
