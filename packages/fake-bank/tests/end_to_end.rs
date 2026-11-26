@@ -44,6 +44,8 @@ fn full_chain_reaches_a_real_backend_over_tcp() {
 
     let probe = banking.probe_menu().expect("探测菜单版本");
     assert_eq!(probe.latest(), 11);
+    assert_eq!(probe.shell_compat_min(), 1);
+    assert_eq!(probe.shell_compat_max(), 1);
 
     let snapshot = banking.login("teller", 1101).expect("登录");
     assert_eq!(snapshot.teller_no(), "T0231");
@@ -126,6 +128,11 @@ fn backend_down_falls_back_to_secondary_endpoint() {
             .and_then(|v| v.get("latest"))
             .and_then(|v| v.as_u64()),
         Some(7)
+    );
+    // 线上 JSON 形状也要对齐契约，而不是靠客户端的旧字段兼容兜住
+    assert_eq!(
+        probe.as_json().and_then(|v| v.get("shell_compat")),
+        Some(&serde_json::json!({ "min": 1, "max": 1 }))
     );
 }
 
