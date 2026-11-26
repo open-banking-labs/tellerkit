@@ -25,6 +25,8 @@ const query = ref("");
 const logs = ref<LogEntry[]>([]);
 const busy = ref(false);
 const fatal = ref("");
+const loginError = ref("");
+const logoutError = ref("");
 const dev = ref<DevState | null>(null);
 const update = ref<UpdateReport | null>(null);
 /** 开发构建才显示演示开关；后端 `dev_only()` 也会拒绝，两层防护。 */
@@ -162,6 +164,7 @@ async function init(): Promise<void> {
 async function login(roleId: string): Promise<void> {
   if (busy.value) return;
   busy.value = true;
+  loginError.value = "";
   try {
     const res = await api.login(roleId);
     session.value = res;
@@ -177,17 +180,29 @@ async function login(roleId: string): Promise<void> {
     startSessionWatch();
     touchSession();
   } catch (err) {
-    log("error", `登录失败：${err}`);
+    const message = `登录失败：${String(err)}`;
+    loginError.value = message;
+    log("error", message);
   } finally {
     busy.value = false;
   }
 }
 
 async function logout(): Promise<void> {
+  try {
+    await api.logout();
+  } catch (err) {
+    // 登出命令失败就保留会话与锁定态，绝不假装已经退出。
+    const message = `登出失败，会话仍保持原状：${String(err)}`;
+    logoutError.value = message;
+    log("error", message);
+    return;
+  }
   window.clearInterval(sessionTimer);
+  sessionTimer = undefined;
+  logoutError.value = "";
   locked.value = false;
   lockReason.value = null;
-  await api.logout();
   session.value = null;
   selected.value = null;
   expanded.value = new Set();
@@ -470,10 +485,17 @@ onUnmounted(() => {
   </div>
 
   <div v-else-if="phase === 'login' || phase === 'error'" class="login-wrap">
-    <LoginView :boot="bootInfo" :busy="busy" :error="fatal" @select="login" />
+    <LoginView
+      :boot="bootInfo"
+      :busy="busy"
+      :error="fatal"
+      :login-error="loginError"
+      @select="login"
+    />
   </div>
 
   <div v-else class="shell">
+    <p v-if="logoutError" class="error-box" role="alert">{{ logoutError }}</p>
     <header class="topbar">
       <div class="brand">TellerKit <small>柜面终端 · P0</small></div>
       <span class="chip" :class="bootInfo?.load.source === 'local' ? 'ok' : 'warn'">
@@ -595,6 +617,7 @@ onUnmounted(() => {
     <LockScreen
       v-if="locked"
       :reason="lockReason"
+      :error="logoutError"
       @reauth="logout"
     />
 
