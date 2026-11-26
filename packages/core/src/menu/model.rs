@@ -6,7 +6,7 @@
 //! - 全量树服务所有角色；权限差异只体现在 `PermSnapshot`，不存在"按角色打包"。
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use ts_rs::TS;
 
 /// 节点类型。`Group` 只是容器，`Page` 可导航，`Action` 是按钮级权限点。
@@ -217,6 +217,7 @@ impl MenuTree {
         &self.nodes
     }
 
+    #[cfg(test)]
     pub(crate) fn nodes_mut(&mut self) -> &mut Vec<MenuNode> {
         &mut self.nodes
     }
@@ -270,23 +271,8 @@ impl MenuTree {
         Ok(())
     }
 
-    /// 按 code 建立索引。
-    pub(crate) fn index(&self) -> HashMap<&str, &MenuNode> {
-        self.nodes.iter().map(|n| (n.code.as_str(), n)).collect()
-    }
-
-    /// 根节点（parent 为空），按 sort 排序。
-    pub(crate) fn roots(&self) -> Vec<&MenuNode> {
-        let mut out: Vec<&MenuNode> = self
-            .nodes
-            .iter()
-            .filter(|n| n.parent_code.is_none())
-            .collect();
-        sort_nodes(&mut out);
-        out
-    }
-
-    /// 指定父节点的直接子节点，按 sort 排序。
+    /// 指定父节点的直接子节点，按 sort 排序（仅测试用）。
+    #[cfg(test)]
     pub(crate) fn children_of(&self, parent: &str) -> Vec<&MenuNode> {
         let mut out: Vec<&MenuNode> = self
             .nodes
@@ -313,16 +299,9 @@ impl MenuTree {
         }
         rejected
     }
-
-    /// 导出 code -> title 映射，便于审计日志记录"用户点了什么"。
-    pub(crate) fn title_map(&self) -> BTreeMap<&str, &str> {
-        self.nodes
-            .iter()
-            .map(|n| (n.code.as_str(), n.title.as_str()))
-            .collect()
-    }
 }
 
+#[cfg(test)]
 fn sort_nodes(nodes: &mut Vec<&MenuNode>) {
     nodes.sort_by(|a, b| a.sort.cmp(&b.sort).then_with(|| a.code.cmp(&b.code)));
 }

@@ -20,7 +20,7 @@ use crate::menu::pack::{self, MenuPack, PackError};
 use ed25519_dalek::VerifyingKey;
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const PREFIX: &str = "menu.";
 const SUFFIX: &str = ".mtree";
@@ -95,19 +95,6 @@ impl MenuStore {
             pubkey,
             keep: 2,
         }
-    }
-
-    pub(crate) fn with_keep(mut self, keep: usize) -> Self {
-        self.keep = keep.max(1);
-        self
-    }
-
-    pub(crate) fn dir(&self) -> &Path {
-        &self.dir
-    }
-
-    pub(crate) fn pubkey(&self) -> &VerifyingKey {
-        &self.pubkey
     }
 
     fn ensure_dir(&self) -> Result<(), StoreError> {

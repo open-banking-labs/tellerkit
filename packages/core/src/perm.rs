@@ -35,6 +35,7 @@ pub struct PermSnapshot {
 }
 
 impl PermSnapshot {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         user_id: &str,
         teller_no: &str,
