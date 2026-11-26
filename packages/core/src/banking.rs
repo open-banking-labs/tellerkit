@@ -48,6 +48,8 @@ impl MenuVersionProbe {
 pub enum RemoteError {
     #[error("服务端不可达：{0}")]
     Unavailable(String),
+    #[error("服务端超时，状态不明：{0}")]
+    Timeout(String),
     #[error("服务端拒绝：{0}")]
     Rejected(String),
     #[error("登录已失效，请重新登录")]
@@ -173,9 +175,55 @@ impl RoutedBanking {
             .ok_or_else(|| RemoteError::Rejected(format!("{service}/{op} 返回的不是 JSON")))?;
         // 服务端用 `{"error": {"code","message","retryable"}}` 表达业务失败
         if let Some(err) = value.get("error") {
-            return Err(RemoteError::Rejected(error_message(err)));
+            return Err(classify_envelope(err).into_remote());
         }
         Ok(value)
+    }
+}
+
+/// 错误信封的处置分类。`RemoteError` 与 `HostError` 两个出口共用，避免同一错误码
+/// 在一处是拒绝、另一处是超时。
+enum EnvelopeFailure {
+    Rejected(String),
+    Timeout(String),
+    Unavailable(String),
+}
+
+impl EnvelopeFailure {
+    fn into_remote(self) -> RemoteError {
+        match self {
+            Self::Rejected(msg) => RemoteError::Rejected(msg),
+            Self::Timeout(msg) => RemoteError::Timeout(msg),
+            Self::Unavailable(msg) => RemoteError::Unavailable(msg),
+        }
+    }
+
+    fn into_host(self) -> HostError {
+        match self {
+            Self::Rejected(msg) => HostError::Rejected(msg),
+            Self::Timeout(_) => HostError::Timeout,
+            Self::Unavailable(_) => HostError::Unavailable,
+        }
+    }
+}
+
+/// 契约按 `code` 分支（contracts/remote-api.md）；`retryable` 只作兜底。
+/// 未知码保守按拒绝处理，但把码带进文案，排障时才看得出是哪个新码。
+fn classify_envelope(err: &serde_json::Value) -> EnvelopeFailure {
+    let code = err.get("code").and_then(|v| v.as_str()).unwrap_or("");
+    let msg = error_message(err);
+    match code {
+        "TX_DUPLICATE_KEY" | "TX_REJECTED" => EnvelopeFailure::Rejected(msg),
+        "GATEWAY_TIMEOUT" => EnvelopeFailure::Timeout(msg),
+        "SERVICE_UNAVAILABLE" => EnvelopeFailure::Unavailable(msg),
+        _ if err
+            .get("retryable")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false) =>
+        {
+            EnvelopeFailure::Unavailable(msg)
+        }
+        _ => EnvelopeFailure::Rejected(format!("{msg}（未知错误码：{code}）")),
     }
 }
 
@@ -189,7 +237,9 @@ fn error_message(err: &serde_json::Value) -> String {
 }
 
 fn remote_err(e: RouteError) -> RemoteError {
-    if e.retryable() {
+    if e.timed_out() {
+        RemoteError::Timeout(e.detail().to_string())
+    } else if e.retryable() {
         RemoteError::Unavailable(e.detail().to_string())
     } else {
         RemoteError::Rejected(e.detail().to_string())
@@ -265,13 +315,14 @@ impl TxHost for RoutedBanking {
                 };
                 // 先看错误信封，再看成功字段：否则业务拒绝会被误报成"缺 reference"
                 if let Some(err) = value.get("error") {
-                    return Err(HostError::Rejected(error_message(err)));
+                    return Err(classify_envelope(err).into_host());
                 }
                 match value.get("reference") {
                     Some(serde_json::Value::String(r)) => Ok(r.clone()),
                     _ => Err(HostError::Rejected("主机响应缺少 reference".to_string())),
                 }
             }
+            Err(e) if e.timed_out() => Err(HostError::Timeout),
             Err(e) if e.retryable() => Err(HostError::Unavailable),
             Err(e) => Err(HostError::Rejected(e.detail().to_string())),
         }
@@ -282,6 +333,7 @@ impl TxHost for RoutedBanking {
 mod tests {
     use super::*;
     use crate::remote::{Codec, Endpoint, EndpointAddr, JsonCodec, MockTransport, Transport};
+    use crate::tx::{TxEngine, TxStatus};
     use std::sync::Arc;
 
     fn endpoint(service: &str, transport: Arc<dyn Transport>, codec: Arc<dyn Codec>) -> Endpoint {
@@ -301,6 +353,21 @@ mod tests {
     /// 把 JSON 响应包成 WireMessage（模拟后台返回）。
     fn reply(value: serde_json::Value) -> crate::remote::WireMessage {
         crate::remote::WireMessage::new(Default::default(), serde_json::to_vec(&value).unwrap())
+    }
+
+    fn banking_with(transport: Arc<dyn Transport>) -> RoutedBanking {
+        RoutedBanking::new(Router::new(vec![endpoint(
+            "acct.core",
+            transport,
+            Arc::new(JsonCodec),
+        )]))
+    }
+
+    fn status(code: u16) -> crate::remote::TransportError {
+        crate::remote::TransportError::Status {
+            code,
+            body: format!("HTTP {code}"),
+        }
     }
 
     #[test]
@@ -461,5 +528,122 @@ mod tests {
             .submit(&TxRequest::new("account.deposit", "k1"))
             .unwrap_err();
         assert!(err.to_string().contains("reference"));
+    }
+
+    #[test]
+    fn status_503_becomes_host_unavailable_not_rejected() {
+        let banking = banking_with(Arc::new(MockTransport::new("acct", vec![Err(status(503))])));
+
+        assert_eq!(
+            banking.submit(&TxRequest::new("account.deposit", "k-503")),
+            Err(HostError::Unavailable)
+        );
+    }
+
+    #[test]
+    fn status_504_becomes_marked_for_reversal_not_rejected() {
+        let banking = banking_with(Arc::new(MockTransport::new("acct", vec![Err(status(504))])));
+        let mut engine = TxEngine::new();
+
+        let result = engine.submit(&banking, TxRequest::new("account.deposit", "k-504"));
+
+        assert_eq!(result.status(), TxStatus::MarkedForReversal);
+        assert!(result.message().contains("待冲正"));
+    }
+
+    #[test]
+    fn status_409_is_rejected_without_switching_endpoint() {
+        let primary = Arc::new(MockTransport::new("http", vec![Err(status(409))]));
+        let secondary = Arc::new(MockTransport::echoing("http"));
+        let banking = RoutedBanking::new(Router::new(vec![
+            endpoint("acct.core", primary, Arc::new(JsonCodec)),
+            endpoint("acct.core", secondary.clone(), Arc::new(JsonCodec)),
+        ]));
+
+        let err = banking
+            .submit(&TxRequest::new("account.deposit", "k-409"))
+            .unwrap_err();
+        match err {
+            HostError::Rejected(msg) => assert!(msg.contains("409")),
+            other => panic!("应映射为 Rejected，实际 {other:?}"),
+        }
+        assert_eq!(secondary.calls(), 0, "4xx 不得切端点");
+    }
+
+    #[test]
+    fn gateway_timeout_envelope_is_marked_for_reversal() {
+        let banking = banking_with(Arc::new(MockTransport::new(
+            "acct",
+            vec![Ok(reply(serde_json::json!({
+                "payload": { "error": {
+                    "code": "GATEWAY_TIMEOUT", "message": "上游超时" }
+                }
+            })))],
+        )));
+        let mut engine = TxEngine::new();
+
+        let result = engine.submit(&banking, TxRequest::new("account.deposit", "k-gt"));
+
+        assert_eq!(result.status(), TxStatus::MarkedForReversal);
+    }
+
+    #[test]
+    fn error_envelope_codes_follow_the_contract() {
+        let cases = [
+            (
+                "TX_DUPLICATE_KEY",
+                "重复键",
+                HostError::Rejected("重复键".into()),
+            ),
+            (
+                "TX_REJECTED",
+                "余额不足",
+                HostError::Rejected("余额不足".into()),
+            ),
+            ("GATEWAY_TIMEOUT", "上游超时", HostError::Timeout),
+            ("SERVICE_UNAVAILABLE", "稍后再试", HostError::Unavailable),
+            (
+                "FUTURE_CODE",
+                "新错误",
+                HostError::Rejected("新错误（未知错误码：FUTURE_CODE）".into()),
+            ),
+        ];
+
+        for (code, message, expected) in cases {
+            let banking = banking_with(Arc::new(MockTransport::new(
+                "acct",
+                vec![Ok(reply(serde_json::json!({
+                    "payload": { "error": { "code": code, "message": message } }
+                })))],
+            )));
+            let err = banking
+                .submit(&TxRequest::new("account.deposit", "k-codes"))
+                .unwrap_err();
+            assert_eq!(err, expected, "code={code}");
+        }
+    }
+
+    #[test]
+    fn retry_after_504_reaches_host_with_the_same_key() {
+        let acct = Arc::new(MockTransport::new(
+            "acct",
+            vec![
+                Err(status(504)),
+                Ok(reply(serde_json::json!({
+                    "payload": { "reference": "TX-RECOVERED" }
+                }))),
+            ],
+        ));
+        let banking = banking_with(acct.clone());
+        let mut engine = TxEngine::new();
+        let request = TxRequest::new("account.deposit", "k-retry-504");
+
+        let first = engine.submit(&banking, request.clone());
+        assert_eq!(first.status(), TxStatus::MarkedForReversal);
+
+        let second = engine.submit(&banking, request);
+        assert_eq!(second.status(), TxStatus::Committed);
+        assert_eq!(second.reference(), Some("TX-RECOVERED"));
+        assert_eq!(acct.calls(), 2, "504 后同键重试必须再次打到主机");
     }
 }
