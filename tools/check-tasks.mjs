@@ -87,18 +87,34 @@ function scenariosOf(specText) {
 }
 
 /**
- * 契约任务必须由人走提案。机器能查的只有"有没有留下提案痕迹"：
- * tasks.md 写明「提案」，或 changes/ 里的提案提到了这个任务 ID。
+ * 契约任务必须由人走提案。机器能查的只有一件事：changes/*.md 里有没有
+ * 出现这个任务的 ID；tasks.md 里写「提案」两个字不算证据。
  */
-function proposalsMention(taskIds) {
+function proposalsMention(taskId) {
   const dir = join(ROOT, "changes");
   if (!existsSync(dir)) return false;
+  const re = new RegExp(`\\b${taskId}\\b`);
   for (const name of readdirSync(dir)) {
     if (name === "README.md" || !name.endsWith(".md")) continue;
-    const text = read(join(dir, name));
-    if (taskIds.some((taskId) => text.includes(taskId))) return true;
+    if (re.test(read(join(dir, name)))) return true;
   }
   return false;
+}
+
+/** 空规格目录不能默认通过：必须有一份显式、带理由的基线。 */
+function emptySpecsAllowed() {
+  const path = join(ROOT, "tools/tasks-baseline.json");
+  if (!existsSync(path)) return false;
+  try {
+    const baseline = JSON.parse(read(path));
+    return (
+      baseline.allowEmptySpecs === true &&
+      typeof baseline.reason === "string" &&
+      baseline.reason.trim().length > 0
+    );
+  } catch {
+    return false;
+  }
 }
 
 function listSpecDirs() {
@@ -112,7 +128,14 @@ function listSpecDirs() {
 
 const specDirs = listSpecDirs();
 if (specDirs.length === 0) {
-  console.log("✓ check-tasks 通过（0 个能力：.specify/specs/ 下暂无规格目录，起步阶段允许为空）");
+  if (!emptySpecsAllowed()) {
+    console.error(
+      "\n✗ check-tasks 失败\n  • .specify/specs/ 为空：起步阶段也要有至少一份规格；" +
+        "确需空跑，须在 tools/tasks-baseline.json 写明 allowEmptySpecs: true 与非空 reason。\n",
+    );
+    process.exit(1);
+  }
+  console.log("✓ check-tasks 通过（0 个能力：tools/tasks-baseline.json 显式允许空规格）");
   process.exit(0);
 }
 
@@ -243,12 +266,12 @@ for (const dir of specDirs) {
   }
 
   if (contractTasks.length) {
-    const ids = contractTasks.filter((task) => /^T-\d+$/.test(task));
-    const hasProposal = tasksText.includes("提案") || (ids.length > 0 && proposalsMention(ids));
-    if (!hasProposal) {
-      for (const task of contractTasks) {
+    for (const task of contractTasks) {
+      if (!/^T-\d+$/.test(task)) {
+        errors.push(`${tasksRel} ${task} 是 contract 层任务但没有合法 T-NN ID，无法核对提案`);
+      } else if (!proposalsMention(task)) {
         errors.push(
-          `${tasksRel} ${task} 是 contract 层任务，但没有出现在 changes/ 提案里：契约只能由人走提案修改，AI 不得执行`,
+          `${tasksRel} ${task} 是 contract 层任务，但 changes/*.md 里找不到该任务 ID：契约只能由人走提案修改，AI 不得执行`,
         );
       }
     }

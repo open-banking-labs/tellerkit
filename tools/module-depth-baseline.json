@@ -1,0 +1,19 @@
+{
+  "$comment": "模块深度存量债务基线：逐文件计数。strict 只在计数变差时失败；降低计数请同步更新本文件并说明原因。",
+  "pub_fields": {
+    "apps/shell/src-tauri/src/bootstrap.rs": 1
+  },
+  "pub_fns": {
+    "packages/core/src/pkg.rs": 30,
+    "apps/shell/src-tauri/src/commands.rs": 23,
+    "packages/core/src/device.rs": 20,
+    "apps/shell/src-tauri/src/app.rs": 19,
+    "packages/core/src/tx.rs": 16,
+    "packages/core/src/mock.rs": 15,
+    "packages/core/src/remote.rs": 15
+  },
+  "pub_mods": {
+    "packages/core/src/lib.rs": 11,
+    "apps/shell/src-tauri/src/lib.rs": 6
+  }
+}

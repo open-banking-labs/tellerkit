@@ -54,12 +54,14 @@ npm run tauri:dev          # 真实窗口；验签/会话/设备必须在这里�
 npm run gate               # 本地静态预检（见下方说明）
 ```
 
-`gate` = 七道检查（层级边界 / 契约一致 / 任务结构 / AI 规则 / 轨迹留痕 / 银行名称 / 版本一致）+ `cargo fmt`。
+`gate` = 八道静态检查（层级边界 / 契约一致 / 任务结构 / AI 规则 / 轨迹留痕 / 银行名称 / 版本一致 /
+模块深度 strict 基线）+ `cargo fmt --check`。模块深度按 `tools/module-depth-baseline.json` 只拦新增回归。
 提交前另有 `.githooks/pre-commit` 只跑银行名称这一道；安装：`git config core.hooksPath .githooks`。
 
 **裁决口径**：`npm run gate` 只做静态预检，exit 0 不代表编译或测试通过。
-合并以分支保护要求的 CI checks 为准（test / clippy / bindings / build / gate 全绿）；
-本机按编译纪律不跑 cargo，完整结论看 CI。理由见 [changes/015-gate-adjudication.md](changes/015-gate-adjudication.md)。
+合并裁决 = 分支保护要求的 CI checks（test / clippy / bindings / build / gate 全绿）；
+CI 还检查 `contracts/**` 有变更时必须新增 `changes/*.md` 提案。
+本机按编译纪律不跑 cargo，完整结论看 CI。理由见 [changes/018-adjudication.md](changes/018-adjudication.md)。
 
 首次启动会用 mock 服务端拉一个菜单包，之后断网可启动：
 
@@ -109,7 +111,7 @@ L4 领域   packages/core           纯 Rust，无 GUI / DB / 网络依赖
 逐级下发的阅读顺序：根 `AGENTS.md` → `docs/constitution.md` → 目标目录最近的 `AGENTS.md`
 → 该目录 `README.md`。规则只写一处，本文件不重复。
 
-人：改动走 PR，`gate` 通过才能合并；要改契约先写 `changes/` 提案。
+人：改动走 PR，CI required checks 全绿才能合并（`gate` 只是静态预检）；要改契约先写 `changes/` 提案。
 
 ## 许可
 

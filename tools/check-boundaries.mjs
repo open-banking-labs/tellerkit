@@ -5,16 +5,16 @@
  * 对应宪法第 2 条。检查"谁能 import 谁"——这是 AI 生成时最容易破坏、
  * 又最难靠肉眼 code review 发现的一类问题。
  */
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  ROOT,
   rel,
   posix,
   apps,
   packages,
   frontendFiles,
   rustFiles,
+  shellRustFiles,
   commandFiles,
   packageSrcDirs,
 } from "./paths.mjs";
@@ -56,9 +56,10 @@ for (const file of frontendFiles) {
 }
 
 // 规则 1.8：边界 ② —— 命令层只做映射，不得直接调领域编排（docs/architecture.md §2）
-const COMMAND_FILE = "apps/shell/src-tauri/src/commands.rs";
-// 匹配调用而不是 import：类型导入是允许的（MenuView 本身就是 DTO 字段）。
-// 用正则匹配任意模块路径形式，避免 `use ... as s; s::boot_load(` 绕过纯字符串匹配（D-02）。
+//
+// 按文件名找 commands.rs 很容易绕：新增 dev_commands.rs / foo.rs 就漏检。
+// 这里扫描 shell 下全部 .rs；唯一例外是 app.rs——它被架构指定为编排层。
+// 同时识别 `use tellerkit_core::boot_load as b;` 后的裸调用 `b(...)`。
 const FORBIDDEN_IN_COMMANDS = [
   ["boot_load", "用例编排应放在 app.rs"],
   ["check_and_update", "用例编排应放在 app.rs"],
@@ -75,14 +76,41 @@ const FORBIDDEN_IN_COMMANDS = [
   name,
   why,
 ]);
-{
-  const target = join(ROOT, COMMAND_FILE);
-  if (existsSync(target)) {
-    const text = read(target);
-    for (const [re, name, why] of FORBIDDEN_IN_COMMANDS) {
-      if (re.test(text)) {
-        errors.push(`${COMMAND_FILE} 出现了 ${name}() 调用：${why}（命令层只做加锁 → 用例 → DTO 映射）`);
-      }
+const BANNED_NAMES = new Set(FORBIDDEN_IN_COMMANDS.map(([, name]) => name));
+function localAliases(code) {
+  const aliases = [];
+  for (const stmt of code.matchAll(/^\s*use\s+([^;]+);/gm)) {
+    for (const raw of stmt[1].split(/[{},]/)) {
+      const part = raw.trim();
+      if (!part) continue;
+      const as = /^([\w:]+)\s+as\s+(\w+)$/.exec(part);
+      const imported = (as ? as[1] : part).split("::").pop();
+      if (BANNED_NAMES.has(imported)) aliases.push({ imported, local: as ? as[2] : imported });
+    }
+  }
+  return aliases;
+}
+let commandLayerFiles = 0;
+for (const file of shellRustFiles) {
+  if (posix(file).endsWith("/app.rs")) continue; // 编排层，允许出现这些调用
+  commandLayerFiles++;
+  const raw = read(file);
+  const idx = raw.indexOf("#[cfg(test)]");
+  const text = idx >= 0 ? raw.slice(0, idx) : raw;
+  // 压平空白后匹配裸调用：既容忍换行，又用负向 lookbehind 排除 fn b( 这类定义。
+  const flat = text.replace(/\s+/g, " ");
+  for (const [re, name, why] of FORBIDDEN_IN_COMMANDS) {
+    if (re.test(text)) {
+      errors.push(
+        `${rel(file)} 出现了 ${name}() 调用：${why}（命令层只做加锁 → 用例 → DTO 映射）`,
+      );
+    }
+  }
+  for (const { imported, local } of localAliases(text)) {
+    if (new RegExp(`(?<![A-Za-z0-9_])(?<!fn )${local}\\s*\\(`).test(flat)) {
+      errors.push(
+        `${rel(file)} 裸调用了别名 ${local}()（${imported}）：${FORBIDDEN_IN_COMMANDS.find(([, n]) => n === imported)[2]}（命令层只做映射）`,
+      );
     }
   }
 }
@@ -182,5 +210,5 @@ if (errors.length) {
 }
 
 console.log(
-  `✓ check-boundaries 通过（${apps.length} 个 app、${packages.length} 个 package、${frontendFiles.length} 个前端文件、${rustFiles.length} 个 Rust 文件）`,
+  `✓ check-boundaries 通过（${apps.length} 个 app、${packages.length} 个 package、${frontendFiles.length} 个前端文件、${rustFiles.length} 个 Rust 文件；命令层规则扫了 ${commandLayerFiles} 个 shell .rs）`,
 );

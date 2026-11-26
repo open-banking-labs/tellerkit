@@ -1,7 +1,8 @@
 # 上生产前置条件
 
 > 状态：**未就绪**。本表是唯一的阻断清单，评审/上线前逐条核对。
-> 数字口径见 `npm run stats`；门禁与测试以 `npm run gate` 退出码为准。
+> 数字口径见 `npm run stats`；`npm run gate` 只是静态预检（exit 0 不等于编译/测试通过）；
+> 合并裁决 = CI required checks（test / clippy / bindings / build / gate 全绿）。
 
 ## 1. 一句话
 
@@ -34,10 +35,12 @@
 ## 4. 上线前必须跑的三件事
 
 ```bash
-npm run gate          # 六道门禁（含 clippy、轨迹）
+npm run gate          # 本地静态预检（8 道 node 检查 + cargo fmt；exit 0 不代表编译/测试通过）
 npm run stats         # 数字口径，用于对外材料
 bash scripts/verify-p0.sh   # 端到端验收
 ```
+
+**合并裁决 = CI required checks 全绿**（test / clippy / bindings / build / gate）；上生产还要看下面 B1–B8。
 
 加一条人工项：**在目标 Windows 机器上装一版，用真实网络与真实主机跑一笔完整交易**
 （提交 → 打印 → 冲正 → 对账）。这一条无法自动化，因为前三项阻断（B1–B3）都在远端。

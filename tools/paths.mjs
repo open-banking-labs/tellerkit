@@ -66,6 +66,8 @@ export const rustFiles = [
 /** ts-rs 生成物目录（每个 app 一份） */
 export const generatedDirs = frontendDirs.map((d) => join(d, "generated")).filter(exists);
 
+export const shellRustFiles = shellRustDirs.flatMap((d) => walk(d)).filter((f) => f.endsWith(".rs"));
+
 /**
  * 命令层文件。
  *
