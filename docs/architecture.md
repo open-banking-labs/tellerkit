@@ -233,10 +233,13 @@ RoutedBanking → Router → TcpTransport → 假后台（真 socket）
 
 ## 8. 可检查的规则（要加进门禁）
 
+> 口径：`npm run gate` 是本地静态预检，exit 0 不等于编译/测试通过；合并裁决 = CI required checks
+> （test / clippy / bindings / build / gate 全绿）。CI 另检查 `contracts/**` 变更必须带新增提案。
+
 | 规则 | 检查方式 |
 |---|---|
 | L1 不得出现命令名字符串 | ✅ 已实现：`src/**` 禁止 `@tauri-apps/api` 与 `invoke(`，只有 `platform/tauri.ts` 例外 |
-| L2 不得直接调领域函数做编排 | ✅ 已实现：`check-boundaries` 禁止 `commands.rs` 出现 `sync::boot_load(`/`filter::filter_visible(`/`pkg::scan_dir(`/`run_once(`/`.ensure_allowed(` |
+| L2 不得直接调领域函数做编排 | ✅ 已实现：`check-boundaries` 扫描 shell 下全部 `.rs`（`app.rs` 是指定编排层），禁止 `boot_load(` / `filter_visible(` / `scan_dir(` / `run_once(` / `.ensure_allowed(` 及 `use ... as` 别名后的裸调用 |
 | L3 不得依赖具体适配器 | ⚠️ 待补：`app.rs` 目前仍直接调 `state.tx`/`state.devices`（它们是端口实例，可以接受，但需在评审时确认） |
 | L4 不得引入 IO | 已有：core 不得依赖 tauri；扩展为禁止 `std::fs`/`std::net` |
 

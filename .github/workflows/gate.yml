@@ -1,6 +1,7 @@
 name: gate
 
-# CI 与本地跑同一条命令：npm run gate。
+# gate 是本地静态预检：exit 0 只代表静态检查通过，不代表编译/测试通过。
+# 合并裁决 = 分支保护要求的 CI checks（test / clippy / bindings / build / gate 全绿）。
 # 门禁结论只认 exit code，不认任何人的"已通过"。
 
 on:
@@ -15,6 +16,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 变更保护要能拿到 PR base / push before 那次提交
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -29,6 +33,34 @@ jobs:
 
       - name: 安装依赖
         run: npm ci
+
+      # 宪法第 1 条：契约只能由人改，且必须留下提案。PR 用 base.sha，
+      # push 用 event.before；取不到基线（新分支/浅克隆）时退回 HEAD^。
+      - name: 契约变更必须带提案
+        shell: bash
+        run: |
+          set -eu
+          base="${{ github.event.pull_request.base.sha }}"
+          if [ -z "$base" ] || [[ "$base" =~ ^0+$ ]]; then
+            base="${{ github.event.before }}"
+          fi
+          if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null || ! git merge-base --is-ancestor "$base" HEAD 2>/dev/null; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          echo "契约 diff 基线：$base"
+          changed="$(git diff --name-only "$base" HEAD -- contracts || true)"
+          if [ -n "$changed" ]; then
+            echo "本次改动了 contracts/："
+            echo "$changed"
+            proposals="$(git diff --diff-filter=A --name-only "$base" HEAD -- changes | grep -E '^changes/[^/]+\.md$' || true)"
+            if [ -z "$proposals" ]; then
+              echo "::error::contracts/** 有变更但没有新增 changes/*.md 提案（宪法第 1 条）"
+              exit 1
+            fi
+            echo "已新增提案：$proposals"
+          else
+            echo "contracts/** 未变更"
+          fi
 
       - name: 核心逻辑测试
         run: cargo test --workspace --locked
