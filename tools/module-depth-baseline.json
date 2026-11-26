@@ -12,7 +12,7 @@
     "packages/core/src/mock.rs": 15,
     "packages/core/src/remote.rs": 15,
     "packages/core/src/replay.rs": 15,
-    "packages/core/src/reversal.rs": 15
+    "packages/core/src/reversal.rs": 16
   },
   "pub_mods": {
     "packages/core/src/lib.rs": 11,

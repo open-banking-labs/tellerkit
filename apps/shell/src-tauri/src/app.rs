@@ -625,41 +625,64 @@ impl<'a> ShellApp<'a> {
     }
 
     /// 申请冲正：本地授权 → 主机受理 → 拿到流水号后才算处置完成。
+    /// 已授权但未确认的申请可直接重试，原授权记录不撤销、不重复申请。
     pub fn request_reversal(&mut self, key: &str, reason: &str) -> Result<String, String> {
         self.require_unlocked("reversal")?;
         self.require_auditable("reversal", key)?;
         let actor = self.actor();
-        let request = ReversalRequest::new(key, &actor, "", 0, reason);
+        let is_retry = self.state.reversal.awaiting_confirmation_of(key).is_some();
+        let audit_action = if is_retry {
+            "reversal/retry"
+        } else {
+            "reversal"
+        };
 
-        // 1. 授权（当前是演示主管；接 IAM 后换成真实授权端口）
-        if let Err(e) = self.state.reversal.request(&request, &DemoSupervisor) {
-            let result = match &e {
-                ReversalError::NotAuthorized(_) | ReversalError::SelfApproval(_) => "denied",
-                _ => "failed",
-            };
-            let why = e.to_string();
-            let err = self.audit_and_error(
-                &actor,
-                "reversal",
-                key,
-                result,
-                &why,
-                format!("冲正申请未通过：{why}"),
-            );
-            return Err(err);
+        // 1. 首次申请才需要授权；重试沿用同一条凭证与同一个幂等键。
+        if !is_retry {
+            let request = ReversalRequest::new(key, &actor, "", 0, reason);
+            // 授权（当前是演示主管；接 IAM 后换成真实授权端口）
+            if let Err(e) = self.state.reversal.request(&request, &DemoSupervisor) {
+                let result = match &e {
+                    ReversalError::NotAuthorized(_) | ReversalError::SelfApproval(_) => "denied",
+                    _ => "failed",
+                };
+                let why = e.to_string();
+                let err = self.audit_and_error(
+                    &actor,
+                    audit_action,
+                    key,
+                    result,
+                    &why,
+                    format!("冲正申请未通过：{why}"),
+                );
+                return Err(err);
+            }
         }
 
-        // 2. 主机受理。失败时保留"已授权未确认"，柜员可以重试
+        // 2. 主机受理。失败时保留"已授权未确认"，柜员仍可重试
         let host_reference = match self.remote.reverse(key, reason) {
             Ok(reference) => reference,
             Err(e) => {
                 let why = e.to_string();
+                if is_retry {
+                    let err = self.audit_and_error(
+                        &actor,
+                        audit_action,
+                        key,
+                        "failed",
+                        &why,
+                        format!(
+                            "冲正已获授权但主机仍未确认（{why}），原授权保留；请在异常清单中重试，不要另发新冲正"
+                        ),
+                    );
+                    return Err(err);
+                }
                 return Err(self.audit_and_error(
                     &actor,
-                    "reversal",
+                    audit_action,
                     key,
                     "failed",
-                    &format!("主机冲正失败：{why}"),
+                    &why,
                     format!("主机冲正失败：{why}"),
                 ));
             }
@@ -670,7 +693,7 @@ impl<'a> ShellApp<'a> {
             let why = e.to_string();
             return Err(self.audit_and_error(
                 &actor,
-                "reversal",
+                audit_action,
                 key,
                 "failed",
                 &format!("主机已受理但本地确认失败：{why}"),
@@ -678,7 +701,7 @@ impl<'a> ShellApp<'a> {
             ));
         }
 
-        self.audit_checked(&actor, "reversal", key, "ok", &host_reference)?;
+        self.audit_checked(&actor, audit_action, key, "ok", &host_reference)?;
         Ok(host_reference)
     }
 
@@ -1555,6 +1578,56 @@ mod tests {
                 .any(|n| n.contains("审计链头部 seq=") && n.contains("hash=")),
             "启动摘要应报告链头：{:?}",
             summary.notes()
+        );
+    }
+
+    #[test]
+    fn awaiting_reversal_retries_with_same_key_and_clears_exception() {
+        let mut state = state_with(Arc::new(FrozenClock(AtomicU64::new(0))));
+        state.audit = Some(Arc::new(
+            tellerkit_journal_sqlite::SqliteJournal::in_memory().unwrap(),
+        ));
+        state
+            .reversal
+            .mark("k-rev", ExceptionKind::MarkedForReversal);
+        let mock = Arc::clone(state.mock.as_ref().unwrap());
+
+        mock.set_offline(true);
+        let err = ShellApp::new(&mut state)
+            .request_reversal("k-rev", "状态不明")
+            .unwrap_err();
+        assert!(err.contains("断网"), "首次主机失败应透出原因：{err}");
+        let authorized = state.reversal.reversal_of("k-rev").unwrap().clone();
+        assert_eq!(authorized.host_reference(), None);
+
+        // 已授权未确认时重试仍失败：不能撤销授权，也不能清异常清单。
+        let retry_err = ShellApp::new(&mut state)
+            .request_reversal("k-rev", "状态不明")
+            .unwrap_err();
+        assert!(retry_err.contains("已获授权"), "{retry_err}");
+        assert!(retry_err.contains("重试"), "{retry_err}");
+        assert_eq!(state.reversal.reversal_of("k-rev"), Some(&authorized));
+        assert!(ShellApp::new(&mut state).tx_exceptions().len() == 1);
+
+        // 恢复后再次重试：同一幂等键重打主机、确认成功、清单清空并留审计。
+        mock.set_offline(false);
+        let reference = ShellApp::new(&mut state)
+            .request_reversal("k-rev", "状态不明")
+            .expect("待确认冲正应能重试成功");
+        assert_eq!(reference, "REV-k-rev", "重试必须使用同一幂等键");
+        assert!(state.reversal.is_confirmed("k-rev"));
+        assert_eq!(
+            state.reversal.reversal_of("k-rev").unwrap().initiator(),
+            authorized.initiator()
+        );
+        let app = ShellApp::new(&mut state);
+        assert!(app.tx_exceptions().is_empty(), "主机确认后异常清单应清空");
+        let audit = app.audit_tail(10).unwrap();
+        assert!(
+            audit.iter().any(|line| line.contains("reversal/retry")
+                && line.contains("ok")
+                && line.contains("REV-k-rev")),
+            "重试成功需写 reversal/retry/ok 审计，实际：{audit:?}"
         );
     }
 }

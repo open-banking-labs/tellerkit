@@ -328,11 +328,16 @@ impl RemoteBanking for RoutedBanking {
             "reverse",
             serde_json::json!({ "idempotency_key": idempotency_key, "reason": reason }),
         )?;
-        value
+        let reference = value
             .get("reference")
             .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .ok_or_else(|| RemoteError::Rejected("冲正响应缺少 reference".to_string()))
+            .ok_or_else(|| RemoteError::Rejected("冲正响应缺少 reference".to_string()))?;
+        if reference.trim().is_empty() {
+            return Err(RemoteError::Rejected(
+                "冲正响应流水号为空：不能确认冲正，请重试或查账".to_string(),
+            ));
+        }
+        Ok(reference.to_string())
     }
 }
 
@@ -542,6 +547,26 @@ mod tests {
         )]));
         let err = banking2.reverse("k1", "x").unwrap_err();
         assert!(err.to_string().contains("reference"));
+
+        // 主机回了空白流水号同样不是回执：不能让上层写进 confirm 后清掉异常清单。
+        for blank in ["", "   "] {
+            let acct3 = Arc::new(MockTransport::new(
+                "acct",
+                vec![Ok(reply(serde_json::json!({
+                    "payload": { "reference": blank }
+                })))],
+            ));
+            let banking3 = RoutedBanking::new(Router::new(vec![endpoint(
+                "acct.core",
+                acct3,
+                Arc::new(JsonCodec),
+            )]));
+            let err = banking3.reverse("k1", "x").unwrap_err();
+            assert!(
+                err.to_string().contains("流水号为空"),
+                "空白流水号 {blank:?} 必须报错，实际：{err}"
+            );
+        }
     }
 
     #[test]
