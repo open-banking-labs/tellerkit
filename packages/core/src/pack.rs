@@ -51,16 +51,32 @@ pub enum PackError {
 /// 已验签通过的菜单包。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MenuPack {
-    pub format_version: u16,
-    pub menu_version: u64,
-    pub shell_compat_min: u16,
-    pub shell_compat_max: u16,
-    pub payload: Vec<u8>,
+    format_version: u16,
+    menu_version: u64,
+    shell_compat_min: u16,
+    shell_compat_max: u16,
+    payload: Vec<u8>,
 }
 
 impl MenuPack {
+    pub fn format_version(&self) -> u16 {
+        self.format_version
+    }
+
     pub fn menu_version(&self) -> u64 {
         self.menu_version
+    }
+
+    pub fn shell_compat_min(&self) -> u16 {
+        self.shell_compat_min
+    }
+
+    pub fn shell_compat_max(&self) -> u16 {
+        self.shell_compat_max
+    }
+
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
     }
 
     /// 把菜单树打包成带签名的 `.mtree` 字节流。

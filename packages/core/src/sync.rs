@@ -10,27 +10,83 @@ use crate::store::{LoadSource, LoadedMenu, MenuStore, StoreError};
 /// 启动结果。
 #[derive(Debug, Clone)]
 pub struct BootOutcome {
-    pub loaded: LoadedMenu,
+    loaded: LoadedMenu,
     /// 给用户看的说明（首次联网、验签失败回退等）。
-    pub notes: Vec<String>,
+    notes: Vec<String>,
+}
+
+impl BootOutcome {
+    pub fn loaded(&self) -> &LoadedMenu {
+        &self.loaded
+    }
+
+    pub fn notes(&self) -> &[String] {
+        &self.notes
+    }
+
+    /// 交给上层接管菜单树时一次性取出，避免为所有权克隆整棵树。
+    pub fn into_parts(self) -> (LoadedMenu, Vec<String>) {
+        (self.loaded, self.notes)
+    }
 }
 
 /// 重新加载结果，额外暴露"是否发生了验签失败"。
 #[derive(Debug, Clone)]
 pub struct ReloadOutcome {
-    pub loaded: LoadedMenu,
-    pub verify_failed: bool,
-    pub notes: Vec<String>,
+    loaded: LoadedMenu,
+    verify_failed: bool,
+    notes: Vec<String>,
+}
+
+impl ReloadOutcome {
+    pub fn loaded(&self) -> &LoadedMenu {
+        &self.loaded
+    }
+
+    pub fn verify_failed(&self) -> bool {
+        self.verify_failed
+    }
+
+    pub fn notes(&self) -> &[String] {
+        &self.notes
+    }
+
+    /// 交给上层接管菜单树时一次性取出。
+    pub fn into_loaded(self) -> LoadedMenu {
+        self.loaded
+    }
 }
 
 /// 版本探测结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateOutcome {
-    pub checked: bool,
-    pub local: Option<u64>,
-    pub latest: Option<u64>,
-    pub updated: bool,
-    pub note: String,
+    checked: bool,
+    local: Option<u64>,
+    latest: Option<u64>,
+    updated: bool,
+    note: String,
+}
+
+impl UpdateOutcome {
+    pub fn checked(&self) -> bool {
+        self.checked
+    }
+
+    pub fn local(&self) -> Option<u64> {
+        self.local
+    }
+
+    pub fn latest(&self) -> Option<u64> {
+        self.latest
+    }
+
+    pub fn updated(&self) -> bool {
+        self.updated
+    }
+
+    pub fn note(&self) -> &str {
+        &self.note
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -173,7 +229,7 @@ mod tests {
 
         let outcome = boot_load(&host, &store).unwrap();
         assert_eq!(
-            outcome.loaded.source,
+            *outcome.loaded().source(),
             LoadSource::NetworkFallback { version: 7 }
         );
         assert!(outcome.notes.iter().any(|n| n.contains("已从服务端安装")));
@@ -208,7 +264,10 @@ mod tests {
             ..MockHost::new(99) // 服务端版本更高也没关系，断网就不该去问
         };
         let outcome = boot_load(&host, &store).unwrap();
-        assert_eq!(outcome.loaded.source, LoadSource::LocalFile { version: 7 });
+        assert_eq!(
+            *outcome.loaded().source(),
+            LoadSource::LocalFile { version: 7 }
+        );
         assert!(outcome.notes.is_empty(), "命中的本地包不应产生任何提示");
     }
 
@@ -230,7 +289,7 @@ mod tests {
         let outcome = reload(&MockHost::new(7), &store).unwrap();
         assert!(outcome.verify_failed);
         assert_eq!(
-            outcome.loaded.source,
+            *outcome.loaded().source(),
             LoadSource::NetworkFallback { version: 7 }
         );
         assert!(outcome.notes.iter().any(|n| n.contains("验签失败")));

@@ -15,7 +15,7 @@ use tellerkit_core::filter::MenuView;
 use tellerkit_core::tx::{TxRequest, TxResult};
 use tellerkit_core::PermSnapshot;
 
-use crate::app::{LoginOutcome, ShellApp};
+use crate::app::ShellApp;
 use crate::AppState;
 
 fn lock<'a>(
@@ -112,9 +112,9 @@ pub struct SessionState {
 impl From<crate::app::SessionView> for SessionState {
     fn from(v: crate::app::SessionView) -> Self {
         Self {
-            locked: v.locked,
-            reason: v.reason,
-            idle_secs: v.idle_secs,
+            locked: v.locked(),
+            reason: v.reason().clone(),
+            idle_secs: v.idle_secs(),
         }
     }
 }
@@ -135,8 +135,8 @@ pub fn tx_exceptions(state: State<'_, Mutex<AppState>>) -> Result<Vec<TxExceptio
         .tx_exceptions()
         .into_iter()
         .map(|v| TxException {
-            key: v.key,
-            kind: v.kind,
+            key: v.key().to_string(),
+            kind: v.kind().to_string(),
         })
         .collect())
 }
@@ -189,25 +189,25 @@ pub fn tx_reconciliation(state: State<'_, Mutex<AppState>>) -> Result<Reconcilia
     let mut guard = lock(&state)?;
     let view = ShellApp::new(&mut guard).reconciliation()?;
     Ok(Reconciliation {
-        since: view.since,
+        since: view.since().to_string(),
         summary: view
-            .summary
-            .into_iter()
+            .summary()
+            .iter()
             .map(|r| StatusRow {
-                status: r.status,
-                count: r.count,
-                amount_cents: r.amount_cents,
+                status: r.status().to_string(),
+                count: r.count(),
+                amount_cents: r.amount_cents(),
             })
             .collect(),
         recent: view
-            .recent
-            .into_iter()
+            .recent()
+            .iter()
             .map(|r| RecentTx {
-                key: r.key,
-                tx_code: r.tx_code,
-                amount_cents: r.amount_cents,
-                status: r.status,
-                reference: r.reference,
+                key: r.key().to_string(),
+                tx_code: r.tx_code().to_string(),
+                amount_cents: r.amount_cents(),
+                status: r.status().to_string(),
+                reference: r.reference().clone(),
             })
             .collect(),
     })
@@ -247,34 +247,30 @@ pub fn boot(state: State<'_, Mutex<AppState>>) -> Result<BootInfo, String> {
     let mut guard = lock(&state)?;
     let summary = ShellApp::new(&mut guard).boot()?;
     Ok(BootInfo {
-        shell_version: summary.shell_version,
-        pubkey_hex: summary.pubkey_hex,
-        appdata_dir: summary.appdata_dir,
-        offline: summary.offline,
-        local_versions: summary.local_versions,
+        shell_version: summary.shell_version().to_string(),
+        pubkey_hex: summary.pubkey_hex().to_string(),
+        appdata_dir: summary.appdata_dir().to_string(),
+        offline: summary.offline(),
+        local_versions: summary.local_versions().to_vec(),
         load: LoadReport {
-            menu_version: summary.menu_version,
-            source: summary.source,
-            menu_nodes: summary.menu_nodes,
-            pack_bytes: summary.pack_bytes,
-            load_ms: summary.load_ms,
+            menu_version: summary.menu_version(),
+            source: summary.source().to_string(),
+            menu_nodes: summary.menu_nodes(),
+            pack_bytes: summary.pack_bytes(),
+            load_ms: summary.load_ms(),
         },
-        notes: summary.notes,
+        notes: summary.notes().to_vec(),
     })
 }
 
 #[tauri::command]
 pub fn login(role_id: String, state: State<'_, Mutex<AppState>>) -> Result<LoginResult, String> {
     let mut guard = lock(&state)?;
-    let LoginOutcome {
-        snapshot,
-        menu,
-        filter_ms,
-    } = ShellApp::new(&mut guard).login(&role_id)?;
+    let outcome = ShellApp::new(&mut guard).login(&role_id)?;
     Ok(LoginResult {
-        snapshot,
-        menu,
-        filter_ms,
+        snapshot: outcome.snapshot().clone(),
+        menu: outcome.menu().to_vec(),
+        filter_ms: outcome.filter_ms(),
     })
 }
 
@@ -295,11 +291,11 @@ pub fn check_update(state: State<'_, Mutex<AppState>>) -> Result<UpdateReport, S
     let mut guard = lock(&state)?;
     let outcome = ShellApp::new(&mut guard).check_update()?;
     Ok(UpdateReport {
-        checked: outcome.checked,
-        local: outcome.local.unwrap_or(0),
-        latest: outcome.latest.unwrap_or(0),
-        updated: outcome.updated,
-        note: outcome.note,
+        checked: outcome.checked(),
+        local: outcome.local().unwrap_or(0),
+        latest: outcome.latest().unwrap_or(0),
+        updated: outcome.updated(),
+        note: outcome.note().to_string(),
     })
 }
 
@@ -308,12 +304,12 @@ pub fn reload_from_disk(state: State<'_, Mutex<AppState>>) -> Result<ReloadRepor
     let mut guard = lock(&state)?;
     let outcome = ShellApp::new(&mut guard).reload_from_disk()?;
     Ok(ReloadReport {
-        menu_version: outcome.menu_version,
-        source: outcome.source,
-        recovered: outcome.verify_failed,
-        verify_failed: outcome.verify_failed,
-        note: outcome.note,
-        menu: outcome.menu,
+        menu_version: outcome.menu_version(),
+        source: outcome.source().to_string(),
+        recovered: outcome.verify_failed(),
+        verify_failed: outcome.verify_failed(),
+        note: outcome.note().to_string(),
+        menu: outcome.menu().clone(),
     })
 }
 

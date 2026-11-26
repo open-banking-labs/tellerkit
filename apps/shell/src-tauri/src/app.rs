@@ -29,66 +29,212 @@ use crate::AppState;
 /// 启动结果。命令层据此拼 `BootInfo`。
 #[derive(Debug, Clone)]
 pub struct BootSummary {
-    pub shell_version: String,
-    pub pubkey_hex: String,
-    pub appdata_dir: String,
-    pub offline: bool,
-    pub local_versions: Vec<u64>,
-    pub menu_version: u64,
-    pub source: String,
-    pub menu_nodes: usize,
-    pub pack_bytes: usize,
-    pub load_ms: f64,
-    pub notes: Vec<String>,
+    shell_version: String,
+    pubkey_hex: String,
+    appdata_dir: String,
+    offline: bool,
+    local_versions: Vec<u64>,
+    menu_version: u64,
+    source: String,
+    menu_nodes: usize,
+    pack_bytes: usize,
+    load_ms: f64,
+    notes: Vec<String>,
+}
+
+impl BootSummary {
+    pub fn shell_version(&self) -> &str {
+        &self.shell_version
+    }
+
+    pub fn pubkey_hex(&self) -> &str {
+        &self.pubkey_hex
+    }
+
+    pub fn appdata_dir(&self) -> &str {
+        &self.appdata_dir
+    }
+
+    pub fn offline(&self) -> bool {
+        self.offline
+    }
+
+    pub fn local_versions(&self) -> &[u64] {
+        &self.local_versions
+    }
+
+    pub fn menu_version(&self) -> u64 {
+        self.menu_version
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub fn menu_nodes(&self) -> usize {
+        self.menu_nodes
+    }
+
+    pub fn pack_bytes(&self) -> usize {
+        self.pack_bytes
+    }
+
+    pub fn load_ms(&self) -> f64 {
+        self.load_ms
+    }
+
+    pub fn notes(&self) -> &[String] {
+        &self.notes
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct LoginOutcome {
-    pub snapshot: tellerkit_core::PermSnapshot,
-    pub menu: Vec<MenuView>,
-    pub filter_ms: f64,
+    snapshot: tellerkit_core::PermSnapshot,
+    menu: Vec<MenuView>,
+    filter_ms: f64,
+}
+
+impl LoginOutcome {
+    pub fn snapshot(&self) -> &tellerkit_core::PermSnapshot {
+        &self.snapshot
+    }
+
+    pub fn menu(&self) -> &[MenuView] {
+        &self.menu
+    }
+
+    pub fn filter_ms(&self) -> f64 {
+        self.filter_ms
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct ReloadOutcome {
-    pub menu_version: u64,
-    pub source: String,
-    pub verify_failed: bool,
-    pub note: String,
-    pub menu: Option<Vec<MenuView>>,
+    menu_version: u64,
+    source: String,
+    verify_failed: bool,
+    note: String,
+    menu: Option<Vec<MenuView>>,
+}
+
+impl ReloadOutcome {
+    pub fn menu_version(&self) -> u64 {
+        self.menu_version
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub fn verify_failed(&self) -> bool {
+        self.verify_failed
+    }
+
+    pub fn note(&self) -> &str {
+        &self.note
+    }
+
+    pub fn menu(&self) -> &Option<Vec<MenuView>> {
+        &self.menu
+    }
 }
 
 /// 会话视图（给界面看的三元组）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionView {
-    pub locked: bool,
-    pub reason: Option<String>,
-    pub idle_secs: u64,
+    locked: bool,
+    reason: Option<String>,
+    idle_secs: u64,
+}
+
+impl SessionView {
+    pub fn locked(&self) -> bool {
+        self.locked
+    }
+
+    pub fn reason(&self) -> &Option<String> {
+        &self.reason
+    }
+
+    pub fn idle_secs(&self) -> u64 {
+        self.idle_secs
+    }
 }
 
 /// 对账视图：聚合 + 最近明细。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reconciliation {
     /// 统计起点（当日 00:00 的秒级字符串）
-    pub since: String,
-    pub summary: Vec<StatusRow>,
-    pub recent: Vec<RecentTxView>,
+    since: String,
+    summary: Vec<StatusRow>,
+    recent: Vec<RecentTxView>,
+}
+
+impl Reconciliation {
+    pub fn since(&self) -> &str {
+        &self.since
+    }
+
+    pub fn summary(&self) -> &[StatusRow] {
+        &self.summary
+    }
+
+    pub fn recent(&self) -> &[RecentTxView] {
+        &self.recent
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusRow {
-    pub status: String,
-    pub count: i64,
-    pub amount_cents: i64,
+    status: String,
+    count: i64,
+    amount_cents: i64,
+}
+
+impl StatusRow {
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+
+    pub fn count(&self) -> i64 {
+        self.count
+    }
+
+    pub fn amount_cents(&self) -> i64 {
+        self.amount_cents
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecentTxView {
-    pub key: String,
-    pub tx_code: String,
-    pub amount_cents: i64,
-    pub status: String,
-    pub reference: Option<String>,
+    key: String,
+    tx_code: String,
+    amount_cents: i64,
+    status: String,
+    reference: Option<String>,
+}
+
+impl RecentTxView {
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    pub fn tx_code(&self) -> &str {
+        &self.tx_code
+    }
+
+    pub fn amount_cents(&self) -> i64 {
+        self.amount_cents
+    }
+
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+
+    pub fn reference(&self) -> &Option<String> {
+        &self.reference
+    }
 }
 
 /// 当日 00:00 的秒级时间戳（零填充，与账本 `created_at` 同格式）。
@@ -100,9 +246,19 @@ fn start_of_day(now_secs: u64) -> String {
 /// 待处置异常交易的展示结构。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TxExceptionView {
-    pub key: String,
+    key: String,
     /// `marked_for_reversal` | `marked_for_roll_forward`
-    pub kind: String,
+    kind: String,
+}
+
+impl TxExceptionView {
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
 }
 
 /// 演示用授权端口：固定由"主管 T0101"批准。
@@ -170,16 +326,16 @@ impl<'a> ShellApp<'a> {
             .map_err(|e| e.to_string())?;
         let load_ms = started.elapsed().as_secs_f64() * 1000.0;
 
-        let mut tree: MenuTree = outcome.loaded.tree;
-        let menu_version = tree.menu_version();
-        let pack_bytes = outcome.loaded.bytes;
-        let source = match outcome.loaded.source {
+        let (loaded, mut notes) = outcome.into_parts();
+        let pack_bytes = loaded.bytes();
+        let source = match loaded.source() {
             LoadSource::LocalFile { .. } => "local".to_string(),
             LoadSource::NetworkFallback { .. } => "network".to_string(),
         };
+        let mut tree: MenuTree = loaded.into_tree();
+        let menu_version = tree.menu_version();
 
         // 业务包：扫描 → 验签 → 依赖拓扑 → 合并菜单
-        let mut notes = outcome.notes;
         let pkg_dir = std::path::Path::new(&self.state.appdata_dir).join("packages");
         let (plan, failures) = pkg::scan_dir(
             &pkg_dir,
@@ -282,9 +438,9 @@ impl<'a> ShellApp<'a> {
     /// 后台版本探测。菜单版本更新不重置权限快照——两者独立演进。
     pub fn check_update(&mut self) -> Result<sync::UpdateOutcome, String> {
         let outcome = sync::check_and_update(self.state.remote.as_ref(), &self.state.store);
-        if outcome.updated {
+        if outcome.updated() {
             if let Ok(loaded) = self.state.store.load_latest() {
-                self.state.menu = Some(loaded.tree);
+                self.state.menu = Some(loaded.into_tree());
             }
         }
         Ok(outcome)
@@ -294,23 +450,25 @@ impl<'a> ShellApp<'a> {
     pub fn reload_from_disk(&mut self) -> Result<ReloadOutcome, String> {
         let outcome = sync::reload(self.state.remote.as_ref(), &self.state.store)
             .map_err(|e| e.to_string())?;
-        let note = outcome.notes.join("；");
+        let note = outcome.notes().join("；");
+        let verify_failed = outcome.verify_failed();
+        let loaded = outcome.into_loaded();
         let menu = self
             .state
             .snapshot
             .as_ref()
-            .map(|snap| filter::filter_visible(&outcome.loaded.tree, snap));
-        let menu_version = outcome.loaded.tree.menu_version();
-        let source = match outcome.loaded.source {
+            .map(|snap| filter::filter_visible(loaded.tree(), snap));
+        let menu_version = loaded.tree().menu_version();
+        let source = match loaded.source() {
             LoadSource::LocalFile { .. } => "local".to_string(),
             LoadSource::NetworkFallback { .. } => "network".to_string(),
         };
-        self.state.menu = Some(outcome.loaded.tree);
+        self.state.menu = Some(loaded.into_tree());
 
         Ok(ReloadOutcome {
             menu_version,
             source,
-            verify_failed: outcome.verify_failed,
+            verify_failed,
             note,
             menu,
         })
@@ -579,19 +737,19 @@ impl<'a> ShellApp<'a> {
             summary: rows
                 .into_iter()
                 .map(|r| StatusRow {
-                    status: r.status,
-                    count: r.count,
-                    amount_cents: r.amount_cents,
+                    status: r.status().to_string(),
+                    count: r.count(),
+                    amount_cents: r.amount_cents(),
                 })
                 .collect(),
             recent: recent
                 .into_iter()
                 .map(|r| RecentTxView {
-                    key: r.idempotency_key,
-                    tx_code: r.tx_code,
-                    amount_cents: r.amount_cents,
-                    status: r.status,
-                    reference: r.reference,
+                    key: r.idempotency_key().to_string(),
+                    tx_code: r.tx_code().to_string(),
+                    amount_cents: r.amount_cents(),
+                    status: r.status().to_string(),
+                    reference: r.reference().clone(),
                 })
                 .collect(),
         })
@@ -607,15 +765,15 @@ impl<'a> ShellApp<'a> {
             .map(|e| {
                 format!(
                     "{} · {} {} {} · {}{}",
-                    e.at,
-                    e.actor,
-                    e.action,
-                    e.target,
-                    e.result,
-                    if e.detail.is_empty() {
+                    e.at(),
+                    e.actor(),
+                    e.action(),
+                    e.target(),
+                    e.result(),
+                    if e.detail().is_empty() {
                         String::new()
                     } else {
-                        format!(" · {}", e.detail)
+                        format!(" · {}", e.detail())
                     }
                 )
             })
@@ -627,14 +785,7 @@ impl<'a> ShellApp<'a> {
         let Some(journal) = &self.state.audit else {
             return;
         };
-        let event = AuditEvent {
-            actor: actor.to_string(),
-            action: action.to_string(),
-            target: target.to_string(),
-            result: result.to_string(),
-            detail: detail.to_string(),
-            at: String::new(),
-        };
+        let event = AuditEvent::new(actor, action, target, result, detail);
         if let Err(e) = journal.audit(&event) {
             eprintln!("审计写入失败：{e}");
         }

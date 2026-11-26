@@ -20,19 +20,65 @@ use tellerkit_core::perm::PermSnapshot;
 #[derive(Debug, Clone)]
 pub struct FakeBankConfig {
     /// 菜单版本
-    pub menu_version: u64,
+    menu_version: u64,
     /// 下载返回的字节（模拟签名包）
-    pub pack_bytes: Vec<u8>,
+    pack_bytes: Vec<u8>,
     /// 交易拒绝原因；Some 时所有提交都被拒绝
-    pub reject_reason: Option<String>,
+    reject_reason: Option<String>,
     /// 收到多少次请求（按 op 累计）
-    pub stats: Arc<Mutex<Vec<String>>>,
+    stats: Arc<Mutex<Vec<String>>>,
     /// 是否按幂等键去重（真服务端必须这么做，见 `changes/001`）
-    pub idempotent: bool,
+    idempotent: bool,
     /// 幂等表：key → 流水号
-    pub accepted: Arc<Mutex<std::collections::BTreeMap<String, String>>>,
+    accepted: Arc<Mutex<std::collections::BTreeMap<String, String>>>,
     /// 实际"入账"次数。用来证明重复提交没有重复入账。
-    pub charged: Arc<Mutex<u32>>,
+    charged: Arc<Mutex<u32>>,
+}
+
+impl FakeBankConfig {
+    pub fn menu_version(&self) -> u64 {
+        self.menu_version
+    }
+
+    pub fn pack_bytes(&self) -> &[u8] {
+        &self.pack_bytes
+    }
+
+    pub fn reject_reason(&self) -> Option<&str> {
+        self.reject_reason.as_deref()
+    }
+
+    pub fn stats(&self) -> &Arc<Mutex<Vec<String>>> {
+        &self.stats
+    }
+
+    pub fn idempotent(&self) -> bool {
+        self.idempotent
+    }
+
+    pub fn accepted(&self) -> &Arc<Mutex<std::collections::BTreeMap<String, String>>> {
+        &self.accepted
+    }
+
+    pub fn charged(&self) -> &Arc<Mutex<u32>> {
+        &self.charged
+    }
+
+    /// 测试按需调整行为：字段私有后由 builder 收口构造入口。
+    pub fn with_menu_version(mut self, version: u64) -> Self {
+        self.menu_version = version;
+        self
+    }
+
+    pub fn with_reject_reason(mut self, reason: &str) -> Self {
+        self.reject_reason = Some(reason.to_string());
+        self
+    }
+
+    pub fn with_idempotent(mut self, idempotent: bool) -> Self {
+        self.idempotent = idempotent;
+        self
+    }
 }
 
 impl Default for FakeBankConfig {
@@ -137,17 +183,17 @@ fn handle_connection(mut stream: TcpStream, config: &FakeBankConfig) -> std::io:
             .and_then(|v| v.as_str())
             .unwrap_or("unknown")
             .to_string();
-        if let Ok(mut stats) = config.stats.lock() {
+        if let Ok(mut stats) = config.stats().lock() {
             stats.push(op.clone());
         }
         let payload = serve_op(&op, &request, config);
         serde_json::to_vec(&json!({ "payload": payload })).unwrap_or_else(|_| b"{}".to_vec())
     } else {
         // 非 JSON：二进制下载请求
-        if let Ok(mut stats) = config.stats.lock() {
+        if let Ok(mut stats) = config.stats().lock() {
             stats.push("download".to_string());
         }
-        config.pack_bytes.clone()
+        config.pack_bytes().to_vec()
     };
 
     let len = u32::try_from(response.len()).unwrap_or(0);
@@ -159,7 +205,7 @@ fn handle_connection(mut stream: TcpStream, config: &FakeBankConfig) -> std::io:
 fn serve_op(op: &str, request: &Value, config: &FakeBankConfig) -> Value {
     match op {
         "probe_menu" => json!({
-            "latest": config.menu_version,
+            "latest": config.menu_version(),
             "shell_compat_min": 1,
             "shell_compat_max": 1
         }),
@@ -191,7 +237,7 @@ fn serve_op(op: &str, request: &Value, config: &FakeBankConfig) -> Value {
                 .unwrap_or("unknown");
             json!({ "reference": format!("REV-{key}") })
         }
-        "submit_tx" => match &config.reject_reason {
+        "submit_tx" => match config.reject_reason() {
             Some(reason) => json!({
                 "error": { "code": "TX_REJECTED", "message": reason, "retryable": false }
             }),
@@ -201,15 +247,15 @@ fn serve_op(op: &str, request: &Value, config: &FakeBankConfig) -> Value {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
 
-                if config.idempotent {
-                    if let Ok(mut map) = config.accepted.lock() {
+                if config.idempotent() {
+                    if let Ok(mut map) = config.accepted().lock() {
                         if let Some(existing) = map.get(key) {
                             // 同键重复提交：返回同一个流水号，**不再入账**
                             return json!({ "reference": existing });
                         }
                         let reference = format!("FAKE-{key}");
                         map.insert(key.to_string(), reference.clone());
-                        if let Ok(mut n) = config.charged.lock() {
+                        if let Ok(mut n) = config.charged().lock() {
                             *n += 1;
                         }
                         return json!({ "reference": reference });
@@ -217,10 +263,10 @@ fn serve_op(op: &str, request: &Value, config: &FakeBankConfig) -> Value {
                 }
 
                 // 未声明幂等：每次都入账（用来证明客户端为什么不允许离线挂起）
-                if let Ok(mut n) = config.charged.lock() {
+                if let Ok(mut n) = config.charged().lock() {
                     *n += 1;
                 }
-                json!({ "reference": format!("FAKE-{key}-{}", *config.charged.lock().unwrap()) })
+                json!({ "reference": format!("FAKE-{key}-{}", *config.charged().lock().unwrap()) })
             }
         },
         _ => json!({ "code": "UNKNOWN_OP", "message": op }),

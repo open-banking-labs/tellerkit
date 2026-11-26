@@ -40,32 +40,80 @@ pub struct LoadedEndpoints {
 #[derive(Debug, Deserialize)]
 pub struct EndpointSpec {
     /// `http` | `tcp`
-    pub transport: String,
+    transport: String,
     /// `json` | `raw` | `fixed-width`
-    pub codec: String,
+    codec: String,
     /// HTTP 用
     #[serde(default)]
-    pub url: Option<String>,
+    url: Option<String>,
     /// TCP 用
     #[serde(default)]
-    pub host: Option<String>,
+    host: Option<String>,
     #[serde(default)]
-    pub port: Option<u16>,
+    port: Option<u16>,
     #[serde(default)]
-    pub priority: u8,
+    priority: u8,
     #[serde(default = "default_timeout")]
-    pub timeout_ms: u64,
+    timeout_ms: u64,
     /// 定长报文的字段布局（仅 codec = fixed-width 时必填）
     #[serde(default)]
-    pub layout: Option<Vec<FieldLayoutSpec>>,
+    layout: Option<Vec<FieldLayoutSpec>>,
+}
+
+impl EndpointSpec {
+    pub fn transport(&self) -> &str {
+        &self.transport
+    }
+
+    pub fn codec(&self) -> &str {
+        &self.codec
+    }
+
+    pub fn url(&self) -> Option<&String> {
+        self.url.as_ref()
+    }
+
+    pub fn host(&self) -> Option<&String> {
+        self.host.as_ref()
+    }
+
+    pub fn port(&self) -> Option<u16> {
+        self.port
+    }
+
+    pub fn priority(&self) -> u8 {
+        self.priority
+    }
+
+    pub fn timeout_ms(&self) -> u64 {
+        self.timeout_ms
+    }
+
+    pub fn layout(&self) -> Option<&[FieldLayoutSpec]> {
+        self.layout.as_deref()
+    }
 }
 
 #[derive(Debug, Deserialize)]
 pub struct FieldLayoutSpec {
-    pub name: String,
-    pub width: usize,
+    name: String,
+    width: usize,
     #[serde(default)]
-    pub numeric: bool,
+    numeric: bool,
+}
+
+impl FieldLayoutSpec {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    pub fn numeric(&self) -> bool {
+        self.numeric
+    }
 }
 
 fn default_timeout() -> u64 {
@@ -154,7 +202,7 @@ pub fn parse_full(raw: &str, require_tls: bool) -> Result<LoadedEndpoints, Strin
         }
         for spec in specs {
             if require_tls {
-                if let Some(url) = &spec.url {
+                if let Some(url) = spec.url() {
                     if url.starts_with("http://") {
                         return Err(format!(
                             "{service}: 已要求 TLS（TK_REQUIRE_TLS=1），拒绝明文端点 {url}"
@@ -172,11 +220,11 @@ pub fn parse_full(raw: &str, require_tls: bool) -> Result<LoadedEndpoints, Strin
 }
 
 fn build(service: &str, spec: &EndpointSpec) -> Result<Endpoint, String> {
-    let addr = match spec.transport.as_str() {
+    let addr = match spec.transport() {
         "http" => {
             let url = spec
-                .url
-                .clone()
+                .url()
+                .cloned()
                 .ok_or_else(|| format!("{service}: http 端点必须提供 url"))?;
             if !url.starts_with("http://") && !url.starts_with("https://") {
                 return Err(format!("{service}: url 必须以 http:// 或 https:// 开头"));
@@ -185,11 +233,11 @@ fn build(service: &str, spec: &EndpointSpec) -> Result<Endpoint, String> {
         }
         "tcp" => EndpointAddr::Tcp {
             host: spec
-                .host
-                .clone()
+                .host()
+                .cloned()
                 .ok_or_else(|| format!("{service}: tcp 端点必须提供 host"))?,
             port: spec
-                .port
+                .port()
                 .ok_or_else(|| format!("{service}: tcp 端点必须提供 port"))?,
         },
         other => {
@@ -199,18 +247,17 @@ fn build(service: &str, spec: &EndpointSpec) -> Result<Endpoint, String> {
         }
     };
 
-    let transport: Arc<dyn Transport> = match spec.transport.as_str() {
+    let transport: Arc<dyn Transport> = match spec.transport() {
         "http" => Arc::new(HttpTransport::default()),
         _ => Arc::new(TcpTransport::default()),
     };
 
-    let codec: Arc<dyn Codec> = match spec.codec.as_str() {
+    let codec: Arc<dyn Codec> = match spec.codec() {
         "json" => Arc::new(JsonCodec),
         "raw" => Arc::new(RawCodec),
         "fixed-width" => {
             let layout = spec
-                .layout
-                .as_ref()
+                .layout()
                 .ok_or_else(|| format!("{service}: fixed-width 端点必须提供 layout"))?;
             if layout.is_empty() {
                 return Err(format!("{service}: fixed-width 的 layout 不能为空"));
@@ -219,10 +266,10 @@ fn build(service: &str, spec: &EndpointSpec) -> Result<Endpoint, String> {
                 layout
                     .iter()
                     .map(|f| {
-                        if f.numeric {
-                            FieldSpec::numeric(&f.name, f.width)
+                        if f.numeric() {
+                            FieldSpec::numeric(f.name(), f.width())
                         } else {
-                            FieldSpec::text(&f.name, f.width)
+                            FieldSpec::text(f.name(), f.width())
                         }
                     })
                     .collect(),
@@ -240,8 +287,8 @@ fn build(service: &str, spec: &EndpointSpec) -> Result<Endpoint, String> {
         addr,
         transport,
         codec,
-        spec.priority,
-        spec.timeout_ms,
+        spec.priority(),
+        spec.timeout_ms(),
     ))
 }
 

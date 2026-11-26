@@ -39,10 +39,7 @@ fn router_for(bank: &FakeBank) -> Router {
 
 #[test]
 fn full_chain_reaches_a_real_backend_over_tcp() {
-    let bank = FakeBank::start(FakeBankConfig {
-        menu_version: 11,
-        ..Default::default()
-    });
+    let bank = FakeBank::start(FakeBankConfig::default().with_menu_version(11));
     let banking = RoutedBanking::new(router_for(&bank));
 
     let probe = banking.probe_menu().expect("探测菜单版本");
@@ -70,10 +67,7 @@ fn full_chain_reaches_a_real_backend_over_tcp() {
 
 #[test]
 fn business_rejection_surfaces_as_rejected_not_unavailable() {
-    let bank = FakeBank::start(FakeBankConfig {
-        reject_reason: Some("余额不足".into()),
-        ..Default::default()
-    });
+    let bank = FakeBank::start(FakeBankConfig::default().with_reject_reason("余额不足"));
     let banking = RoutedBanking::new(router_for(&bank));
 
     let mut req = TxRequest::new("account.deposit", "key-002");
@@ -168,7 +162,7 @@ fn same_idempotency_key_is_charged_once() {
 
     assert_eq!(first, second, "重试必须返回同一流水号");
     assert_eq!(second, third);
-    assert_eq!(*bank.config().charged.lock().unwrap(), 1, "只应入账一次");
+    assert_eq!(*bank.config().charged().lock().unwrap(), 1, "只应入账一次");
     assert_eq!(
         bank.ops().iter().filter(|op| *op == "submit_tx").count(),
         3,
@@ -182,10 +176,7 @@ fn same_idempotency_key_is_charged_once() {
 /// 不拦的话，断网期间的交易在恢复后重放就会重复扣账。
 #[test]
 fn non_idempotent_backend_charges_every_attempt() {
-    let bank = FakeBank::start(FakeBankConfig {
-        idempotent: false,
-        ..Default::default()
-    });
+    let bank = FakeBank::start(FakeBankConfig::default().with_idempotent(false));
     let banking = RoutedBanking::new(router_for(&bank));
 
     assert!(!banking.supports_idempotency());
@@ -194,7 +185,7 @@ fn non_idempotent_backend_charges_every_attempt() {
     let _ = banking.submit(&req);
 
     assert_eq!(
-        *bank.config().charged.lock().unwrap(),
+        *bank.config().charged().lock().unwrap(),
         2,
         "主机不去重时，两次提交就是两次扣账"
     );

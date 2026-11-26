@@ -35,9 +35,9 @@ pub enum LoadSource {
 
 #[derive(Debug, Clone)]
 pub struct LoadedMenu {
-    pub tree: MenuTree,
-    pub source: LoadSource,
-    pub bytes: usize,
+    tree: MenuTree,
+    source: LoadSource,
+    bytes: usize,
 }
 
 impl LoadedMenu {
@@ -47,6 +47,23 @@ impl LoadedMenu {
             source,
             bytes,
         }
+    }
+
+    pub fn tree(&self) -> &MenuTree {
+        &self.tree
+    }
+
+    pub fn source(&self) -> &LoadSource {
+        &self.source
+    }
+
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// 上层接管菜单树时一次性取出，避免克隆整棵树。
+    pub fn into_tree(self) -> MenuTree {
+        self.tree
     }
 }
 

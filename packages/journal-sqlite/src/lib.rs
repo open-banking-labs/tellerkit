@@ -18,12 +18,50 @@ use tellerkit_core::tx::{TxJournal, TxRequest, TxResult, TxStatus};
 /// 即便传了值也会被实现覆盖，防止业务层伪造时间线。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AuditEvent {
-    pub actor: String,
-    pub action: String,
-    pub target: String,
-    pub result: String,
-    pub detail: String,
-    pub at: String,
+    actor: String,
+    action: String,
+    target: String,
+    result: String,
+    detail: String,
+    at: String,
+}
+
+impl AuditEvent {
+    /// `at` 由账本写入时覆盖，调用方不需要（也不应该）传时间。
+    pub fn new(actor: &str, action: &str, target: &str, result: &str, detail: &str) -> Self {
+        Self {
+            actor: actor.to_string(),
+            action: action.to_string(),
+            target: target.to_string(),
+            result: result.to_string(),
+            detail: detail.to_string(),
+            at: String::new(),
+        }
+    }
+
+    pub fn actor(&self) -> &str {
+        &self.actor
+    }
+
+    pub fn action(&self) -> &str {
+        &self.action
+    }
+
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
+    pub fn result(&self) -> &str {
+        &self.result
+    }
+
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+
+    pub fn at(&self) -> &str {
+        &self.at
+    }
 }
 
 /// 本地账本。一个进程一个连接，用 Mutex 串行化（柜面终端是单柜员场景）。
@@ -127,11 +165,11 @@ impl SqliteJournal {
                 "INSERT INTO audit_log (actor, action, target, result, detail, at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
-                    event.actor,
-                    event.action,
-                    event.target,
-                    event.result,
-                    event.detail,
+                    event.actor(),
+                    event.action(),
+                    event.target(),
+                    event.result(),
+                    event.detail(),
                     now(),
                 ],
             )
@@ -186,9 +224,23 @@ fn status_str(status: TxStatus) -> &'static str {
 /// 一条按状态聚合的对账行。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusSummary {
-    pub status: String,
-    pub count: i64,
-    pub amount_cents: i64,
+    status: String,
+    count: i64,
+    amount_cents: i64,
+}
+
+impl StatusSummary {
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+
+    pub fn count(&self) -> i64 {
+        self.count
+    }
+
+    pub fn amount_cents(&self) -> i64 {
+        self.amount_cents
+    }
 }
 
 impl SqliteJournal {
@@ -256,12 +308,38 @@ impl SqliteJournal {
 /// 一笔交易的简报（对账明细）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecentTx {
-    pub idempotency_key: String,
-    pub tx_code: String,
-    pub amount_cents: i64,
-    pub status: String,
-    pub reference: Option<String>,
-    pub at: String,
+    idempotency_key: String,
+    tx_code: String,
+    amount_cents: i64,
+    status: String,
+    reference: Option<String>,
+    at: String,
+}
+
+impl RecentTx {
+    pub fn idempotency_key(&self) -> &str {
+        &self.idempotency_key
+    }
+
+    pub fn tx_code(&self) -> &str {
+        &self.tx_code
+    }
+
+    pub fn amount_cents(&self) -> i64 {
+        self.amount_cents
+    }
+
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+
+    pub fn reference(&self) -> &Option<String> {
+        &self.reference
+    }
+
+    pub fn at(&self) -> &str {
+        &self.at
+    }
 }
 
 impl TxJournal for SqliteJournal {

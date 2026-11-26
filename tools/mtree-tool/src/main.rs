@@ -616,8 +616,8 @@ fn verify(rest: &[String]) -> Result<(), String> {
         "验签通过: menu_version={} 节点数={} shell_compat={}..={}",
         pack.menu_version(),
         tree.node_count(),
-        pack.shell_compat_min,
-        pack.shell_compat_max
+        pack.shell_compat_min(),
+        pack.shell_compat_max()
     );
     Ok(())
 }
@@ -629,13 +629,14 @@ fn inspect(rest: &[String]) -> Result<(), String> {
     let pack = MenuPack::parse(&bytes).map_err(|e| format!("解析失败: {e}"))?;
     println!("file          = {file}");
     println!("size          = {} 字节", bytes.len());
-    println!("format_version= {}", pack.format_version);
+    println!("format_version= {}", pack.format_version());
     println!("menu_version  = {}", pack.menu_version());
     println!(
         "shell_compat  = {}..={}",
-        pack.shell_compat_min, pack.shell_compat_max
+        pack.shell_compat_min(),
+        pack.shell_compat_max()
     );
-    println!("payload_len   = {} 字节", pack.payload.len());
+    println!("payload_len   = {} 字节", pack.payload().len());
     println!("signature     = {} 字节", pack::SIGNATURE_LEN);
     Ok(())
 }
