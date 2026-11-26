@@ -9,7 +9,6 @@
 //! - 生产：`build.rs` 从 `TK_CONFIG_PUBKEY_HEX` 注入，release 缺失即构建失败；
 //! - 调试：可用运行期 `TK_CONFIG_PUBKEY` 覆盖，便于本地换钥匙；release 忽略运行期值，
 //!   否则能改进程环境的人就能整体替换信任根。
-//!
 //! 启动摘要并列打印两把公钥的指纹，便于现场核对部署的是哪一把。
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -165,7 +164,7 @@ fn sha256(input: &[u8]) -> [u8; 32] {
     }
     data.extend_from_slice(&bit_len.to_be_bytes());
 
-    for chunk in data.as_chunks::<64>().0 {
+    for chunk in data.chunks_exact(64) {
         let mut w = [0u32; 64];
         for (i, word) in w[..16].iter_mut().enumerate() {
             *word = u32::from_be_bytes(chunk[i * 4..i * 4 + 4].try_into().expect("4 bytes"));

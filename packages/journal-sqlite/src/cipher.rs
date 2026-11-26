@@ -15,8 +15,9 @@
 //!
 //! ## 格式
 //!
-//! `v1:<hex nonce>:<hex ciphertext+tag>`。没有 `v1:` 前缀的旧数据按明文读取——
-//! 保证升级不炸老账本（迁移策略见 README）。
+//! `v1:<hex nonce>:<hex ciphertext+tag>`。没有 `v1:` 前缀的数据**拒绝读取**：
+//! 旧库在 `SqliteJournal::open` 时一次性迁移（读后重写），迁移后仍无前缀即视为降级攻击。
+//! 这个前缀不是认证本身，而是"这批数据是否已经迁移"的显式开关；真正的完整性由 GCM tag 保证。
 
 use std::path::{Path, PathBuf};
 
@@ -125,10 +126,10 @@ impl LedgerCipher {
         ))
     }
 
-    /// 解密。没有 `v1:` 前缀视为旧明文数据，原样返回。
+    /// 解密。没有 `v1:` 前缀一律拒绝：静默按明文返回等于给降级改写开后门。
     pub fn open(&self, stored: &str) -> Result<String, String> {
         let Some(rest) = stored.strip_prefix(PREFIX) else {
-            return Ok(stored.to_string());
+            return Err("账本数据缺少 v1: 前缀，拒绝读取（疑似密文被剥离）".to_string());
         };
         let (nonce_hex, body_hex) = rest
             .split_once(':')
@@ -151,6 +152,21 @@ impl LedgerCipher {
             .map_err(|_| "账本解密失败：密钥不匹配或数据被篡改".to_string())?;
 
         String::from_utf8(plain.to_vec()).map_err(|e| format!("账本明文不是 UTF-8：{e}"))
+    }
+
+    /// 这条数据是否已经按 v1 密文格式落盘。
+    pub fn is_sealed(stored: &str) -> bool {
+        stored.starts_with(PREFIX)
+    }
+
+    /// 仅供旧库一次性迁移：把无前缀的明文就地重新加密。
+    ///
+    /// 已有前缀时报错——避免把密文当明文再包一层，也避免迁移逻辑被当成通用读取口。
+    pub fn migrate_legacy(&self, plaintext: &str) -> Result<String, String> {
+        if Self::is_sealed(plaintext) {
+            return Err("数据已有 v1: 前缀，不能按旧明文重新加密".to_string());
+        }
+        self.seal(plaintext)
     }
 
     pub fn key_path(&self) -> &Path {
@@ -203,13 +219,31 @@ mod tests {
     }
 
     #[test]
-    fn legacy_plaintext_is_readable() {
+    fn legacy_plaintext_is_rejected_by_open() {
         let cipher = LedgerCipher::ephemeral().unwrap();
-        // 升级前写入的旧数据没有前缀
-        assert_eq!(
-            cipher.open(r#"{"account":"123"}"#).unwrap(),
-            r#"{"account":"123"}"#
+        // 旧数据只能走 journal 启动时的一次性迁移，不能成为通用读取路径。
+        assert!(cipher.open(r#"{"account":"123"}"#).is_err());
+    }
+
+    #[test]
+    fn stripped_prefix_is_rejected() {
+        let cipher = LedgerCipher::ephemeral().unwrap();
+        let stored = cipher.seal(r#"{"amount":100}"#).unwrap();
+        let stripped = stored.strip_prefix("v1:").unwrap();
+        assert!(
+            cipher.open(stripped).is_err(),
+            "剥离前缀后即便内容未变也不能原样返回，否则改写不会被发现"
         );
+    }
+
+    #[test]
+    fn migration_reseals_legacy_plaintext() {
+        let cipher = LedgerCipher::ephemeral().unwrap();
+        let legacy = r#"{"account":"123"}"#;
+        let sealed = cipher.migrate_legacy(legacy).unwrap();
+        assert!(sealed.starts_with("v1:"));
+        assert_eq!(cipher.open(&sealed).unwrap(), legacy);
+        assert!(cipher.migrate_legacy(&sealed).is_err());
     }
 
     #[test]
