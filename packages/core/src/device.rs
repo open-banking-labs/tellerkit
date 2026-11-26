@@ -101,6 +101,16 @@ impl Voucher {
         self.reference = reference;
     }
 
+    /// 交易流水号。外部 Printer 适配器按它做对账，不能只看内部字段。
+    pub fn reference(&self) -> Option<&str> {
+        self.reference.as_deref()
+    }
+
+    /// 凭证要素的只读视图。模板随网点配置变，适配器据此渲染。
+    pub fn fields(&self) -> &BTreeMap<String, String> {
+        &self.fields
+    }
+
     pub fn set_fields(&mut self, fields: BTreeMap<String, String>) {
         self.fields = fields;
     }
@@ -116,6 +126,24 @@ impl Voucher {
 pub struct PrintReceipt {
     job_id: String,
     pages: u32,
+}
+
+impl PrintReceipt {
+    /// 外部 Printer 适配器用它返回打印结果，不必依赖私有字段。
+    pub fn new(job_id: impl Into<String>, pages: u32) -> Self {
+        Self {
+            job_id: job_id.into(),
+            pages,
+        }
+    }
+
+    pub fn job_id(&self) -> &str {
+        &self.job_id
+    }
+
+    pub fn pages(&self) -> u32 {
+        self.pages
+    }
 }
 
 /// 卡数据。**只存掩码**：完整 PAN 不允许出现在这个结构体里，
@@ -392,10 +420,7 @@ impl Printer for MockPrinter {
             .next_job
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
-        Ok(PrintReceipt {
-            job_id: format!("PRINT-{n}"),
-            pages: 1,
-        })
+        Ok(PrintReceipt::new(format!("PRINT-{n}"), 1))
     }
 }
 
@@ -530,6 +555,38 @@ mod tests {
         Voucher::new("voucher-deposit", "account.deposit")
             .field("amount", "100.00")
             .field("account", "6222****0123")
+    }
+
+    #[test]
+    fn external_adapter_can_read_voucher_and_build_receipt() {
+        // 模拟包外适配器：只用公开接口，不碰私有字段。
+        fn render(voucher: &Voucher) -> String {
+            let mut lines = vec![
+                voucher.template().to_string(),
+                voucher.tx_code().to_string(),
+                voucher.reference().unwrap_or("无流水号").to_string(),
+            ];
+            for (key, value) in voucher.fields() {
+                lines.push(format!("{key}={value}"));
+            }
+            lines.join("|")
+        }
+
+        let mut voucher = voucher();
+        assert_eq!(voucher.reference(), None);
+        assert_eq!(voucher.fields()["amount"], "100.00");
+        voucher.set_reference(Some("TX-1".into()));
+        assert_eq!(voucher.reference(), Some("TX-1"));
+        assert!(render(&voucher).contains("TX-1"));
+
+        let receipt = PrintReceipt::new("JOB-1", 2);
+        assert_eq!(receipt.job_id(), "JOB-1");
+        assert_eq!(receipt.pages(), 2);
+
+        // 现有 Printer 实现构造的返回值也能用 getter 读取。
+        let receipt = MockPrinter::ready().print(&voucher).unwrap();
+        assert_eq!(receipt.job_id(), "PRINT-1");
+        assert_eq!(receipt.pages(), 1);
     }
 
     // S-01
