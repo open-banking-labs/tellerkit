@@ -843,10 +843,10 @@ mod tests {
             TxEngine::new(),
             None,
             None,
-            crate::ports::RemoteChoice {
-                remote: Arc::clone(&mock) as Arc<dyn RemoteBanking>,
-                mock: Some(mock),
-            },
+            crate::ports::RemoteChoice::new(
+                Arc::clone(&mock) as Arc<dyn RemoteBanking>,
+                Some(mock),
+            ),
             tellerkit_core::mock::demo_verifying_key(),
         );
         state.clock = clock;

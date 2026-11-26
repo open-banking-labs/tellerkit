@@ -49,8 +49,22 @@ impl Clock for SystemClock {
 /// 把 `remote` 与 `mock` 绑在一起传，避免 `AppState::new` 为演示开关单独加一个参数；
 /// 将来去掉演示远端时，这里就是唯一需要改的构造点。
 pub struct RemoteChoice {
-    pub remote: Arc<dyn RemoteBanking>,
-    pub mock: Option<Arc<MockRemote>>,
+    remote: Arc<dyn RemoteBanking>,
+    mock: Option<Arc<MockRemote>>,
+}
+
+impl RemoteChoice {
+    pub fn new(remote: Arc<dyn RemoteBanking>, mock: Option<Arc<MockRemote>>) -> Self {
+        Self { remote, mock }
+    }
+
+    pub fn remote(&self) -> &Arc<dyn RemoteBanking> {
+        &self.remote
+    }
+
+    pub fn mock(&self) -> Option<&Arc<MockRemote>> {
+        self.mock.as_ref()
+    }
 }
 
 /// 演示用远端：把"在线 / 离线 / 坏包 / 业务拒绝"做成可切换的开关。

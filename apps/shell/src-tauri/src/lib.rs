@@ -89,10 +89,11 @@ impl AppState {
         tx: TxEngine,
         journal_warning: Option<String>,
         audit: Option<Arc<SqliteJournal>>,
-        remote: ports::RemoteChoice,
+        choice: ports::RemoteChoice,
         verifying_key: VerifyingKey,
     ) -> Self {
-        let ports::RemoteChoice { remote, mock } = remote;
+        let remote = Arc::clone(choice.remote());
+        let mock = choice.mock().cloned();
         Self {
             remote,
             mock,
@@ -158,17 +159,17 @@ fn build_remote(appdata: &std::path::Path) -> (ports::RemoteChoice, Option<Strin
         .and_then(|policy| bootstrap::resolve_remote(&path, release, &policy));
 
     match outcome {
-        Ok(setup) => (setup.choice, setup.note, StartupFatal::default()),
+        Ok(setup) => {
+            let (choice, note) = setup.into_parts();
+            (choice, note, StartupFatal::default())
+        }
         Err(reason) => {
             // 进程还要起来：只有起来，才能把"为什么被拒绝"显示成人能读的页面。
             // 业务命令一律先过 `StartupFatal::check`，所以演示远端不会被真正使用。
             eprintln!("启动被拒绝：{reason}");
             let mock = Arc::new(ports::MockRemote::default());
             (
-                ports::RemoteChoice {
-                    remote: Arc::clone(&mock) as Arc<dyn RemoteBanking>,
-                    mock: Some(mock),
-                },
+                ports::RemoteChoice::new(Arc::clone(&mock) as Arc<dyn RemoteBanking>, Some(mock)),
                 None,
                 StartupFatal(Some(reason)),
             )

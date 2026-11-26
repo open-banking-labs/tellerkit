@@ -58,7 +58,7 @@ fn io_err(context: &str, e: std::io::Error) -> TransportError {
 /// 长连接要处理心跳/重连/半开，收益不抵复杂度。
 #[derive(Debug, Clone)]
 pub struct TcpTransport {
-    pub timeout: Duration,
+    timeout: Duration,
 }
 
 impl Default for TcpTransport {
@@ -129,7 +129,7 @@ impl Transport for TcpTransport {
 /// 不处理：重定向、分块编码、连接复用、客户端证书。这些在接入真实后台前按需补。
 #[derive(Clone)]
 pub struct HttpTransport {
-    pub timeout: Duration,
+    timeout: Duration,
     client: Arc<ClientConfig>,
 }
 

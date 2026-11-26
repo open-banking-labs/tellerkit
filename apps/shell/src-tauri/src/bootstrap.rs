@@ -18,9 +18,28 @@ use crate::ports::{MockRemote, RemoteChoice};
 
 /// 一次启动解析的结果：可以用的远端 + 要给人看的说明。
 pub struct RemoteSetup {
-    pub choice: RemoteChoice,
+    choice: RemoteChoice,
     /// 启动说明。debug 构建回退演示远端时**必须**非空，界面用它标演示模式。
-    pub note: Option<String>,
+    note: Option<String>,
+}
+
+impl RemoteSetup {
+    pub fn new(choice: RemoteChoice, note: Option<String>) -> Self {
+        Self { choice, note }
+    }
+
+    pub fn choice(&self) -> &RemoteChoice {
+        &self.choice
+    }
+
+    pub fn note(&self) -> Option<&str> {
+        self.note.as_deref()
+    }
+
+    /// 装配层原样取走两部分，避免为了私有化而复制 `Arc` 与说明文本。
+    pub fn into_parts(self) -> (RemoteChoice, Option<String>) {
+        (self.choice, self.note)
+    }
 }
 
 /// 启动被拒绝的原因。作为 `AppState` 字段，由唯一的加锁入口统一拦截。
@@ -106,15 +125,15 @@ pub fn resolve_remote(
     }
 
     match endpoint_config::load_router_with(path, policy) {
-        Ok(loaded) => Ok(RemoteSetup {
-            choice: RemoteChoice {
-                remote: Arc::new({
+        Ok(loaded) => Ok(RemoteSetup::new(
+            RemoteChoice::new(
+                Arc::new({
                     let (router, idempotent_tx) = loaded.into_parts();
                     RoutedBanking::new(router).with_idempotency(idempotent_tx)
                 }),
-                mock: None,
-            },
-            note: Some(format!(
+                None,
+            ),
+            Some(format!(
                 "已按 {} 接入真实端点{}",
                 path.display(),
                 if policy.require_tls() {
@@ -123,7 +142,7 @@ pub fn resolve_remote(
                     "（未强制 TLS：仅调试构建允许）"
                 }
             )),
-        }),
+        )),
         Err(e) => {
             if release {
                 Err(format!("端点配置不可用：{e}"))
@@ -138,13 +157,13 @@ pub fn resolve_remote(
 
 fn demo_setup(note: impl Into<String>) -> RemoteSetup {
     let mock = Arc::new(MockRemote::default());
-    RemoteSetup {
-        choice: RemoteChoice {
-            remote: Arc::clone(&mock) as Arc<dyn tellerkit_core::banking::RemoteBanking>,
-            mock: Some(mock),
-        },
-        note: Some(note.into()),
-    }
+    RemoteSetup::new(
+        RemoteChoice::new(
+            Arc::clone(&mock) as Arc<dyn tellerkit_core::banking::RemoteBanking>,
+            Some(mock),
+        ),
+        Some(note.into()),
+    )
 }
 
 #[cfg(test)]
@@ -221,8 +240,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("missing.json");
         let setup = resolve_remote(&path, false, &strict(false)).unwrap();
-        assert!(setup.choice.mock.is_some(), "调试构建回退演示远端");
-        let note = setup.note.expect("回退必须留 note");
+        assert!(setup.choice().mock().is_some(), "调试构建回退演示远端");
+        let note = setup.note().expect("回退必须留 note");
         assert!(note.contains("演示"), "note 要能让界面标出演示模式：{note}");
     }
 
@@ -261,8 +280,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write(dir.path(), "{ \"services\": {} }");
         let setup = resolve_remote(&path, false, &strict(false)).unwrap();
-        assert!(setup.choice.mock.is_some());
-        let note = setup.note.expect("降级必须留 note");
+        assert!(setup.choice().mock().is_some());
+        let note = setup.note().expect("降级必须留 note");
         assert!(
             note.contains("没有任何服务"),
             "note 要带原始原因，否则没人知道配置错在哪：{note}"
@@ -278,9 +297,9 @@ mod tests {
               { "transport": "http", "codec": "json", "url": "https://menu.internal/v1" } ] } }"#,
         );
         let setup = resolve_remote(&path, true, &lp(true, false, true)).unwrap();
-        assert!(setup.choice.mock.is_none(), "真实端点不该留 mock 句柄");
+        assert!(setup.choice().mock().is_none(), "真实端点不该留 mock 句柄");
         assert!(
-            setup.note.expect("接入说明").contains("真实端点"),
+            setup.note().expect("接入说明").contains("真实端点"),
             "要能看出接的是真实端点"
         );
     }
