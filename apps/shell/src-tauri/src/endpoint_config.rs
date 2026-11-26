@@ -184,10 +184,11 @@ pub fn load_router_with(path: &Path, policy: &LoadPolicy) -> Result<LoadedEndpoi
     let raw = String::from_utf8(bytes.clone()).map_err(|e| format!("端点配置不是 UTF-8：{e}"))?;
 
     if policy.require_signed {
-        let pubkey = policy
-            .pubkey
-            .as_deref()
-            .ok_or_else(|| "要求配置签名，但未设置 TK_CONFIG_PUBKEY".to_string())?;
+        let pubkey = policy.pubkey.as_deref().ok_or_else(|| {
+            "要求配置签名，但未提供配置公钥（release 需在构建时设置 TK_CONFIG_PUBKEY_HEX；\
+                 debug 可用 TK_CONFIG_PUBKEY 覆盖）"
+                .to_string()
+        })?;
         let sig_path = signature_path(path);
         let sig = std::fs::read_to_string(&sig_path)
             .map_err(|_| format!("缺少签名文件 {}", sig_path.display()))?;
@@ -209,7 +210,11 @@ pub fn parse(raw: &str) -> Result<Router, String> {
     parse_full(raw, false).map(|loaded| loaded.router)
 }
 
-/// `require_tls` 为真时拒绝一切 `http://` 端点（release 构建强制为真）。
+/// `require_tls` 为真时拒绝 `http://` 端点与所有 `tcp` 端点（release 构建强制为真）。
+///
+/// `TcpTransport` 直接收发明文字节，没有握手、没有证书校验；端点配置格式里
+/// 也没有任何显式加密标记可以证明一条 tcp 端点受保护。因此严格策略下一律拒绝，
+/// 不能只因为 URL 不是 `http://` 就放行。
 pub fn parse_with(raw: &str, require_tls: bool) -> Result<Router, String> {
     parse_full(raw, require_tls).map(|loaded| loaded.router)
 }
@@ -235,6 +240,12 @@ pub fn parse_full(raw: &str, require_tls: bool) -> Result<LoadedEndpoints, Strin
                             "{service}: 已要求 TLS（TK_REQUIRE_TLS=1），拒绝明文端点 {url}"
                         ));
                     }
+                }
+                if spec.transport() == "tcp" {
+                    return Err(format!(
+                        "{service}: 已要求 TLS（TK_REQUIRE_TLS=1），拒绝 transport=tcp 端点；\
+                         TCP 传输没有 TLS 协商，配置里也没有显式加密标记可放行，请改用 https://"
+                    ));
                 }
             }
             endpoints.push(build(service, spec)?);
@@ -406,6 +417,30 @@ mod tests {
         let cfg = r#"{ "services": { "x": [
             { "transport": "http", "codec": "json", "url": "ftp://bank.internal" } ] } }"#;
         assert!(parse(cfg).unwrap_err().contains("http://"));
+    }
+
+    #[test]
+    fn require_tls_rejects_tcp_transport() {
+        let cfg = r#"{ "services": { "acct.core": [
+            { "transport": "tcp", "codec": "json", "host": "10.0.8.11", "port": 7001 } ] } }"#;
+        let err = parse_with(cfg, true).unwrap_err();
+        assert!(err.contains("tcp"), "要指出被拒的是 tcp 端点：{err}");
+        assert!(err.contains("TLS 协商"), "要说明 TCP 无 TLS 协商：{err}");
+        assert!(err.contains("https://"), "要给可操作的替代方案：{err}");
+        assert!(parse(cfg).is_ok(), "非严格策略仍允许 tcp 端点");
+    }
+
+    #[test]
+    fn require_tls_rejects_tcp_even_when_another_service_uses_https() {
+        let strict = OK
+            .replace("http://menu.internal/v1", "https://menu.internal/v1")
+            .replace("http://acct.internal/v1", "https://acct.internal/v1");
+        let err = parse_with(&strict, true).unwrap_err();
+        assert!(
+            err.contains("card.auth") || err.contains("acct.core"),
+            "要指出哪条服务：{err}"
+        );
+        assert!(err.contains("tcp"), "实际：{err}");
     }
 
     #[test]
