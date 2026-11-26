@@ -36,6 +36,19 @@ use crate::{AppState, SharedState};
 /// 前端在包参数上覆盖写入，包自己给的同名字段不能生效。
 pub const PKG_ORIGIN_KEY: &str = "__pkg_origin";
 
+// IPC 对外错误码：稳定、可检索。SQLite/远端原文只进日志与审计，
+// 不拼进返回给前端的文案（P2：失败原因可查，细节不外泄）。
+const ERROR_LOGIN: &str = "E_LOGIN_FAILED";
+const ERROR_LOGIN_AUDIT: &str = "E_LOGIN_AUDIT_FAILED";
+const ERROR_RELOAD: &str = "E_MENU_RELOAD_FAILED";
+const ERROR_RECONCILIATION: &str = "E_RECONCILIATION_FAILED";
+
+/// 内部错误统一在这里收口：原文只写终端日志，返回值是错误码 + 固定中文。
+fn public_error(code: &str, friendly: &str, detail: &str) -> String {
+    eprintln!("[{code}] {detail}");
+    format!("[{code}] {friendly}")
+}
+
 /// `package_module` 的返回视图。源码与能力一起下发，命令层负责编码为字符串。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PackageModuleView {
@@ -863,23 +876,32 @@ impl<'a> ShellApp<'a> {
             Ok(outcome) => {
                 let snapshot = outcome.snapshot();
                 let detail = format!("角色 {}", snapshot.role_label());
-                self.audit(
+                if let Err(e) = self.audit(
                     snapshot.teller_no(),
                     "login",
                     snapshot.outlet_code(),
                     "ok",
                     &detail,
-                )
-                .map_err(|e| format!("审计写入失败：{e}；登录已成功，请立即报告管理员并查账"))?;
+                ) {
+                    return Err(public_error(
+                        ERROR_LOGIN_AUDIT,
+                        "登录已成功，但审计留痕失败，请立即报告管理员并查账",
+                        &format!("登录审计写入失败：{e}"),
+                    ));
+                }
                 Ok(outcome)
             }
             Err(reason) => {
                 let detail = format!("登录失败（角色 {role_id}）：{reason}");
-                let audited = self.audit("unknown", "login", role_id, "failed", &detail);
-                Err(match audited {
-                    Ok(()) => reason,
-                    Err(e) => format!("{reason}；审计写入失败：{e}"),
-                })
+                // 原文只留审计：审计写不进去也不能把 SQLite/远端细节回给前端。
+                if let Err(e) = self.audit("unknown", "login", role_id, "failed", &detail) {
+                    eprintln!("[{ERROR_LOGIN}] 登录失败审计写入失败：{e}");
+                }
+                Err(public_error(
+                    ERROR_LOGIN,
+                    "登录失败：角色不可用或认证服务暂不可达，请核对后重试",
+                    &detail,
+                ))
             }
         }
     }
@@ -977,8 +999,13 @@ impl<'a> ShellApp<'a> {
 
     /// 演示"本地包被篡改"后的回退：验签失败 → 服务端救回。
     pub fn reload_from_disk(&mut self) -> Result<ReloadOutcome, String> {
-        let outcome = sync::reload(self.state.remote.as_ref(), &self.state.store)
-            .map_err(|e| e.to_string())?;
+        let outcome = sync::reload(self.state.remote.as_ref(), &self.state.store).map_err(|e| {
+            public_error(
+                ERROR_RELOAD,
+                "菜单重载失败，请检查网络与本地菜单包后重试",
+                &e.to_string(),
+            )
+        })?;
         let note = outcome.notes().join("；");
         let verify_failed = outcome.verify_failed();
         let loaded = outcome.into_loaded();
@@ -1549,12 +1576,21 @@ impl<'a> ShellApp<'a> {
     /// 只读本地账本，不打主机。真正的对账以核心系统为准，
     /// 这里解决的是"柜员关账前先自查一遍"。
     pub fn reconciliation(&self) -> Result<Reconciliation, String> {
+        let friendly = "对账数据暂不可用，请稍后重试或联系管理员";
         let Some(journal) = &self.state.audit else {
-            return Err("审计日志不可用：账本未能打开".to_string());
+            return Err(public_error(
+                ERROR_RECONCILIATION,
+                friendly,
+                "审计账本未能打开",
+            ));
         };
         let today = start_of_day(self.clock.now_secs());
-        let rows = journal.summary(&today)?;
-        let recent = journal.recent(20)?;
+        let rows = journal
+            .summary(&today)
+            .map_err(|e| public_error(ERROR_RECONCILIATION, friendly, &e))?;
+        let recent = journal
+            .recent(20)
+            .map_err(|e| public_error(ERROR_RECONCILIATION, friendly, &e))?;
 
         Ok(Reconciliation {
             since: today,
@@ -1776,8 +1812,12 @@ mod tests {
     }
 
     fn state_with(clock: Arc<FrozenClock>) -> AppState {
+        use std::sync::atomic::AtomicUsize;
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
         ShellApp::fail_audits_after(usize::MAX);
-        let dir = std::env::temp_dir().join(format!("tk-app-test-{}", std::process::id()));
+        // 每个测试用独立目录：共享目录在并行执行时会互相覆盖菜单包，导致假红。
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("tk-app-test-{}-{seq}", std::process::id()));
         let store = tellerkit_core::MenuStore::new(dir, tellerkit_core::mock::demo_verifying_key());
         let mock = Arc::new(crate::ports::MockRemote::default());
         let mut state = AppState::new(
@@ -2064,7 +2104,11 @@ mod tests {
         let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
         let mut state = state_with(clock);
         let err = ShellApp::new(&mut state).login("no-such-role").unwrap_err();
-        assert!(err.contains("未知角色"), "实际：{err}");
+        assert!(
+            err.starts_with("[E_LOGIN_FAILED]"),
+            "登录失败必须给稳定错误码：{err}"
+        );
+        assert!(err.contains("登录失败"), "实际：{err}");
 
         let events = audit_events(&state);
         assert!(
@@ -2075,6 +2119,104 @@ mod tests {
                     && detail.contains("no-such-role")),
             "登录失败必须留下 failed 审计：{events:?}"
         );
+    }
+
+    /// 带路径/表名/SQL 的内部原文，专门用来验证它不会透传到 IPC 文案。
+    const RAW_INTERNAL_ERROR: &str =
+        "SQLite failure at /var/lib/tellerkit/tx.db: no such table: tx_journal; SELECT * FROM tx_journal";
+
+    struct RawErrorHost;
+
+    impl MenuSource for RawErrorHost {
+        fn probe_menu(&self) -> Result<MenuVersionProbe, RemoteError> {
+            Err(RemoteError::Unavailable(RAW_INTERNAL_ERROR.into()))
+        }
+
+        fn download_menu(&self) -> Result<Vec<u8>, RemoteError> {
+            Err(RemoteError::Unavailable(RAW_INTERNAL_ERROR.into()))
+        }
+    }
+
+    impl TxHost for RawErrorHost {
+        fn supports_idempotency(&self) -> bool {
+            true
+        }
+
+        fn submit(&self, _request: &TxRequest) -> Result<String, HostError> {
+            Err(HostError::Unavailable)
+        }
+    }
+
+    impl RemoteBanking for RawErrorHost {
+        fn login(
+            &self,
+            _role: &str,
+            _version: u64,
+        ) -> Result<tellerkit_core::PermSnapshot, RemoteError> {
+            Err(RemoteError::Unavailable(RAW_INTERNAL_ERROR.into()))
+        }
+
+        fn reverse(&self, _key: &str, _reason: &str) -> Result<String, RemoteError> {
+            Err(RemoteError::Unavailable(RAW_INTERNAL_ERROR.into()))
+        }
+    }
+
+    fn assert_no_internal_detail(text: &str) {
+        for marker in ["/var/lib", "tx.db", "tx_journal", "SELECT"] {
+            assert!(
+                !text.contains(marker),
+                "内部细节 {marker} 不得透传到 IPC：{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn login_and_reload_errors_do_not_leak_internal_details() {
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let mut state = state_with(Arc::clone(&clock));
+        state.remote = Arc::new(RawErrorHost);
+
+        let err = ShellApp::new(&mut state).login("teller").unwrap_err();
+        assert!(err.starts_with("[E_LOGIN_FAILED]"), "实际：{err}");
+        assert_no_internal_detail(&err);
+        assert!(
+            audit_events(&state)
+                .iter()
+                .any(|(action, result, detail)| action == "login"
+                    && result == "failed"
+                    && detail.contains("tx_journal")),
+            "内部原文应只留在审计里"
+        );
+
+        // 空菜单目录：sync::reload 必然走远端，远端错误带原始 SQL/路径。
+        let dir = tempfile::tempdir().unwrap();
+        state.store = tellerkit_core::MenuStore::new(
+            dir.path().join("menu"),
+            tellerkit_core::mock::demo_verifying_key(),
+        );
+        let err = ShellApp::new(&mut state).reload_from_disk().unwrap_err();
+        assert!(err.starts_with("[E_MENU_RELOAD_FAILED]"), "实际：{err}");
+        assert_no_internal_detail(&err);
+    }
+
+    #[test]
+    fn reconciliation_errors_use_fixed_copy_even_with_raw_journal_text() {
+        // 账本打不开的分支：文案固定且带码。
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let mut state = state_with(Arc::clone(&clock));
+        state.audit = None;
+        let err = ShellApp::new(&mut state).reconciliation().unwrap_err();
+        assert!(err.starts_with("[E_RECONCILIATION_FAILED]"), "实际：{err}");
+        assert_no_internal_detail(&err);
+
+        // summary/recent 的原文在 public_error 处被替换；这里直接覆盖原文形态。
+        let err = public_error(
+            ERROR_RECONCILIATION,
+            "对账数据暂不可用，请稍后重试或联系管理员",
+            RAW_INTERNAL_ERROR,
+        );
+        assert!(err.starts_with("[E_RECONCILIATION_FAILED]"), "实际：{err}");
+        assert_no_internal_detail(&err);
     }
 
     #[test]

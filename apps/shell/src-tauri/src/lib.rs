@@ -13,7 +13,9 @@ pub mod config_sig;
 pub mod endpoint_config;
 pub mod ports;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 use tellerkit_core::banking::RemoteBanking;
 use tellerkit_core::device::{mock_devices, DevicePolicy, Devices};
 use tellerkit_core::mock::demo_verifying_key;
@@ -258,6 +260,42 @@ fn spawn_replay_worker(handle: tauri::AppHandle) {
     });
 }
 
+/// 会话自动锁屏的后台节奏。前端 tick 只是辅助：前端停了，Rust 侧照样按 idle 超时锁屏。
+const SESSION_TICK_INTERVAL: Duration = Duration::from_secs(5);
+
+/// 后台 tick 只碰 `SessionSlot`，不拿 `AppState`：慢交易不能拖住锁屏检查。
+/// `stop` 由 `RunEvent::Exit` 置位，线程随应用退出而结束。
+fn spawn_session_tick_worker(session: SharedSession, stop: Arc<AtomicBool>) {
+    spawn_session_tick_worker_with_interval(session, stop, SESSION_TICK_INTERVAL);
+}
+
+fn spawn_session_tick_worker_with_interval(
+    session: SharedSession,
+    stop: Arc<AtomicBool>,
+    interval: Duration,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        loop {
+            if stop.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(interval);
+            if stop.load(Ordering::SeqCst) {
+                break;
+            }
+            // 与 commands::session_tick 同一语义：启动拒绝先拦，再 tick。
+            match session.lock() {
+                Ok(mut slot) => {
+                    if slot.check_startup().is_ok() {
+                        let _ = slot.tick();
+                    }
+                }
+                Err(_) => eprintln!("会话槽已损坏，后台锁屏检查暂停"),
+            }
+        }
+    })
+}
+
 /// 让同一个 SQLite 连接既做交易账本、又做审计查询。
 ///
 /// `TxEngine` 需要 `Box<dyn TxJournal>` 的所有权，而命令层还要按需查审计，
@@ -319,8 +357,11 @@ impl TxJournal for ArcJournal {
 }
 
 pub fn run() {
-    tauri::Builder::default()
-        .setup(|app| {
+    // 后台会话 tick 的退出信号由事件循环的 Exit 事件置位。
+    let stop = Arc::new(AtomicBool::new(false));
+    let setup_stop = Arc::clone(&stop);
+    let app = tauri::Builder::default()
+        .setup(move |app| {
             let appdata = app.path().app_data_dir()?;
             let menu_dir = appdata.join("menu");
             // P0：公钥内置在客户端；生产环境由构建配置注入，私钥永不进客户端。
@@ -437,10 +478,15 @@ pub fn run() {
                 eprintln!("{note}");
             }
             // 会话槽单独托管的是同一个 Arc（不是副本），`session_*` 命令按类型直接取。
-            app.manage(Arc::clone(&state.session));
+            // 先留一份给后台 tick，再 move state 进托管态。
+            let session_for_tick = Arc::clone(&state.session);
+            app.manage(Arc::clone(&session_for_tick));
             app.manage(Arc::new(Mutex::new(state)));
             // 必须在 manage 之后：线程的第一次 tick 要能拿到状态
             spawn_replay_worker(app_handle);
+            // 同一个 session Arc 交给后台：前端停 tick 也按 idle 超时锁屏。
+            spawn_session_tick_worker(session_for_tick, Arc::clone(&setup_stop));
+            // 这里只克隆 Arc，不持锁；后台线程每次只锁 SessionSlot。
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -468,19 +514,72 @@ pub fn run() {
             commands::session_tick,
             commands::session_blur,
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("TellerKit 启动失败");
+    app.run(move |_app, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            stop.store(true, Ordering::SeqCst);
+        }
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ports::Clock;
+    use std::sync::atomic::AtomicU64;
+    use std::time::Instant;
 
     #[test]
     fn injected_key_wins_over_demo() {
         let hex = tellerkit_core::mock::demo_pubkey_hex();
         let key = resolve_menu_verifying_key(Some(&hex), true).expect("演示公钥十六进制必须可解析");
         assert_eq!(key, demo_verifying_key());
+    }
+
+    /// 没有前端 `session_tick` 的参与：Rust 后台线程自己按 idle 超时锁屏。
+    #[test]
+    fn background_tick_locks_without_frontend_tick() {
+        struct TestClock(AtomicU64);
+        impl Clock for TestClock {
+            fn now_secs(&self) -> u64 {
+                self.0.load(Ordering::SeqCst)
+            }
+        }
+
+        let clock = Arc::new(TestClock(AtomicU64::new(0)));
+        let session: SharedSession =
+            Arc::new(Mutex::new(app::SessionSlot::new(clock.clone(), None)));
+        session.lock().expect("会话锁不应中毒").begin("T0000");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker = spawn_session_tick_worker_with_interval(
+            Arc::clone(&session),
+            Arc::clone(&stop),
+            Duration::from_millis(5),
+        );
+        assert!(
+            !session.lock().expect("会话锁不应中毒").view().locked(),
+            "刚登录时不应锁定"
+        );
+
+        // 只推进注入时钟，全程不调用前端/命令层的 tick。
+        clock.0.store(180, Ordering::SeqCst);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut locked = false;
+        while Instant::now() < deadline {
+            if session.lock().expect("会话锁不应中毒").view().locked() {
+                locked = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        stop.store(true, Ordering::SeqCst);
+        worker.join().expect("后台 tick 线程应随停止信号退出");
+
+        assert!(locked, "前端不 tick 时也必须由 Rust 后台线程锁屏");
+        let view = session.lock().expect("会话锁不应中毒").view();
+        assert_eq!(view.reason().as_deref(), Some("无操作超时"));
     }
 
     #[test]
