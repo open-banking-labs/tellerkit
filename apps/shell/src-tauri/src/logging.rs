@@ -161,6 +161,7 @@ pub fn log_for(level: Level, target: &str, request_id: &str, message: &str) {
     }
 }
 
+#[allow(dead_code)] // 对外日志 API：当前调用点只用 info/warn/error，保留 debug 供后续接入
 pub fn debug(target: &str, message: &str) {
     log(Level::Debug, target, message);
 }
