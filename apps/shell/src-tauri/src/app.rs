@@ -517,7 +517,7 @@ pub struct TxSubmitPlan {
     code: String,
     signature: String,
     shortcut: Option<TxResult>,
-    lease: Option<HostLease>,
+    _lease: Option<HostLease>,
 }
 
 impl TxSubmitPlan {
@@ -585,7 +585,7 @@ impl UpdatePlan {
     pub fn prefetch(&self) -> MenuPrefetch {
         let probe = self.remote.probe_menu();
         let download = match &probe {
-            Ok(p) if self.local.map_or(true, |v| p.latest() > v) => self.remote.download_menu(),
+            Ok(p) if self.local.is_none_or(|v| p.latest() > v) => self.remote.download_menu(),
             _ => Ok(Vec::new()),
         };
         MenuPrefetch { probe, download }
@@ -1232,7 +1232,7 @@ impl<'a> ShellApp<'a> {
                 code,
                 signature: String::new(),
                 shortcut: Some(TxResult::rejected(&msg)),
-                lease: None,
+                _lease: None,
             });
         }
         let signature = payload_signature(&request);
@@ -1275,7 +1275,7 @@ impl<'a> ShellApp<'a> {
             code,
             signature,
             shortcut,
-            lease: claim.lease,
+            _lease: claim.lease,
         })
     }
 
@@ -1327,16 +1327,13 @@ impl<'a> ShellApp<'a> {
     pub fn prepare_replay(&mut self) -> Result<ReplayPlan, String> {
         self.require_unlocked("replay")?;
         self.require_auditable("replay", "tx_queue")?;
-        let claim = match HostCalls::claim(
+        let claim = HostCalls::claim(
             &self.state.host_calls,
             "replay:all",
             "",
             "",
             "上一轮重放仍在进行中，请稍后重试",
-        ) {
-            Ok(claim) => claim,
-            Err(e) => return Err(e),
-        };
+        )?;
         let lease = claim.lease.ok_or_else(|| "重放状态冲突".to_string())?;
         let now = self.clock.now_secs();
         // core 的 run_once 从账本读回挂起请求；这里读同一份账本算出到期键，
