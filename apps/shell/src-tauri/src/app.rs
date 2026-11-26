@@ -25,7 +25,7 @@ use tellerkit_core::tx::{HostError, TxHost, TxJournal, TxRequest, TxResult, TxSt
 use tellerkit_core::MenuTree;
 use tellerkit_core::MenuView;
 use tellerkit_core::{filter_visible, LoadSource};
-use tellerkit_journal_sqlite::AuditEvent;
+use tellerkit_journal_sqlite::{AuditEvent, SqliteJournal};
 
 use crate::bootstrap::StartupFatal;
 use crate::lock_app_state;
@@ -908,7 +908,7 @@ impl<'a> ShellApp<'a> {
             .session
             .lock()
             .map_err(|_| "会话状态已损坏，请重启客户端".to_string())?
-            .begin(&snapshot.teller_no);
+            .begin(snapshot.teller_no());
         Ok(LoginOutcome {
             snapshot,
             menu,
@@ -1226,9 +1226,13 @@ impl<'a> ShellApp<'a> {
         };
         // 已定论的同键交易不再打主机；core 对重复提交也会补同样的说明。
         let shortcut = if let Some(previous) = claim.cached {
-            let mut result = previous;
-            result.message = format!("重复提交：返回首次结果（{}）", result.message);
-            Some(result)
+            let message = format!("重复提交：返回首次结果（{}）", previous.message());
+            Some(TxResult::restore(
+                previous.status(),
+                previous.reference().map(str::to_string),
+                message,
+                previous.replayable(),
+            ))
         } else if self.state.tx.pending_keys().contains(&key) {
             Some(TxResult::pending("重复提交：交易已挂起，等待重放"))
         } else {
@@ -1321,7 +1325,7 @@ impl<'a> ShellApp<'a> {
         let due = self.state.replay.due(now);
         let requests = pending
             .into_iter()
-            .filter(|request| due.contains(&request.idempotency_key()))
+            .filter(|request| due.iter().any(|key| key == request.idempotency_key()))
             .collect();
         Ok(ReplayPlan {
             remote: Arc::clone(&self.remote),
@@ -1337,7 +1341,9 @@ impl<'a> ShellApp<'a> {
         plan: ReplayPlan,
         outcomes: Vec<(String, Result<String, HostError>)>,
     ) -> Result<String, String> {
-        let host = ReplayedHost { outcomes };
+        let host = ReplayedHost {
+            outcomes: outcomes.into_iter().collect(),
+        };
         let run = tellerkit_core::replay::run_once(
             &mut self.state.tx,
             &mut self.state.replay,
@@ -2283,7 +2289,7 @@ mod tests {
         }
 
         fn wait_until_entered(&self) {
-            let (lock, cv) = &self.entered;
+            let (lock, cv) = &*self.entered;
             let mut seen = lock.lock().expect("测试锁不应中毒");
             while !*seen {
                 seen = cv.wait(seen).expect("测试锁不应中毒");
@@ -2291,7 +2297,7 @@ mod tests {
         }
 
         fn release(&self) {
-            let (lock, cv) = &self.release;
+            let (lock, cv) = &*self.release;
             let mut open = lock.lock().expect("测试锁不应中毒");
             *open = true;
             cv.notify_all();
@@ -2300,10 +2306,10 @@ mod tests {
 
     impl TxHost for SlowHost {
         fn submit(&self, _request: &TxRequest) -> Result<String, HostError> {
-            let (entered_lock, entered_cv) = &self.entered;
+            let (entered_lock, entered_cv) = &*self.entered;
             *entered_lock.lock().expect("测试锁不应中毒") = true;
             entered_cv.notify_all();
-            let (release_lock, release_cv) = &self.release;
+            let (release_lock, release_cv) = &*self.release;
             let mut open = release_lock.lock().expect("测试锁不应中毒");
             while !*open {
                 open = release_cv.wait(open).expect("测试锁不应中毒");
