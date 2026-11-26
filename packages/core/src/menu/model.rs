@@ -257,14 +257,15 @@ impl MenuTree {
                 cursor = by_code.get(code).and_then(|n| n.parent_code.as_deref());
             }
         }
-        // Action 不能有子节点。
+        // Action 不能有子节点。先把「被谁当成父节点」建成集合：
+        // 每个 Action 扫一遍全表会退化成 O(n²)，大菜单下是数亿次比较。
+        let parents: HashSet<&str> = self
+            .nodes
+            .iter()
+            .filter_map(|n| n.parent_code.as_deref())
+            .collect();
         for node in &self.nodes {
-            if node.node_type == NodeType::Action
-                && self
-                    .nodes
-                    .iter()
-                    .any(|n| n.parent_code.as_deref() == Some(node.code.as_str()))
-            {
+            if node.node_type == NodeType::Action && parents.contains(node.code.as_str()) {
                 return Err(TreeError::ActionAsParent(node.code.clone()));
             }
         }
