@@ -264,8 +264,8 @@ fn validate_menu_namespace(package: &BizPackage) -> Result<(), PkgError> {
     let prefix = format!("{}.", package.manifest.id);
     for node in &package.menus {
         // 根节点可以就是包 ID 本身（`biz.demo`），子节点必须在 `biz.demo.` 之下
-        if node.code != package.manifest.id && !node.code.starts_with(&prefix) {
-            return Err(PkgError::UnnamespacedMenu(node.code.clone()));
+        if node.code() != package.manifest.id.as_str() && !node.code().starts_with(&prefix) {
+            return Err(PkgError::UnnamespacedMenu(node.code().to_string()));
         }
     }
     Ok(())
@@ -399,7 +399,7 @@ pub fn merge_packages(tree: &mut MenuTree, packages: &[BizPackage]) -> Vec<Strin
         let mut nodes = package.menus.clone();
         // 来源不可自证：统一改写，避免包伪装成 shell 节点
         for node in &mut nodes {
-            node.source = format!("pkg:{}", package.manifest.id);
+            node.set_source(format!("pkg:{}", package.manifest.id));
         }
         conflicts.extend(tree.merge_package(nodes));
     }
@@ -537,8 +537,8 @@ mod tests {
         let mut tree = MenuTree::new(1, vec![]);
         let conflicts = merge_packages(&mut tree, &[loaded]);
         assert!(conflicts.is_empty());
-        assert_eq!(tree.nodes.len(), 1);
-        assert_eq!(tree.nodes[0].source, "pkg:biz.demo");
+        assert_eq!(tree.node_count(), 1);
+        assert_eq!(tree.nodes()[0].source(), "pkg:biz.demo");
     }
 
     // S-02
@@ -635,17 +635,17 @@ mod tests {
     #[test]
     fn existing_menu_wins_over_package() {
         let mut tree = MenuTree::new(1, vec![node("biz.demo.home", None, 1)]);
-        tree.nodes[0].title = "主壳的节点".into();
+        tree.nodes_mut()[0].set_title("主壳的节点".into());
         let conflicts = merge_packages(&mut tree, &[pkg("biz.demo", &[])]);
         assert_eq!(conflicts, vec!["biz.demo.home".to_string()]);
-        assert_eq!(tree.nodes.len(), 1);
-        assert_eq!(tree.nodes[0].title, "主壳的节点");
+        assert_eq!(tree.node_count(), 1);
+        assert_eq!(tree.nodes()[0].title(), "主壳的节点");
     }
 
     #[test]
     fn package_cannot_escape_its_namespace() {
         let mut package = pkg("biz.demo", &[]);
-        package.menus[0].code = "account.withdraw".into(); // 别人的树
+        package.menus[0] = MenuNode::page("account.withdraw", None, "account.withdraw", 100); // 别人的树
         let sk = demo_signing_key();
         let bytes = package.encode(&sk).unwrap();
         assert!(matches!(
@@ -688,7 +688,7 @@ mod tests {
     fn bad_package_id_is_rejected() {
         let mut package = pkg("demo", &[]);
         package.manifest.id = "demo".into();
-        package.menus[0].code = "demo.home".into();
+        package.menus[0] = MenuNode::page("demo.home", None, "demo.home", 100);
         assert!(matches!(
             package.encode(&demo_signing_key()),
             Err(PkgError::BadPackageId(_))

@@ -38,7 +38,7 @@ pub fn demo_pubkey_hex() -> String {
 pub fn demo_tree(menu_version: u64) -> MenuTree {
     fn page(code: &str, parent: &str, title: &str, sort: i32, actions: &[&str]) -> MenuNode {
         let mut node = MenuNode::page(code, Some(parent), title, sort);
-        node.actions = actions.iter().map(|s| s.to_string()).collect();
+        node.set_actions(actions.iter().map(|s| s.to_string()).collect());
         node
     }
 
@@ -108,8 +108,8 @@ pub fn demo_tree(menu_version: u64) -> MenuTree {
     ];
 
     // 演示 `status=hidden` 的效果：节点被授予但状态为 hidden 时不出现。
-    if let Some(n) = nodes.iter_mut().find(|n| n.code == "system.cache") {
-        n.status = NodeStatus::Hidden;
+    if let Some(n) = nodes.iter_mut().find(|n| n.code() == "system.cache") {
+        n.set_status(NodeStatus::Hidden);
     }
 
     MenuTree::new(menu_version, nodes)

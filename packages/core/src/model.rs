@@ -51,55 +51,124 @@ fn default_sort() -> i32 {
 /// `code` 必须与权限码体系对齐，`PermSnapshot.menu_codes` 里存的就是这些值。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MenuNode {
-    pub code: String,
+    code: String,
     #[serde(default)]
-    pub parent_code: Option<String>,
-    pub title: String,
+    parent_code: Option<String>,
+    title: String,
     #[serde(default)]
-    pub title_key: Option<String>,
+    title_key: Option<String>,
     #[serde(rename = "type")]
-    pub node_type: NodeType,
+    node_type: NodeType,
     #[serde(default)]
-    pub route: Option<String>,
+    route: Option<String>,
     #[serde(default)]
-    pub icon: Option<String>,
+    icon: Option<String>,
     #[serde(default = "default_sort")]
-    pub sort: i32,
+    sort: i32,
     /// 该页面挂载的按钮级权限码（仅 Page 使用）。
     #[serde(default)]
-    pub actions: Vec<String>,
+    actions: Vec<String>,
     /// 来源标记：`shell` 或 `pkg:<packageId>`，用于排障与冲突定位。
     #[serde(default = "default_source")]
-    pub source: String,
+    source: String,
     #[serde(default = "default_status")]
-    pub status: NodeStatus,
+    status: NodeStatus,
 }
 
 impl MenuNode {
-    /// 便捷构造：页面节点。
-    pub fn page(code: &str, parent: Option<&str>, title: &str, sort: i32) -> Self {
+    /// 通用构造：字段取默认值，页面路由等特性由便捷构造补上。
+    pub fn new(
+        code: &str,
+        parent: Option<&str>,
+        title: &str,
+        node_type: NodeType,
+        sort: i32,
+    ) -> Self {
         Self {
             code: code.to_string(),
             parent_code: parent.map(|s| s.to_string()),
             title: title.to_string(),
             title_key: None,
-            node_type: NodeType::Page,
-            route: Some(format!("/tx/{}", code.replace('.', "/"))),
+            node_type,
+            route: None,
             icon: None,
             sort,
             actions: Vec::new(),
-            source: "shell".to_string(),
-            status: NodeStatus::Active,
+            source: default_source(),
+            status: default_status(),
         }
+    }
+
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    pub fn parent_code(&self) -> Option<&str> {
+        self.parent_code.as_deref()
+    }
+
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    pub fn title_key(&self) -> Option<&str> {
+        self.title_key.as_deref()
+    }
+
+    pub fn node_type(&self) -> NodeType {
+        self.node_type
+    }
+
+    pub fn route(&self) -> Option<&str> {
+        self.route.as_deref()
+    }
+
+    pub fn icon(&self) -> Option<&str> {
+        self.icon.as_deref()
+    }
+
+    pub fn sort(&self) -> i32 {
+        self.sort
+    }
+
+    pub fn actions(&self) -> &[String] {
+        &self.actions
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub fn status(&self) -> NodeStatus {
+        self.status
+    }
+
+    pub fn set_title(&mut self, title: String) {
+        self.title = title;
+    }
+
+    pub fn set_status(&mut self, status: NodeStatus) {
+        self.status = status;
+    }
+
+    pub fn set_actions(&mut self, actions: Vec<String>) {
+        self.actions = actions;
+    }
+
+    pub fn set_source(&mut self, source: String) {
+        self.source = source;
+    }
+
+    /// 便捷构造：页面节点。
+    pub fn page(code: &str, parent: Option<&str>, title: &str, sort: i32) -> Self {
+        let mut node = Self::new(code, parent, title, NodeType::Page, sort);
+        node.route = Some(format!("/tx/{}", code.replace('.', "/")));
+        node
     }
 
     /// 便捷构造：分组节点。
     pub fn group(code: &str, parent: Option<&str>, title: &str, sort: i32) -> Self {
-        Self {
-            node_type: NodeType::Group,
-            route: None,
-            ..Self::page(code, parent, title, sort)
-        }
+        Self::new(code, parent, title, NodeType::Group, sort)
     }
 }
 
@@ -107,8 +176,8 @@ impl MenuNode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MenuTree {
     /// 菜单包版本号，与 `.mtree` 头部、服务端 `menuVersion` 一致。
-    pub menu_version: u64,
-    pub nodes: Vec<MenuNode>,
+    menu_version: u64,
+    nodes: Vec<MenuNode>,
 }
 
 /// 菜单树结构错误。这些错误在任何时候都应导致"拒绝使用该包"。
@@ -130,6 +199,26 @@ impl MenuTree {
             menu_version,
             nodes,
         }
+    }
+
+    pub fn menu_version(&self) -> u64 {
+        self.menu_version
+    }
+
+    pub fn set_menu_version(&mut self, version: u64) {
+        self.menu_version = version;
+    }
+
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub(crate) fn nodes(&self) -> &[MenuNode] {
+        &self.nodes
+    }
+
+    pub(crate) fn nodes_mut(&mut self) -> &mut Vec<MenuNode> {
+        &mut self.nodes
     }
 
     /// 结构校验：重复 code、父节点缺失、环、Action 作为父节点。
@@ -286,8 +375,8 @@ mod tests {
             MenuNode::page("a.x", Some("a"), "X", 1),
         ]);
         assert_eq!(rejected, vec!["a".to_string()]);
-        assert_eq!(t.nodes.len(), 2);
-        assert_eq!(t.nodes[0].title, "A");
+        assert_eq!(t.node_count(), 2);
+        assert_eq!(t.nodes()[0].title(), "A");
     }
 
     #[test]

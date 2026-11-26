@@ -84,7 +84,7 @@ for (const f of files) {
   for (const field of uniqueFields) {
     const owners = fieldOwners.get(field);
     if (owners.has(f.rel)) continue;
-    const hits = text.match(new RegExp(`\\.${field}\\b`, "g"));
+    const hits = text.match(new RegExp(`\\.${field}\\b(?!\\s*\\()`, "g"));
     if (hits) leaks.push({ field, file: f.rel, owner: [...owners][0], hits: hits.length });
   }
 }

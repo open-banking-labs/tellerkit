@@ -40,6 +40,16 @@ pub struct LoadedMenu {
     pub bytes: usize,
 }
 
+impl LoadedMenu {
+    pub fn new(tree: MenuTree, source: LoadSource, bytes: usize) -> Self {
+        Self {
+            tree,
+            source,
+            bytes,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("本地没有可用的菜单包")]
@@ -131,11 +141,11 @@ impl MenuStore {
         let path = self.path_for(version);
         let bytes = fs::read(&path)?;
         let tree = pack::open(&bytes, &self.pubkey)?;
-        Ok(LoadedMenu {
+        Ok(LoadedMenu::new(
             tree,
-            source: LoadSource::LocalFile { version },
-            bytes: bytes.len(),
-        })
+            LoadSource::LocalFile { version },
+            bytes.len(),
+        ))
     }
 
     /// 验签后原子安装。返回解码后的树，便于调用方立即使用。
@@ -146,10 +156,10 @@ impl MenuStore {
         let tree = pack.decode()?;
         self.ensure_dir()?;
 
-        let final_path = self.path_for(pack.menu_version);
+        let final_path = self.path_for(pack.menu_version());
         let tmp_path = self
             .dir
-            .join(format!("{PREFIX}{}{SUFFIX}.tmp", pack.menu_version));
+            .join(format!("{PREFIX}{}{SUFFIX}.tmp", pack.menu_version()));
 
         {
             let mut file = fs::File::create(&tmp_path)?;
@@ -279,7 +289,7 @@ mod tests {
             .unwrap();
 
         let old = store.load_version(7).unwrap();
-        assert_eq!(old.tree.menu_version, 7);
+        assert_eq!(old.tree.menu_version(), 7);
     }
 
     #[test]

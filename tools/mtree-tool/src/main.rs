@@ -490,9 +490,9 @@ fn fixtures(rest: &[String]) -> Result<(), String> {
         "offline": false,
         "local_versions": [7],
         "load": {
-            "menu_version": tree.menu_version,
+            "menu_version": tree.menu_version(),
             "source": "local",
-            "menu_nodes": tree.nodes.len(),
+            "menu_nodes": tree.node_count(),
             "pack_bytes": pack_bytes.len(),
             "load_ms": open_ms
         },
@@ -531,7 +531,7 @@ fn fixtures(rest: &[String]) -> Result<(), String> {
 
     println!(
         "已生成 {boot_path} 与 {sessions_path}（菜单 {} 节点）",
-        tree.nodes.len()
+        tree.node_count()
     );
     Ok(())
 }
@@ -545,7 +545,7 @@ fn demo(rest: &[String]) -> Result<(), String> {
     let tree = tellerkit_core::mock::demo_tree(7);
     let json = serde_json::to_string_pretty(&tree).map_err(|e| e.to_string())?;
     std::fs::write(&out, json).map_err(|e| format!("写入失败: {e}"))?;
-    println!("已导出演示菜单树: {out}（{} 个节点）", tree.nodes.len());
+    println!("已导出演示菜单树: {out}（{} 个节点）", tree.node_count());
     Ok(())
 }
 
@@ -572,7 +572,7 @@ fn build(rest: &[String]) -> Result<(), String> {
     let mut tree: MenuTree =
         serde_json::from_str(&json).map_err(|e| format!("解析菜单 JSON 失败: {e}"))?;
     if let Some(v) = flag(rest, "--version") {
-        tree.menu_version = v.parse().map_err(|_| "--version 必须是整数".to_string())?;
+        tree.set_menu_version(v.parse().map_err(|_| "--version 必须是整数".to_string())?);
     }
     tree.validate()
         .map_err(|e| format!("菜单树结构非法: {e}"))?;
@@ -594,8 +594,8 @@ fn build(rest: &[String]) -> Result<(), String> {
 
     println!(
         "已生成 {output}：menu_version={} 节点数={} 大小={} 字节",
-        tree.menu_version,
-        tree.nodes.len(),
+        tree.menu_version(),
+        tree.node_count(),
         bytes.len()
     );
     println!(
@@ -621,8 +621,8 @@ fn verify(rest: &[String]) -> Result<(), String> {
     let tree = pack.decode().map_err(|e| format!("解码失败: {e}"))?;
     println!(
         "验签通过: menu_version={} 节点数={} shell_compat={}..={}",
-        pack.menu_version,
-        tree.nodes.len(),
+        pack.menu_version(),
+        tree.node_count(),
         pack.shell_compat_min,
         pack.shell_compat_max
     );
@@ -637,7 +637,7 @@ fn inspect(rest: &[String]) -> Result<(), String> {
     println!("file          = {file}");
     println!("size          = {} 字节", bytes.len());
     println!("format_version= {}", pack.format_version);
-    println!("menu_version  = {}", pack.menu_version);
+    println!("menu_version  = {}", pack.menu_version());
     println!(
         "shell_compat  = {}..={}",
         pack.shell_compat_min, pack.shell_compat_max

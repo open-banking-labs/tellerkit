@@ -62,11 +62,11 @@ pub fn filter_visible(tree: &MenuTree, snapshot: &PermSnapshot) -> Vec<MenuView>
 
     let mut children: HashMap<&str, Vec<&MenuNode>> = HashMap::new();
     let mut roots: Vec<&MenuNode> = Vec::new();
-    for node in &tree.nodes {
-        if !node.node_type.is_navigable() {
+    for node in tree.nodes() {
+        if !node.node_type().is_navigable() {
             continue; // Action 不进导航树
         }
-        match node.parent_code.as_deref() {
+        match node.parent_code() {
             Some(parent) => children.entry(parent).or_default().push(node),
             None => roots.push(node),
         }
@@ -74,7 +74,7 @@ pub fn filter_visible(tree: &MenuTree, snapshot: &PermSnapshot) -> Vec<MenuView>
     for list in children.values_mut() {
         sort_nodes(list);
     }
-    roots.sort_by(|a, b| a.sort.cmp(&b.sort).then_with(|| a.code.cmp(&b.code)));
+    roots.sort_by(|a, b| a.sort().cmp(&b.sort()).then_with(|| a.code().cmp(b.code())));
 
     let mut visited = Vec::new();
     roots
@@ -84,7 +84,7 @@ pub fn filter_visible(tree: &MenuTree, snapshot: &PermSnapshot) -> Vec<MenuView>
 }
 
 fn sort_nodes(list: &mut [&MenuNode]) {
-    list.sort_by(|a, b| a.sort.cmp(&b.sort).then_with(|| a.code.cmp(&b.code)));
+    list.sort_by(|a, b| a.sort().cmp(&b.sort()).then_with(|| a.code().cmp(b.code())));
 }
 
 fn build(
@@ -94,17 +94,17 @@ fn build(
     action_set: &std::collections::HashSet<&str>,
     visited: &mut Vec<String>,
 ) -> Option<MenuView> {
-    if node.status == NodeStatus::Hidden {
+    if node.status() == NodeStatus::Hidden {
         return None;
     }
     // 防御：环或重复访问直接剪掉，保证不死循环。
-    if visited.iter().any(|c| c == &node.code) {
+    if visited.iter().any(|c| c.as_str() == node.code()) {
         return None;
     }
-    visited.push(node.code.clone());
+    visited.push(node.code().to_string());
 
     let mut kids = Vec::new();
-    if let Some(list) = children.get(node.code.as_str()) {
+    if let Some(list) = children.get(node.code()) {
         for child in list {
             if let Some(view) = build(child, children, menu_set, action_set, visited) {
                 kids.push(view);
@@ -112,28 +112,28 @@ fn build(
         }
     }
 
-    let direct = menu_set.contains(node.code.as_str());
+    let direct = menu_set.contains(node.code());
     // 自身无权且没有任何可见子孙 → 整棵子树剪掉。
     if !direct && kids.is_empty() {
         return None;
     }
 
     let actions = node
-        .actions
+        .actions()
         .iter()
         .filter(|a| action_set.contains(a.as_str()))
         .cloned()
         .collect();
 
     Some(MenuView {
-        code: node.code.clone(),
-        title: node.title.clone(),
-        title_key: node.title_key.clone(),
-        node_type: node.node_type,
-        route: node.route.clone(),
-        icon: node.icon.clone(),
-        sort: node.sort,
-        source: node.source.clone(),
+        code: node.code().to_string(),
+        title: node.title().to_string(),
+        title_key: node.title_key().map(|s| s.to_string()),
+        node_type: node.node_type(),
+        route: node.route().map(|s| s.to_string()),
+        icon: node.icon().map(|s| s.to_string()),
+        sort: node.sort(),
+        source: node.source().to_string(),
         direct,
         actions,
         children: kids,
@@ -180,10 +180,7 @@ mod tests {
 
     /// 便捷构造：Action 节点。只承载按钮权限码，不是导航入口。
     fn action_node(code: &str, parent: Option<&str>) -> MenuNode {
-        let mut node = MenuNode::page(code, parent, code, 1);
-        node.node_type = NodeType::Action;
-        node.route = None;
-        node
+        MenuNode::new(code, parent, code, NodeType::Action, 1)
     }
 
     #[test]
@@ -298,8 +295,12 @@ mod tests {
     #[test]
     fn hidden_node_is_pruned_even_when_granted() {
         let mut tree = sample_tree();
-        if let Some(n) = tree.nodes.iter_mut().find(|n| n.code == "deposit.time") {
-            n.status = NodeStatus::Hidden;
+        if let Some(n) = tree
+            .nodes_mut()
+            .iter_mut()
+            .find(|n| n.code() == "deposit.time")
+        {
+            n.set_status(NodeStatus::Hidden);
         }
         let perm = snapshot(&["deposit.demand", "deposit.time"], &[]);
         let view = filter_visible(&tree, &perm);
@@ -317,8 +318,12 @@ mod tests {
     #[test]
     fn actions_are_filtered_by_action_codes() {
         let mut tree = sample_tree();
-        if let Some(n) = tree.nodes.iter_mut().find(|n| n.code == "deposit.demand") {
-            n.actions = vec!["action.print".into(), "action.reversal".into()];
+        if let Some(n) = tree
+            .nodes_mut()
+            .iter_mut()
+            .find(|n| n.code() == "deposit.demand")
+        {
+            n.set_actions(vec!["action.print".into(), "action.reversal".into()]);
         }
         let perm = snapshot(&["deposit.demand"], &["action.print"]);
         let view = filter_visible(&tree, &perm);

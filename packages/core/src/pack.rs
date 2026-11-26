@@ -59,6 +59,10 @@ pub struct MenuPack {
 }
 
 impl MenuPack {
+    pub fn menu_version(&self) -> u64 {
+        self.menu_version
+    }
+
     /// 把菜单树打包成带签名的 `.mtree` 字节流。
     ///
     /// 打包前先 `validate()`：结构非法的包绝不允许落到客户端。
@@ -82,7 +86,7 @@ impl MenuPack {
         header.extend_from_slice(MAGIC);
         header.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
         header.extend_from_slice(&payload_len.to_le_bytes());
-        header.extend_from_slice(&tree.menu_version.to_le_bytes());
+        header.extend_from_slice(&tree.menu_version().to_le_bytes());
         header.extend_from_slice(&shell_compat_min.to_le_bytes());
         header.extend_from_slice(&shell_compat_max.to_le_bytes());
         debug_assert_eq!(header.len(), HEADER_LEN);
@@ -172,7 +176,7 @@ pub fn open(bytes: &[u8], verifying_key: &VerifyingKey) -> Result<MenuTree, Pack
 
 /// 不验签地读出菜单版本号，供"文件列表/回滚选择"使用。
 pub fn peek_version(bytes: &[u8]) -> Option<u64> {
-    MenuPack::parse(bytes).ok().map(|p| p.menu_version)
+    MenuPack::parse(bytes).ok().map(|p| p.menu_version())
 }
 
 /// 公钥 hex 编解码。

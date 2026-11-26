@@ -175,7 +175,7 @@ impl<'a> ShellApp<'a> {
         let load_ms = started.elapsed().as_secs_f64() * 1000.0;
 
         let mut tree: MenuTree = outcome.loaded.tree;
-        let menu_version = tree.menu_version;
+        let menu_version = tree.menu_version();
         let pack_bytes = outcome.loaded.bytes;
         let source = match outcome.loaded.source {
             LoadSource::LocalFile { .. } => "local".to_string(),
@@ -209,7 +209,7 @@ impl<'a> ShellApp<'a> {
             notes.push(w.clone());
         }
 
-        let menu_nodes = tree.nodes.len();
+        let menu_nodes = tree.node_count();
         self.state.menu = Some(tree);
 
         Ok(BootSummary {
@@ -303,7 +303,7 @@ impl<'a> ShellApp<'a> {
             .snapshot
             .as_ref()
             .map(|snap| filter::filter_visible(&outcome.loaded.tree, snap));
-        let menu_version = outcome.loaded.tree.menu_version;
+        let menu_version = outcome.loaded.tree.menu_version();
         let source = match outcome.loaded.source {
             LoadSource::LocalFile { .. } => "local".to_string(),
             LoadSource::NetworkFallback { .. } => "network".to_string(),

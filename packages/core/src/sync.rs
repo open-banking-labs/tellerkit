@@ -55,11 +55,11 @@ fn fetch(
         .install(&bytes)
         .map_err(|e| BootError::Install(e.to_string()))?;
     notes.push(format!("已从服务端安装菜单包 v{version}"));
-    Ok(LoadedMenu {
+    Ok(LoadedMenu::new(
         tree,
-        source: LoadSource::NetworkFallback { version },
-        bytes: bytes.len(),
-    })
+        LoadSource::NetworkFallback { version },
+        bytes.len(),
+    ))
 }
 
 /// 重新加载：优先本地，失败则回退服务端。`verify_failed` 表示本地包验签没过。
