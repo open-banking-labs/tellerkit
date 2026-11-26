@@ -15,6 +15,24 @@ use tellerkit_core::replay::ReplayAttempt;
 use tellerkit_core::reversal::{parse_exception_kind, ExceptionKind, ReversalRecord};
 use tellerkit_core::tx::{TxJournal, TxRequest, TxResult, TxStatus};
 
+/// 把 SQLite 的"被占着"与真正 IO/权限错误分开：只有前者要 fail-closed 拒绝启动。
+fn classify_open_error(err: rusqlite::Error, context: &str) -> String {
+    let busy = matches!(
+        &err,
+        rusqlite::Error::SqliteFailure(inner, _)
+            if matches!(
+                inner.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    );
+    let message = format!("{context}：{err}");
+    if busy {
+        format!("账本已被另一个进程占用：{message}")
+    } else {
+        message
+    }
+}
+
 /// 一条管理审计事件：谁、在什么时候、对什么、做了什么、结果如何。
 ///
 /// `at` 由 [`SqliteJournal::audit`] 写入，调用方传空字符串即可；
@@ -95,9 +113,23 @@ pub struct SqliteJournal {
 
 impl SqliteJournal {
     /// 打开（或创建）账本并建表。
+    ///
+    /// 打开即取得 SQLite 排他锁：第二个连接（同进程或另一进程）拿不到锁时，
+    /// 返回"账本已被另一个进程占用"，由上层拒绝启动，而不是两份连接各自
+    /// 载入同一份 `tx_queue` 后重复打主机。锁随连接关闭释放。
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = path.as_ref();
         let conn = Connection::open(path).map_err(|e| format!("打开账本失败：{e}"))?;
+        // 只等 200ms：柜员要看到可读原因，而不是盯着白屏等锁。
+        let _ = conn.busy_timeout(std::time::Duration::from_millis(200));
+        // journal_mode 必须在进 EXCLUSIVE 之前切：排他模式下无法再改 journal_mode。
+        conn.execute_batch("PRAGMA journal_mode = WAL;")
+            .map_err(|e| classify_open_error(e, "设置账本模式失败"))?;
+        conn.execute_batch("PRAGMA locking_mode = EXCLUSIVE;")
+            .map_err(|e| classify_open_error(e, "设置账本排他模式失败"))?;
+        // 空写事务是真正取得排他锁的动作；拿到后锁一直握到连接关闭。
+        conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")
+            .map_err(|e| classify_open_error(e, "取得账本排他锁失败"))?;
         let key_path = path.with_file_name("ledger.key");
         let cipher = LedgerCipher::open_or_create(&key_path)?;
         Self::init(conn, cipher)
@@ -1227,6 +1259,25 @@ mod tests {
         }
         let j = SqliteJournal::open(&path).unwrap();
         assert_eq!(j.pending().unwrap().len(), 1, "重启后挂起队列必须还在");
+    }
+
+    #[test]
+    fn second_open_is_refused_until_lock_is_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tx.db");
+        let first = SqliteJournal::open(&path).expect("首个连接应拿到排他锁");
+
+        let err = match SqliteJournal::open(&path) {
+            Ok(_) => panic!("同进程第二个连接必须被拒"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("账本已被另一个进程占用"),
+            "被占用要说人话，而不是裸 SQLite 错误：{err}"
+        );
+
+        drop(first);
+        SqliteJournal::open(&path).expect("锁释放后应能再次打开");
     }
 
     #[test]
