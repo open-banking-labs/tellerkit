@@ -34,6 +34,8 @@ const CHAIN_DOMAIN: &[u8] = b"tellerkit-audit-chain-v1\0";
 ///
 /// 每个字段都带 8 字节大端长度前缀，避免 `("ab","c")` 与 `("a","bc")` 拼出同一串。
 /// 这里刻意不加密：链的作用是发现改写，密钥只负责交易要素的机密性。
+// 审计行就是 8 个字段；拆成结构体只为让 clippy 闭嘴会把调用点改得很绕。
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn audit_chain_hash(
     seq: i64,
     prev_hash: &str,
