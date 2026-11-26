@@ -12,6 +12,25 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
+
+use crate::tx::TxJournal;
+
+/// 异常类型的稳定落盘表示。数据库里只存字符串，解析失败必须报错而不是猜。
+pub fn exception_kind_str(kind: ExceptionKind) -> &'static str {
+    match kind {
+        ExceptionKind::MarkedForReversal => "marked_for_reversal",
+        ExceptionKind::MarkedForRollForward => "marked_for_roll_forward",
+    }
+}
+
+pub fn parse_exception_kind(raw: &str) -> Result<ExceptionKind, String> {
+    match raw {
+        "marked_for_reversal" => Ok(ExceptionKind::MarkedForReversal),
+        "marked_for_roll_forward" => Ok(ExceptionKind::MarkedForRollForward),
+        other => Err(format!("账本中出现未知异常类型：{other}")),
+    }
+}
 
 /// 异常处置状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +198,8 @@ pub enum ReversalError {
     AlreadyConfirmed,
     #[error("没有待确认的冲正申请")]
     NoPendingReversal,
+    #[error("冲正状态落盘失败：{0}")]
+    Persistence(String),
 }
 
 /// 冲正账本：谁被标记、谁批了、冲过没有。
@@ -190,12 +211,25 @@ pub enum ReversalError {
 ///
 /// 刻意不挂在 `TxEngine` 上：冲正是"异常处置"流程，与正常交易的状态机
 /// 生命周期不同（可能隔天处置）。分开后两边都能独立测试。
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct ReversalBook {
     /// 幂等键 → 异常种类
     exceptions: HashMap<String, ExceptionKind>,
     /// 幂等键 → 冲正凭证
     reversals: HashMap<String, ReversalRecord>,
+    journal: Option<Arc<dyn TxJournal>>,
+    journal_error: Option<String>,
+}
+
+impl std::fmt::Debug for ReversalBook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReversalBook")
+            .field("exceptions", &self.exceptions)
+            .field("reversals", &self.reversals)
+            .field("journaled", &self.journal.is_some())
+            .field("journal_error", &self.journal_error)
+            .finish()
+    }
 }
 
 impl ReversalBook {
@@ -203,9 +237,73 @@ impl ReversalBook {
         Self::default()
     }
 
+    /// 启动时接上账本并读回异常标记与冲正凭证；后续变更即时写回。
+    pub fn with_journal(journal: Arc<dyn TxJournal>) -> Self {
+        let mut book = Self::new();
+        let (exceptions, reversals) = match journal.load_exceptions() {
+            Ok(exceptions) => match journal.load_reversals() {
+                Ok(reversals) => (exceptions, reversals),
+                Err(e) => {
+                    book.journal_error = Some(format!("读取冲正记录失败：{e}"));
+                    (exceptions, Vec::new())
+                }
+            },
+            Err(e) => {
+                book.journal_error = Some(format!("读取待冲正清单失败：{e}"));
+                (Vec::new(), Vec::new())
+            }
+        };
+        book.restore(exceptions, reversals);
+        book.journal = Some(journal);
+        book
+    }
+
+    /// 启动时一次性读回。异常标记保留作幂等墓碑，已确认的由 `outstanding` 过滤。
+    pub fn restore(
+        &mut self,
+        exceptions: Vec<(String, ExceptionKind)>,
+        reversals: Vec<ReversalRecord>,
+    ) {
+        self.exceptions.clear();
+        self.reversals.clear();
+        for (key, kind) in exceptions {
+            self.exceptions.insert(key, kind);
+        }
+        for record in reversals {
+            self.reversals
+                .insert(record.idempotency_key().to_string(), record);
+        }
+    }
+
+    pub fn journal_error(&self) -> Option<&str> {
+        self.journal_error.as_deref()
+    }
+
+    fn persist_exception(&mut self, key: &str, kind: ExceptionKind) {
+        let written = self
+            .journal
+            .as_deref()
+            .map(|journal| journal.upsert_exception(key, kind));
+        if let Some(Err(e)) = written {
+            self.journal_error = Some(format!("待冲正标记落盘失败：{e}"));
+        }
+    }
+
+    fn persist_reversal(&mut self, record: &ReversalRecord) -> Result<(), ReversalError> {
+        let written = self
+            .journal
+            .as_deref()
+            .map(|journal| journal.upsert_reversal(record));
+        if let Some(Err(e)) = written {
+            return Err(ReversalError::Persistence(e));
+        }
+        Ok(())
+    }
+
     /// 给一笔交易打异常标记。重复标记以最后一次为准。
     pub fn mark(&mut self, idempotency_key: &str, kind: ExceptionKind) {
         self.exceptions.insert(idempotency_key.to_string(), kind);
+        self.persist_exception(idempotency_key, kind);
     }
 
     pub fn exception_of(&self, idempotency_key: &str) -> Option<ExceptionKind> {
@@ -241,13 +339,27 @@ impl ReversalBook {
         idempotency_key: &str,
         host_reference: &str,
     ) -> Result<(), ReversalError> {
-        let Some(record) = self.reversals.get_mut(idempotency_key) else {
+        let Some(record) = self.reversals.get(idempotency_key) else {
             return Err(ReversalError::NoPendingReversal);
         };
         if record.host_reference.is_some() {
             return Err(ReversalError::AlreadyConfirmed);
         }
-        record.host_reference = Some(host_reference.to_string());
+        let mut confirmed = record.clone();
+        confirmed.host_reference = Some(host_reference.to_string());
+        // 主机已经受理；但内存不能在落盘失败时先改成已确认——那会让重试撞上
+        // AlreadyConfirmed，磁盘却还是未确认，随后重启又回到未确认状态。
+        let written = self
+            .journal
+            .as_deref()
+            .map(|journal| journal.upsert_reversal(&confirmed));
+        if let Some(Err(e)) = written {
+            return Err(ReversalError::Persistence(format!(
+                "主机已受理但冲正确认未能落盘，请立即查账：{e}"
+            )));
+        }
+        self.reversals
+            .insert(idempotency_key.to_string(), confirmed);
         Ok(())
     }
 
@@ -311,6 +423,8 @@ impl ReversalBook {
             reason: request.reason.clone(),
             host_reference: None,
         };
+        // 先落盘再改内存：落盘失败时不能留下"内存说申请过、磁盘说没申请"的分歧。
+        self.persist_reversal(&record)?;
         self.reversals
             .insert(request.idempotency_key.clone(), record.clone());
         Ok(record)
@@ -575,5 +689,39 @@ mod tests {
             Some(ExceptionKind::MarkedForReversal),
             "标记保留作幂等凭据，不再出现在待处置清单里"
         );
+    }
+
+    /// 待冲正清单与冲正凭证必须活过重启，否则柜员会以为状态不明的交易没事。
+    #[test]
+    fn exceptions_and_reversals_survive_book_restart() {
+        use crate::tx::test_support::MemoryJournal;
+        use crate::tx::TxJournal;
+
+        struct Grant;
+        impl Authorizer for Grant {
+            fn authorize(&self, _request: &ReversalRequest) -> Authorization {
+                Authorization::new("T02", true, "同意")
+            }
+        }
+
+        let journal: Arc<dyn TxJournal> = Arc::new(MemoryJournal::default());
+        {
+            let mut first = ReversalBook::with_journal(Arc::clone(&journal));
+            first.mark("TX-001", ExceptionKind::MarkedForReversal);
+            first.request(&request("T01"), &Grant).unwrap();
+        }
+
+        let mut restarted = ReversalBook::with_journal(journal);
+        assert_eq!(
+            restarted.outstanding(),
+            vec![("TX-001".to_string(), ExceptionKind::MarkedForReversal)]
+        );
+        assert_eq!(
+            restarted.request(&request("T01"), &Grant).unwrap_err(),
+            ReversalError::AwaitingConfirmation
+        );
+        restarted.confirm("TX-001", "HOST-1").unwrap();
+        assert!(restarted.is_confirmed("TX-001"), "确认结果也要跨重启保留");
+        assert!(restarted.outstanding().is_empty());
     }
 }

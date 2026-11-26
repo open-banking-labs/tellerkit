@@ -10,6 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use ts_rs::TS;
 
+use crate::replay::ReplayAttempt;
+use crate::reversal::{ExceptionKind, ReversalRecord};
+
 /// 一笔交易对柜员而言只有三种可见状态。
 ///
 /// 刻意不做 `Unknown`：状态不明必须有一个**明确处置**（挂起重放，或标记待冲正），
@@ -155,6 +158,21 @@ impl TxResult {
         }
     }
 
+    /// 从账本读回首次结论。字段私有，账本只能通过这个窄接口重建结果。
+    pub fn restore(
+        status: TxStatus,
+        reference: Option<String>,
+        message: String,
+        replayable: bool,
+    ) -> Self {
+        Self {
+            status,
+            reference,
+            message,
+            replayable,
+        }
+    }
+
     pub fn status(&self) -> TxStatus {
         self.status
     }
@@ -196,12 +214,83 @@ pub enum HostError {
 pub trait TxJournal: Send + Sync {
     /// 追加一条交易结论（审计日志，只增）。
     fn record(&self, request: &TxRequest, result: &TxResult) -> Result<(), String>;
-    /// 挂起请求入队，供重启后重放。
+    /// 挂起请求入队，供重启后重放。按幂等键 upsert：同一键只能有一个队列项。
     fn enqueue(&self, request: &TxRequest) -> Result<(), String>;
     /// 重放完成后出队。
     fn dequeue(&self, idempotency_key: &str) -> Result<(), String>;
     /// 启动时读取未完成的挂起请求。
     fn pending(&self) -> Result<Vec<TxRequest>, String>;
+
+    /// 结论与挂起入队写在一个事务里：中间崩溃不能出现"有结论没队列"。
+    ///
+    /// 默认实现给纯内存模式；接了账本的实现必须覆盖，否则仍有两步窗口。
+    fn record_and_enqueue(&self, request: &TxRequest, result: &TxResult) -> Result<(), String> {
+        self.record(request, result)?;
+        if result.status() == TxStatus::Pending {
+            self.enqueue(request)?;
+        }
+        Ok(())
+    }
+
+    /// 终态收口：结论、出队、幂等索引在同一事务里写完。
+    ///
+    /// `signature` 为 None 表示这次结论不写幂等索引（例如状态不明，必须允许同键重试）；
+    /// `dequeue` 只对终态重放为真。
+    fn settle(
+        &self,
+        request: &TxRequest,
+        result: &TxResult,
+        signature: Option<&str>,
+        dequeue: bool,
+    ) -> Result<(), String> {
+        self.record(request, result)?;
+        if dequeue {
+            self.dequeue(request.idempotency_key())?;
+        }
+        if let Some(signature) = signature {
+            self.save_idempotent(request.idempotency_key(), signature, result)?;
+        }
+        Ok(())
+    }
+
+    /// 启动时读回幂等索引：(幂等键, 载荷签名, 首次结果)。
+    fn load_idempotent(&self) -> Result<Vec<(String, String, TxResult)>, String> {
+        Ok(Vec::new())
+    }
+    /// 幂等索引 upsert。
+    fn save_idempotent(
+        &self,
+        _key: &str,
+        _signature: &str,
+        _result: &TxResult,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// 启动时读回放进度（含已放弃标记）。
+    fn load_attempts(&self) -> Result<Vec<ReplayAttempt>, String> {
+        Ok(Vec::new())
+    }
+    fn upsert_attempt(&self, _attempt: &ReplayAttempt) -> Result<(), String> {
+        Ok(())
+    }
+    fn delete_attempt(&self, _key: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// 启动时读回异常标记与冲正凭证。
+    fn load_exceptions(&self) -> Result<Vec<(String, ExceptionKind)>, String> {
+        Ok(Vec::new())
+    }
+    fn upsert_exception(&self, _key: &str, _kind: ExceptionKind) -> Result<(), String> {
+        Ok(())
+    }
+    fn load_reversals(&self) -> Result<Vec<ReversalRecord>, String> {
+        Ok(Vec::new())
+    }
+    fn upsert_reversal(&self, _record: &ReversalRecord) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// 主机接口。真实实现走网络，测试实现可以精确控制失败方式。
@@ -300,9 +389,9 @@ impl TxEngine {
         Self::default()
     }
 
-    /// 挂上持久化端口，并把上次未完成的挂起请求读回来。
+    /// 挂上持久化端口，并把上次未完成的挂起请求、幂等索引读回来。
     ///
-    /// 读队列失败不阻断启动：柜面宁可"能开但提示异常"，也不要"打不开"。
+    /// 读盘失败不阻断启动：柜面宁可"能开但提示异常"，也不要"打不开"。
     pub fn with_journal(mut self, journal: Box<dyn TxJournal>) -> Self {
         match journal.pending() {
             Ok(list) => self.pending = list,
@@ -310,8 +399,46 @@ impl TxEngine {
             // 读不回挂起队列不能静默当作空队列。
             Err(e) => eprintln!("读取待重放队列失败：{e}"),
         }
+        match journal.load_idempotent() {
+            Ok(rows) => {
+                for (key, signature, result) in rows {
+                    self.idempotent.insert(key, (signature, result));
+                }
+            }
+            Err(e) => eprintln!("读取幂等索引失败：{e}"),
+        }
         self.journal = Some(journal);
         self
+    }
+
+    /// 一次落盘收口：挂起走"结论+入队"事务，终态走"结论+出队+幂等"事务。
+    ///
+    /// 记账失败只并入本次结果，不改变主机给定的结论；内存索引只在落盘事务
+    /// 返回后才写，避免对已写入磁盘的结论给出矛盾的答复。
+    fn commit_outcome(
+        &mut self,
+        request: &TxRequest,
+        mut result: TxResult,
+        signature: Option<&str>,
+        dequeue: bool,
+    ) -> TxResult {
+        if let Some(journal) = self.journal.as_deref() {
+            let written = if result.status() == TxStatus::Pending {
+                journal.record_and_enqueue(request, &result)
+            } else {
+                journal.settle(request, &result, signature, dequeue)
+            };
+            if let Err(e) = written {
+                result.message.push_str(&format!("（记账失败：{e}）"));
+            }
+        }
+        if let Some(signature) = signature {
+            self.idempotent.insert(
+                request.idempotency_key().to_string(),
+                (signature.to_string(), result.clone()),
+            );
+        }
+        result
     }
 
     /// 挂起中的交易不是终态，不写幂等索引；但同一键再次提交时也不能重新打主机、
@@ -384,24 +511,17 @@ impl TxEngine {
             ),
         };
 
-        // 记账失败不改变结论：交易已经发生，日志没写成是运维问题，不是业务问题。
-        // 提示直接并入本次结果，缓存的也是带提示的版本。
-        if let Some(journal) = self.journal.as_deref() {
-            if let Err(e) = journal.record(&request, &result) {
-                result.message.push_str(&format!("（记账失败：{e}）"));
-            }
-            if result.status() == TxStatus::Pending {
-                if let Err(e) = journal.enqueue(&request) {
-                    result.message.push_str(&format!("（记账失败：{e}）"));
-                }
-            }
-        }
-
-        if cacheable {
-            self.idempotent
-                .insert(request.idempotency_key.clone(), (signature, result.clone()));
-        }
-        result
+        // 结论 + 出队/入队 + 幂等索引由账本在一个事务里收口；记账失败只影响提示。
+        self.commit_outcome(
+            &request,
+            result,
+            if cacheable {
+                Some(signature.as_str())
+            } else {
+                None
+            },
+            false,
+        )
     }
 
     pub fn pending_count(&self) -> usize {
@@ -414,6 +534,31 @@ impl TxEngine {
             .iter()
             .map(|r| r.idempotency_key.clone())
             .collect()
+    }
+
+    /// 重放一笔。成功与明确拒绝都是终态：**都出队并落幂等索引**，
+    /// 只把"仍不可达"留在队列里——否则 Rejected 会永远卡在待重放队列。
+    fn replay_request(&mut self, host: &dyn TxHost, request: TxRequest) -> TxResult {
+        let result = match host.submit(&request) {
+            Ok(reference) => TxResult::committed(reference),
+            Err(HostError::Rejected(reason)) => TxResult::rejected(&format!("主机拒绝：{reason}")),
+            Err(HostError::Timeout) | Err(HostError::Unavailable) => {
+                self.pending.push(request.clone());
+                TxResult::pending("重放失败：仍不可达，保留在队列中")
+            }
+        };
+        let signature = request_signature(&request);
+        let terminal = matches!(result.status(), TxStatus::Committed | TxStatus::Rejected);
+        self.commit_outcome(
+            &request,
+            result,
+            if terminal {
+                Some(signature.as_str())
+            } else {
+                None
+            },
+            terminal,
+        )
     }
 
     /// 重放**单笔**挂起交易，供调度器按退避节奏逐笔调用。
@@ -430,36 +575,7 @@ impl TxEngine {
             .position(|r| r.idempotency_key == idempotency_key)?;
         let request = self.pending.remove(index);
         let key = request.idempotency_key.clone();
-        let signature = request_signature(&request);
-
-        let mut result = match host.submit(&request) {
-            Ok(reference) => TxResult::committed(reference),
-            Err(HostError::Rejected(reason)) => TxResult::rejected(&format!("主机拒绝：{reason}")),
-            Err(HostError::Timeout) | Err(HostError::Unavailable) => {
-                // 不可达：放回队列，绝不丢单
-                self.pending.push(request.clone());
-                TxResult::pending("重放失败：仍不可达，保留在队列中")
-            }
-        };
-
-        if let Some(journal) = self.journal.as_deref() {
-            if let Err(e) = journal.record(&request, &result) {
-                result.message.push_str(&format!("（记账失败：{e}）"));
-            }
-            if result.status() == TxStatus::Committed {
-                if let Err(e) = journal.dequeue(&key) {
-                    result.message.push_str(&format!("（记账失败：{e}）"));
-                }
-            }
-        }
-
-        // 只有终态（成功/明确拒绝）写幂等索引；重放失败仍留在队列里，
-        // 重复提交由挂起队列去重，不能把"状态不明"缓存成拒绝。
-        if matches!(result.status(), TxStatus::Committed | TxStatus::Rejected) {
-            self.idempotent
-                .insert(key.clone(), (signature, result.clone()));
-        }
-        Some((key, result))
+        Some((key, self.replay_request(host, request)))
     }
 
     /// 重放全部挂起交易。成功的移出队列，失败的保留。
@@ -470,22 +586,8 @@ impl TxEngine {
         let mut outcomes = Vec::new();
         for request in drained {
             let key = request.idempotency_key.clone();
-            let signature = request_signature(&request);
             // 直接走主机，不查幂等：重放的前提就是"上次没成功"
-            let result = match host.submit(&request) {
-                Ok(reference) => TxResult::committed(reference),
-                Err(HostError::Rejected(reason)) => {
-                    TxResult::rejected(&format!("主机拒绝：{reason}"))
-                }
-                Err(HostError::Timeout) | Err(HostError::Unavailable) => {
-                    self.pending.push(request.clone());
-                    TxResult::pending("重放失败：仍不可达，保留在队列中")
-                }
-            };
-            if matches!(result.status(), TxStatus::Committed | TxStatus::Rejected) {
-                self.idempotent
-                    .insert(key.clone(), (signature, result.clone()));
-            }
+            let result = self.replay_request(host, request);
             outcomes.push((key, result));
         }
         outcomes
@@ -521,6 +623,100 @@ fn validate(request: &TxRequest) -> Option<String> {
         return Some("金额不能为负".into());
     }
     None
+}
+
+/// 纯内存账本桩：让 core 的重启测试不必依赖 SQLite（宪法第 2 条）。
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    pub(crate) struct Memory {
+        pub(crate) idempotent: Vec<(String, String, TxResult)>,
+        pub(crate) attempts: Vec<ReplayAttempt>,
+        pub(crate) exceptions: Vec<(String, ExceptionKind)>,
+        pub(crate) reversals: Vec<ReversalRecord>,
+        pub(crate) queue: Vec<TxRequest>,
+    }
+
+    #[derive(Clone, Default)]
+    pub(crate) struct MemoryJournal(pub Arc<Mutex<Memory>>);
+
+    impl TxJournal for MemoryJournal {
+        fn record(&self, _request: &TxRequest, _result: &TxResult) -> Result<(), String> {
+            Ok(())
+        }
+        fn enqueue(&self, request: &TxRequest) -> Result<(), String> {
+            // 与 SQLite 的 INSERT OR REPLACE 同语义：同一幂等键只能有一个队列项。
+            let mut memory = self.0.lock().unwrap();
+            memory
+                .queue
+                .retain(|r| r.idempotency_key() != request.idempotency_key());
+            memory.queue.push(request.clone());
+            Ok(())
+        }
+        fn dequeue(&self, key: &str) -> Result<(), String> {
+            self.0
+                .lock()
+                .unwrap()
+                .queue
+                .retain(|r| r.idempotency_key() != key);
+            Ok(())
+        }
+        fn pending(&self) -> Result<Vec<TxRequest>, String> {
+            Ok(self.0.lock().unwrap().queue.clone())
+        }
+        fn load_idempotent(&self) -> Result<Vec<(String, String, TxResult)>, String> {
+            Ok(self.0.lock().unwrap().idempotent.clone())
+        }
+        fn save_idempotent(
+            &self,
+            key: &str,
+            signature: &str,
+            result: &TxResult,
+        ) -> Result<(), String> {
+            let mut memory = self.0.lock().unwrap();
+            memory.idempotent.retain(|(k, _, _)| k != key);
+            memory
+                .idempotent
+                .push((key.to_string(), signature.to_string(), result.clone()));
+            Ok(())
+        }
+        fn load_attempts(&self) -> Result<Vec<ReplayAttempt>, String> {
+            Ok(self.0.lock().unwrap().attempts.clone())
+        }
+        fn upsert_attempt(&self, attempt: &ReplayAttempt) -> Result<(), String> {
+            let mut memory = self.0.lock().unwrap();
+            memory.attempts.retain(|a| a.key() != attempt.key());
+            memory.attempts.push(attempt.clone());
+            Ok(())
+        }
+        fn delete_attempt(&self, key: &str) -> Result<(), String> {
+            self.0.lock().unwrap().attempts.retain(|a| a.key() != key);
+            Ok(())
+        }
+        fn load_exceptions(&self) -> Result<Vec<(String, ExceptionKind)>, String> {
+            Ok(self.0.lock().unwrap().exceptions.clone())
+        }
+        fn upsert_exception(&self, key: &str, kind: ExceptionKind) -> Result<(), String> {
+            let mut memory = self.0.lock().unwrap();
+            memory.exceptions.retain(|(k, _)| k != key);
+            memory.exceptions.push((key.to_string(), kind));
+            Ok(())
+        }
+        fn load_reversals(&self) -> Result<Vec<ReversalRecord>, String> {
+            Ok(self.0.lock().unwrap().reversals.clone())
+        }
+        fn upsert_reversal(&self, record: &ReversalRecord) -> Result<(), String> {
+            let mut memory = self.0.lock().unwrap();
+            memory
+                .reversals
+                .retain(|r| r.idempotency_key() != record.idempotency_key());
+            memory.reversals.push(record.clone());
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -942,5 +1138,52 @@ mod tests {
         let queued = engine.pending_keys();
         let keys: Vec<&str> = queued.iter().map(String::as_str).collect();
         assert_eq!(keys, vec!["k-a", "k-b"], "两笔都应入队，顺序为提交顺序");
+    }
+
+    /// 重启后同键异内容必须被本地拒绝，且一次都不碰主机。
+    #[test]
+    fn idempotent_index_survives_engine_restart() {
+        use test_support::MemoryJournal;
+
+        let journal = MemoryJournal::default();
+        let host = ScriptedHost::always(Ok("TX-FIRST".into()));
+        let mut first = TxEngine::new().with_journal(Box::new(journal.clone()));
+        assert_eq!(
+            first.submit(&host, req("k-restart")).status(),
+            TxStatus::Committed
+        );
+
+        let mut restarted = TxEngine::new().with_journal(Box::new(journal));
+        let changed = TxRequest::new("account.withdraw", "k-restart").amount(999_999);
+        let rejected = restarted.submit(&PanicHost, changed);
+        assert_eq!(rejected.status(), TxStatus::Rejected);
+        assert!(rejected.message().contains("幂等键已用于另一笔交易"));
+        assert_eq!(host.calls(), 1, "冲突在本地判，重启后也不该打主机");
+
+        let repeat = restarted.submit(&PanicHost, req("k-restart"));
+        assert_eq!(repeat.reference(), Some("TX-FIRST"));
+        assert_eq!(host.calls(), 1, "重启后同键重复提交不得再次调用主机");
+    }
+
+    /// 重放失败会再次写"结论+入队"，但同一幂等键不能因此变成两份队列项。
+    #[test]
+    fn failed_replay_does_not_duplicate_persisted_queue() {
+        use test_support::MemoryJournal;
+
+        let journal = MemoryJournal::default();
+        let host = ScriptedHost::new(vec![
+            Err(HostError::Unavailable),
+            Err(HostError::Unavailable),
+        ]);
+        let mut first = TxEngine::new().with_journal(Box::new(journal.clone()));
+        assert_eq!(
+            first.submit(&host, req("k-double").offline(true)).status(),
+            TxStatus::Pending
+        );
+        assert_eq!(first.replay_pending(&host)[0].1.status(), TxStatus::Pending);
+        assert_eq!(journal.pending().unwrap().len(), 1);
+
+        let restarted = TxEngine::new().with_journal(Box::new(journal));
+        assert_eq!(restarted.pending_count(), 1, "重启后不得出现重复待重放请求");
     }
 }
