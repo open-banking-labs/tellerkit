@@ -8,7 +8,9 @@
 //!
 //! 判断只看构建类型与配置内容——环境变量谁都能改，构建类型改不了。
 
-use std::path::Path;
+use std::fs::{File, OpenOptions, TryLockError};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tellerkit_core::banking::RoutedBanking;
@@ -53,6 +55,59 @@ impl StartupFatal {
             None => Ok(()),
         }
     }
+}
+
+/// 单实例锁：同一数据目录只允许一个柜面终端进程。
+///
+/// 用标准库的文件建议锁（`try_lock`），不用"PID 文件存在即占用"——PID 会复用、
+/// 崩溃会留脏文件。锁由操作系统在进程退出（含崩溃）时释放；锁文件本身不删除，
+/// 否则在"别人刚拿到锁"的瞬间会制造两把锁并存的窗口。
+#[derive(Debug)]
+pub struct InstanceLock {
+    file: File,
+    path: PathBuf,
+}
+
+impl InstanceLock {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for InstanceLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+/// 尝试取得实例锁。已有实例持有时返回人能读懂的原因，交给 `StartupFatal` 显示。
+pub fn acquire_instance_lock(appdata: &Path) -> Result<InstanceLock, String> {
+    std::fs::create_dir_all(appdata)
+        .map_err(|e| format!("无法创建数据目录 {}：{e}", appdata.display()))?;
+    let path = appdata.join(".instance.lock");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|e| format!("无法打开实例锁文件 {}：{e}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => {
+            return Err(format!(
+                "已有另一个柜面终端实例在运行（数据目录 {}）。请先关闭它，再启动本窗口。",
+                appdata.display()
+            ));
+        }
+        Err(TryLockError::Error(e)) => {
+            return Err(format!("实例锁不可用（{}）：{e}", path.display()));
+        }
+    }
+    // PID 仅供排查；是否占用完全由操作系统锁决定。
+    let _ = file.set_len(0);
+    let _ = writeln!(file, "pid={}", std::process::id());
+    Ok(InstanceLock { file, path })
 }
 
 /// 三态开关：未设置 / 开 / 关。
@@ -330,5 +385,35 @@ mod tests {
         let err = fatal.check().unwrap_err();
         assert!(err.contains("启动被拒绝"), "前端要看到明确拒绝：{err}");
         assert!(err.contains("端点配置不可用"), "要带原始原因：{err}");
+    }
+
+    #[test]
+    fn second_instance_is_refused_until_first_drops_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = acquire_instance_lock(dir.path()).expect("首个实例应拿到锁");
+
+        let err = acquire_instance_lock(dir.path()).expect_err("第二个实例必须被拒");
+        assert!(err.contains("另一个"), "要说明被谁占用：{err}");
+        assert!(err.contains("请先关闭"), "要给出可操作的处置：{err}");
+
+        drop(first);
+        let again = acquire_instance_lock(dir.path()).expect("锁释放后应能再次取得");
+        assert!(again.path().ends_with(".instance.lock"));
+    }
+
+    #[test]
+    fn instance_lock_records_pid_for_ops() {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut lock = acquire_instance_lock(dir.path()).expect("应拿到锁");
+        // 必须用持锁句柄读：Windows 下另开句柄读同一文件会被锁拒。
+        lock.file.seek(SeekFrom::Start(0)).expect("定位锁文件");
+        let mut content = String::new();
+        lock.file.read_to_string(&mut content).expect("锁文件可读");
+        assert!(
+            content.contains(&format!("pid={}", std::process::id())),
+            "锁文件应记当前 PID 便于排查：{content}"
+        );
     }
 }

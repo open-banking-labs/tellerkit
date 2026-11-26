@@ -66,6 +66,10 @@ pub struct AppState {
     pub(crate) packages: Vec<BizPackage>,
     /// 审计日志句柄。`None` 表示账本不可用（降级为内存模式）。
     pub(crate) audit: Option<Arc<SqliteJournal>>,
+    /// 单实例锁。必须持有到进程结束；提前释放等于允许第二个进程进来。
+    ///
+    /// `None` 时 `startup_fatal` 一定非空（第二个实例被拒）。
+    pub(crate) instance_lock: Option<bootstrap::InstanceLock>,
     /// 外设型号白名单。默认只允许 mock 型号——没登记就拒绝。
     pub(crate) policy: DevicePolicy,
     /// 会话锁屏状态。`None` 表示未登录。
@@ -107,6 +111,7 @@ impl AppState {
             devices: mock_devices(),
             packages: Vec::new(),
             audit,
+            instance_lock: None,
             policy: DevicePolicy::allow_mocks(),
             session: None,
             clock: StdArc::new(ports::SystemClock),
@@ -141,14 +146,16 @@ fn resolve_menu_verifying_key(injected: Option<&str>, debug: bool) -> Result<Ver
     }
 }
 
-/// 账本一般打不开只告警；只有明确的降级/剥离结论才拒绝业务命令。
+/// 账本被占用 / 明确降级时拒绝业务命令；其它打不开的原因只告警。
 /// 不看宽泛的"密文"字样——迁移事务遇到锁或 I/O 失败也会带这个词，那不是篡改。
 fn journal_open_fatal(error: &str) -> Option<String> {
-    if error.contains("拒绝启动以防密文降级") || error.contains("疑似密文被剥离") {
-        Some(format!("交易账本密文校验失败，已拒绝启动：{error}"))
-    } else {
-        None
+    if error.contains("账本已被另一个进程占用") {
+        return Some(format!("账本已被另一个进程占用，已拒绝启动：{error}"));
     }
+    if error.contains("拒绝启动以防密文降级") || error.contains("疑似密文被剥离") {
+        return Some(format!("交易账本密文校验失败，已拒绝启动：{error}"));
+    }
+    None
 }
 
 fn menu_verifying_key() -> Result<VerifyingKey, String> {
@@ -290,31 +297,54 @@ pub fn run() {
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
             let store = MenuStore::new(menu_dir, verifying_key);
 
-            // 交易账本：一般打不开只告警；密文降级是另一回事——那说明账本被改写，
-            // 必须 fail-closed：拒绝所有业务命令，绝不带着被篡改的要素继续营业。
-            let (tx, journal_warning, audit, recovery_journal, cipher_fatal) =
-                match SqliteJournal::open(appdata.join("tx.db")) {
-                    Ok(journal) => {
-                        let shared = Arc::new(journal);
-                        let recovery: Arc<dyn TxJournal> =
-                            Arc::new(ArcJournal(Arc::clone(&shared)));
-                        let engine =
-                            TxEngine::new().with_journal(Box::new(ArcJournal(Arc::clone(&shared))));
-                        (engine, None, Some(shared), Some(recovery), None)
-                    }
-                    Err(e) => {
-                        let fatal = journal_open_fatal(&e);
-                        (
-                            TxEngine::new(),
-                            Some(format!("交易账本不可用（{e}）：本会话不会落盘")),
-                            None,
-                            None,
-                            fatal,
-                        )
+            // 单实例：同一数据目录只允许一个柜面终端。没拿到锁也让进程起来，
+            // 但原因写进 StartupFatal（所有命令都被拦），绝不降级成演示模式。
+            let (instance_lock, instance_error) = match bootstrap::acquire_instance_lock(&appdata) {
+                Ok(lock) => (Some(lock), None),
+                Err(reason) => (None, Some(reason)),
+            };
+
+            // 交易账本本身也带 SQLite 排他锁：已有实例时连读都不读别人的数据。
+            // 账本被占用或密文被剥离是启动拒绝；其它打不开的原因只告警。
+            let (tx, journal_warning, audit, recovery_journal, ledger_fatal) =
+                if instance_error.is_some() {
+                    (
+                        TxEngine::new(),
+                        Some("未打开交易账本：本进程不是唯一实例".to_string()),
+                        None,
+                        None,
+                        None,
+                    )
+                } else {
+                    match SqliteJournal::open(appdata.join("tx.db")) {
+                        Ok(journal) => {
+                            let shared = Arc::new(journal);
+                            let recovery: Arc<dyn TxJournal> =
+                                Arc::new(ArcJournal(Arc::clone(&shared)));
+                            let engine = TxEngine::new()
+                                .with_journal(Box::new(ArcJournal(Arc::clone(&shared))));
+                            (engine, None, Some(shared), Some(recovery), None)
+                        }
+                        Err(e) => {
+                            let fatal = journal_open_fatal(&e);
+                            (
+                                TxEngine::new(),
+                                Some(format!("交易账本不可用（{e}）：本会话不会落盘")),
+                                None,
+                                None,
+                                fatal,
+                            )
+                        }
                     }
                 };
             // 端点配置（changes/008）：release 缺配置/配置非法即拒绝启动
-            let (remote, remote_note, startup_fatal) = build_remote(&appdata);
+            let (remote, remote_note, mut startup_fatal) = build_remote(&appdata);
+            // 单实例与账本排他的拒绝优先于端点配置：没有唯一实例谈安全没有意义。
+            if let Some(reason) = instance_error {
+                startup_fatal = StartupFatal(Some(reason));
+            } else if let Some(reason) = ledger_fatal {
+                startup_fatal = StartupFatal(Some(reason));
+            }
             let app_handle = app.handle().clone();
             let mut state = AppState::new(
                 store,
@@ -325,11 +355,9 @@ pub fn run() {
                 remote,
                 verifying_key,
             );
-            let mut startup_fatal = startup_fatal;
-            if let Some(reason) = cipher_fatal {
-                startup_fatal = StartupFatal(Some(reason));
-            }
             state.startup_fatal = startup_fatal;
+            // 必须存进状态：局部变量一丢就等于放锁，第二个进程马上能进来。
+            state.instance_lock = instance_lock;
             // 幂等索引由 TxEngine::with_journal 读回；这里补读异常/冲正与重放进度。
             // 读盘失败只告警不阻断启动，但不能静默当作"没有待办"。
             if let Some(journal) = recovery_journal {
@@ -435,8 +463,84 @@ mod tests {
     fn cipher_downgrade_is_fatal_but_other_journal_errors_only_warn() {
         assert!(journal_open_fatal("拒绝启动以防密文降级").is_some());
         assert!(journal_open_fatal("疑似密文被剥离").is_some());
+        // 账本被占也必须 fail-closed，不能降级为"能开但提示异常"。
+        let busy = journal_open_fatal("账本已被另一个进程占用：database is locked")
+            .expect("被占用必须拒绝启动");
+        assert!(busy.contains("另一个进程"), "{busy}");
         // 迁移遇到锁/I/O 失败也会提到"密文"，但那不是篡改，不能升级成启动拒绝。
         assert!(journal_open_fatal("密文迁移事务失败：database is locked").is_none());
         assert!(journal_open_fatal("打开账本失败：database is locked").is_none());
+    }
+
+    #[test]
+    fn second_instance_failure_blocks_every_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = bootstrap::acquire_instance_lock(dir.path()).expect("首个实例拿到锁");
+        let reason = bootstrap::acquire_instance_lock(dir.path()).expect_err("第二个实例被拒");
+
+        // 即便兜底的演示远端还在，启动拒绝也必须让所有命令止步。
+        let (remote, _note, _unused) = build_remote(dir.path());
+        let mut state = AppState::new(
+            MenuStore::new(dir.path().join("menu"), demo_verifying_key()),
+            dir.path().display().to_string(),
+            TxEngine::new(),
+            Some("未打开交易账本：本进程不是唯一实例".into()),
+            None,
+            remote,
+            demo_verifying_key(),
+        );
+        state.startup_fatal = StartupFatal(Some(reason));
+        let err = state.startup_fatal.check().unwrap_err();
+        assert!(
+            err.contains("启动被拒绝"),
+            "前端错误页要看到明确拒绝：{err}"
+        );
+        assert!(err.contains("另一个柜面终端实例"), "要带可读原因：{err}");
+        drop(first);
+    }
+
+    #[test]
+    fn every_command_is_gated_by_startup_fatal() {
+        let source = include_str!("commands.rs");
+        assert!(
+            source.contains("guard.startup_fatal.check()?"),
+            "commands::lock 必须统一拦截启动失败"
+        );
+        for name in [
+            "boot",
+            "login",
+            "logout",
+            "current_menu",
+            "check_update",
+            "reload_from_disk",
+            "dev_set_offline",
+            "dev_set_tampered",
+            "dev_bump_server_version",
+            "dev_corrupt_local",
+            "dev_reset_local",
+            "submit_transaction",
+            "print_voucher",
+            "tx_pending_count",
+            "tx_exceptions",
+            "tx_reconciliation",
+            "request_reversal",
+            "replay_pending",
+            "package_module",
+            "audit_tail",
+            "session_touch",
+            "session_tick",
+            "session_blur",
+        ] {
+            let marker = format!("pub fn {name}(");
+            let start = source
+                .find(&marker)
+                .unwrap_or_else(|| panic!("找不到命令 {name}"));
+            let rest = &source[start + marker.len()..];
+            let end = rest.find("\npub fn ").unwrap_or(rest.len());
+            assert!(
+                rest[..end].contains("lock(&state)?"),
+                "命令 {name} 必须经 commands::lock 做启动检查"
+            );
+        }
     }
 }
