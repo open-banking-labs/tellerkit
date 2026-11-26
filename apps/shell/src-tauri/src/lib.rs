@@ -13,11 +13,7 @@ pub mod config_sig;
 pub mod endpoint_config;
 pub mod ports;
 
-use std::sync::Mutex;
-
-use std::sync::Arc;
-
-use std::sync::Arc as StdArc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use tellerkit_core::banking::RemoteBanking;
 use tellerkit_core::device::{mock_devices, DevicePolicy, Devices};
 use tellerkit_core::mock::demo_verifying_key;
@@ -26,7 +22,6 @@ use tellerkit_core::pkg::BizPackage;
 use tellerkit_core::pubkey_from_hex;
 use tellerkit_core::replay::{ReplayAttempt, ReplayPolicy, ReplayScheduler};
 use tellerkit_core::reversal::{ExceptionKind, ReversalBook, ReversalRecord};
-use tellerkit_core::session::SessionGuard;
 use tellerkit_core::tx::TxEngine;
 use tellerkit_core::tx::{TxJournal, TxRequest, TxResult};
 use tellerkit_core::MenuStore;
@@ -37,7 +32,24 @@ use bootstrap::StartupFatal;
 use ed25519_dalek::VerifyingKey;
 use tauri::Manager;
 
-/// 应用状态。所有命令都通过 `Mutex<AppState>` 访问，避免 Rust/前端各持一份真相。
+/// 托管状态的共享句柄。命令是 `async` 的，阻塞工作要搬进 `spawn_blocking`，
+/// 闭包必须 `'static`，所以先克隆 `Arc` 再 move 进去。
+pub type SharedState = Arc<Mutex<AppState>>;
+
+/// 会话状态的独立锁。锁屏 tick 不能排在慢交易后面；锁序固定
+/// `AppState` → `SessionSlot`，禁止反向。
+pub type SharedSession = Arc<Mutex<app::SessionSlot>>;
+
+/// 所有命令获取 `AppState` 的唯一入口：在这里统一拦启动失败。
+pub(crate) fn lock_app_state(state: &Mutex<AppState>) -> Result<MutexGuard<'_, AppState>, String> {
+    let guard = state
+        .lock()
+        .map_err(|_| "应用状态已损坏，请重启客户端".to_string())?;
+    guard.startup_fatal.check()?;
+    Ok(guard)
+}
+
+/// 应用状态。所有命令都通过 `Arc<Mutex<AppState>>` 访问，避免 Rust/前端各持一份真相。
 pub struct AppState {
     /// ③ 边界：远端后台。菜单、登录、交易都走这一个端口。
     ///
@@ -72,10 +84,13 @@ pub struct AppState {
     pub(crate) instance_lock: Option<bootstrap::InstanceLock>,
     /// 外设型号白名单。默认只允许 mock 型号——没登记就拒绝。
     pub(crate) policy: DevicePolicy,
-    /// 会话锁屏状态。`None` 表示未登录。
-    pub(crate) session: Option<SessionGuard>,
+    /// 会话锁屏状态（独立锁）。未登录/锁定在槽内表示，不在这里。
+    /// 与 `clock`/`audit` 共用同一批 `Arc`（见 `AppState::new`）。
+    pub(crate) session: SharedSession,
+    /// 主机在途单飞表 + 已定论结果的短缓存。锁序：`AppState` → 本表 → `SessionSlot`。
+    pub(crate) host_calls: app::SharedHostCalls,
     /// 时钟端口。锁屏/退避/审计都靠它，注入才能在测试里控制时间。
-    pub(crate) clock: StdArc<dyn ports::Clock>,
+    pub(crate) clock: Arc<dyn ports::Clock>,
     /// 自动重放调度。挂起交易按退避节奏逐笔重试，不再一次全推。
     pub(crate) replay: ReplayScheduler,
     /// 冲正账本：记录"状态不明"的交易与冲正申请。
@@ -98,6 +113,13 @@ impl AppState {
     ) -> Self {
         let remote = Arc::clone(choice.remote());
         let mock = choice.mock().cloned();
+        let clock: Arc<dyn ports::Clock> = Arc::new(ports::SystemClock);
+        // 会话槽与状态共用同一份 clock/audit：否则 tick 用的时间、写的账本
+        // 会和交易路径不是同一个，测试里注入的时钟也会失效。
+        let session: SharedSession = Arc::new(Mutex::new(app::SessionSlot::new(
+            Arc::clone(&clock),
+            audit.as_ref().map(Arc::clone),
+        )));
         Self {
             remote,
             mock,
@@ -113,8 +135,9 @@ impl AppState {
             audit,
             instance_lock: None,
             policy: DevicePolicy::allow_mocks(),
-            session: None,
-            clock: StdArc::new(ports::SystemClock),
+            session,
+            host_calls: Arc::new(Mutex::new(app::HostCalls::default())),
+            clock,
             replay: ReplayScheduler::new(ReplayPolicy::default()),
             reversal: ReversalBook::new(),
             verifying_key,
@@ -124,6 +147,23 @@ impl AppState {
     /// 清空权限快照。登出、切换账号、收到 401 时都必须调用。
     pub fn clear_session(&mut self) {
         self.snapshot = None;
+    }
+
+    /// 注入时钟时同时替换会话槽的那一份，见 `set_clock`。
+    #[cfg(test)]
+    pub fn set_clock(&mut self, clock: Arc<dyn ports::Clock>) {
+        self.clock = Arc::clone(&clock);
+        if let Ok(mut slot) = self.session.lock() {
+            slot.set_clock(clock);
+        }
+    }
+
+    /// 启动拒绝同时写进会话槽：会话命令不拿 AppState 锁，也得被拦下。
+    pub fn set_startup_fatal(&mut self, fatal: StartupFatal) {
+        if let Ok(mut slot) = self.session.lock() {
+            slot.set_startup_fatal(fatal.clone());
+        }
+        self.startup_fatal = fatal;
     }
 }
 
@@ -211,18 +251,10 @@ fn spawn_replay_worker(handle: tauri::AppHandle) {
 
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(secs));
-        let state = handle.state::<Mutex<AppState>>();
-        let Ok(mut guard) = state.lock() else {
-            continue;
-        };
-        // 启动被拒绝时绝不重放：兜底的演示远端不能碰任何挂起交易。
-        if guard.startup_fatal.check().is_err() {
-            continue;
-        }
-        // 会话校验统一走 replay_pending 里的 require_unlocked：
-        // 未登录/锁定时它会拒绝并写审计，后台线程吞掉 Err 即可（skip 已留痕）。
-        let mut app = app::ShellApp::new(&mut guard);
-        let _ = app.replay_pending();
+        let state = handle.state::<SharedState>();
+        // 三段式在同一处收口：准备/校验/审计 intent → 放锁打主机 → 回锁落结论。
+        // 启动被拒绝时 lock_app_state 会拦下；未登录/锁定时 require_unlocked 拒绝并留痕。
+        let _ = app::replay_pending_with(state.inner());
     });
 }
 
@@ -355,7 +387,7 @@ pub fn run() {
                 remote,
                 verifying_key,
             );
-            state.startup_fatal = startup_fatal;
+            state.set_startup_fatal(startup_fatal);
             // 必须存进状态：局部变量一丢就等于放锁，第二个进程马上能进来。
             state.instance_lock = instance_lock;
             // 幂等索引由 TxEngine::with_journal 读回；这里补读异常/冲正与重放进度。
@@ -382,10 +414,31 @@ pub fn run() {
                 state.replay = replay;
                 state.reversal = reversal;
             }
+            // 跨重启的幂等结论由 TxEngine 从账本读回；单飞表这边同步读一份，
+            // 避免"结论已有、第一笔却还在飞"的旧键再次打主机。
+            if let Some(journal) = state.audit.as_deref() {
+                match TxJournal::load_idempotent(journal) {
+                    Ok(rows) => {
+                        if let Ok(mut calls) = state.host_calls.lock() {
+                            // 账本里是裸幂等键；单飞表用 submit: 前缀与其它操作隔离。
+                            calls.hydrate(
+                                rows.into_iter()
+                                    .map(|(key, signature, result)| {
+                                        (format!("submit:{key}"), signature, result)
+                                    })
+                                    .collect(),
+                            );
+                        }
+                    }
+                    Err(e) => eprintln!("读取幂等结论供主机单飞表使用失败：{e}"),
+                }
+            }
             if let Some(note) = remote_note {
                 eprintln!("{note}");
             }
-            app.manage(Mutex::new(state));
+            // 会话槽单独托管的是同一个 Arc（不是副本），`session_*` 命令按类型直接取。
+            app.manage(Arc::clone(&state.session));
+            app.manage(Arc::new(Mutex::new(state)));
             // 必须在 manage 之后：线程的第一次 tick 要能拿到状态
             spawn_replay_worker(app_handle);
             Ok(())
@@ -489,7 +542,7 @@ mod tests {
             remote,
             demo_verifying_key(),
         );
-        state.startup_fatal = StartupFatal(Some(reason));
+        state.set_startup_fatal(StartupFatal(Some(reason)));
         let err = state.startup_fatal.check().unwrap_err();
         assert!(
             err.contains("启动被拒绝"),
@@ -500,11 +553,15 @@ mod tests {
     }
 
     #[test]
-    fn every_command_is_gated_by_startup_fatal() {
+    fn every_command_is_async_and_gated_by_startup_fatal() {
         let source = include_str!("commands.rs");
         assert!(
             source.contains("guard.startup_fatal.check()?"),
             "commands::lock 必须统一拦截启动失败"
+        );
+        assert!(
+            source.contains("slot.check_startup()?"),
+            "会话命令不拿状态锁，也必须单独拦启动失败"
         );
         for name in [
             "boot",
@@ -531,15 +588,18 @@ mod tests {
             "session_tick",
             "session_blur",
         ] {
-            let marker = format!("pub fn {name}(");
+            let marker = format!("pub async fn {name}(");
             let start = source
                 .find(&marker)
-                .unwrap_or_else(|| panic!("找不到命令 {name}"));
+                .unwrap_or_else(|| panic!("找不到异步命令 {name}"));
             let rest = &source[start + marker.len()..];
-            let end = rest.find("\npub fn ").unwrap_or(rest.len());
+            let end = rest.find("\npub async fn ").unwrap_or(rest.len());
+            let body = &rest[..end];
             assert!(
-                rest[..end].contains("lock(&state)?"),
-                "命令 {name} 必须经 commands::lock 做启动检查"
+                body.contains("with_state(")
+                    || body.contains("with_shared(")
+                    || body.contains("with_session("),
+                "命令 {name} 必须把阻塞工作搬出主线程"
             );
         }
     }

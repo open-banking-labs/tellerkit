@@ -8,10 +8,11 @@
 //! 为什么不用"一个用例一个 struct"：没有第二个实现，结构体只是把函数换了个形状
 //! （见 §6 的三问结论）。
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use tellerkit_core as sync;
+use tellerkit_core::banking::{MenuSource, MenuVersionProbe};
 use tellerkit_core::device::{PrintReceipt, Voucher};
 use tellerkit_core::mock::DemoRole;
 use tellerkit_core::pkg;
@@ -19,16 +20,17 @@ use tellerkit_core::pubkey_to_hex;
 use tellerkit_core::reversal::{
     Authorization, Authorizer, ExceptionKind, ReversalError, ReversalRequest,
 };
-use tellerkit_core::session::{SessionGuard, SessionPolicy};
-use tellerkit_core::tx::{TxRequest, TxResult, TxStatus};
+use tellerkit_core::session::{LockReason, SessionGuard, SessionPolicy};
+use tellerkit_core::tx::{HostError, TxHost, TxJournal, TxRequest, TxResult, TxStatus};
 use tellerkit_core::MenuTree;
 use tellerkit_core::MenuView;
 use tellerkit_core::{filter_visible, LoadSource};
 use tellerkit_journal_sqlite::AuditEvent;
 
 use crate::bootstrap::StartupFatal;
-use crate::ports::{Clock, RemoteBanking};
-use crate::AppState;
+use crate::lock_app_state;
+use crate::ports::{Clock, RemoteBanking, RemoteError};
+use crate::{AppState, SharedState};
 
 /// 包调用的来源标记：宿主注入到 IPC 的 map 参数里，Rust 校验前移除。
 /// 前端在包参数上覆盖写入，包自己给的同名字段不能生效。
@@ -224,6 +226,379 @@ impl SessionView {
     }
 }
 
+/// 会话状态的独立锁。
+///
+/// `session_tick` 每秒一次，交易却可能持状态锁打主机数秒；共用一把锁时
+/// 安全检查会跟着停摆。所以会话单独托管，`session_*` 只碰这把锁。
+/// **锁序固定**：`AppState` → `HostCalls` → `SessionSlot`，禁止反向。
+pub struct SessionSlot {
+    guard: Option<SessionGuard>,
+    teller_no: Option<String>,
+    clock: Arc<dyn Clock>,
+    audit: Option<Arc<SqliteJournal>>,
+    /// 启动拒绝的镜像：会话命令不拿 AppState 锁，也要在槽里拦一次。
+    startup_fatal: StartupFatal,
+}
+
+impl SessionSlot {
+    pub fn new(clock: Arc<dyn Clock>, audit: Option<Arc<SqliteJournal>>) -> Self {
+        Self {
+            guard: None,
+            teller_no: None,
+            clock,
+            audit,
+            startup_fatal: StartupFatal::default(),
+        }
+    }
+
+    pub fn set_startup_fatal(&mut self, fatal: StartupFatal) {
+        self.startup_fatal = fatal;
+    }
+
+    pub fn check_startup(&self) -> Result<(), String> {
+        self.startup_fatal.check()
+    }
+
+    #[cfg(test)]
+    pub fn set_clock(&mut self, clock: Arc<dyn Clock>) {
+        self.clock = clock;
+    }
+
+    /// 登录成功：开新会话，空闲计时从此刻起算。
+    pub fn begin(&mut self, teller_no: &str) {
+        self.guard = Some(SessionGuard::new(
+            SessionPolicy::default(),
+            self.clock.now_secs(),
+        ));
+        self.teller_no = Some(teller_no.to_string());
+    }
+
+    /// 登出：先清身份，避免登出后的审计还记到上一个人头上。
+    pub fn end(&mut self) {
+        self.guard = None;
+        self.teller_no = None;
+    }
+
+    /// 只读判定；不写审计、不持状态锁，调用方拿到结果后再决定怎么留痕。
+    pub fn denial(&self) -> Option<(&'static str, String)> {
+        match &self.guard {
+            Some(g) if !g.is_locked() => None,
+            None => Some(("尚未登录", "未登录即调用受保护命令".to_string())),
+            Some(g) => Some((
+                "会话已锁定",
+                g.reason()
+                    .map(|r| r.label())
+                    .unwrap_or("会话已锁定")
+                    .to_string(),
+            )),
+        }
+    }
+
+    pub fn view(&self) -> SessionView {
+        match &self.guard {
+            None => SessionView {
+                locked: false,
+                reason: None,
+                idle_secs: 0,
+            },
+            Some(guard) => SessionView {
+                locked: guard.is_locked(),
+                reason: guard.reason().map(|r| r.label().to_string()),
+                idle_secs: guard.idle_secs(self.clock.now_secs()),
+            },
+        }
+    }
+
+    pub fn touch(&mut self) -> SessionView {
+        let now = self.clock.now_secs();
+        if let Some(guard) = self.guard.as_mut() {
+            guard.touch(now);
+        }
+        self.view()
+    }
+
+    pub fn tick(&mut self) -> SessionView {
+        let now = self.clock.now_secs();
+        let newly_locked = self.guard.as_mut().and_then(|guard| guard.evaluate(now));
+        let view = self.view();
+        self.audit_lock(newly_locked);
+        view
+    }
+
+    pub fn blur(&mut self) -> SessionView {
+        let now = self.clock.now_secs();
+        let newly_locked = self.guard.as_mut().and_then(|guard| guard.on_blur(now));
+        let view = self.view();
+        self.audit_lock(newly_locked);
+        view
+    }
+
+    /// 锁屏事件留痕。锁中毒/账本坏都不能阻止会话进入锁定，所以只告警。
+    fn audit_lock(&self, reason: Option<LockReason>) {
+        let Some(reason) = reason else {
+            return;
+        };
+        let Some(journal) = self.audit.as_ref() else {
+            return;
+        };
+        let event = AuditEvent::new(
+            &self.teller_no.clone().unwrap_or_else(|| "unknown".into()),
+            "session_lock",
+            "",
+            "ok",
+            reason.label(),
+        );
+        if let Err(e) = journal.audit(&event) {
+            eprintln!("会话锁定审计写入失败：{e}");
+        }
+    }
+}
+
+/// 会话锁中毒时按**已锁定**处理，绝不因为读不到状态就放行资金操作。
+fn poisoned_session_view() -> SessionView {
+    SessionView {
+        locked: true,
+        reason: Some("会话状态异常".into()),
+        idle_secs: 0,
+    }
+}
+
+pub type SharedHostCalls = Arc<Mutex<HostCalls>>;
+
+/// 主机调用的单飞表 + 已定论结果的短缓存。
+///
+/// 幂等索引记的是"主机回过之后的结论"，覆盖不到"第一笔还在飞"的窗口；
+/// 放锁以后这个窗口才真正打开，所以在这里按业务键占位。
+#[derive(Default)]
+pub struct HostCalls {
+    active: HashSet<String>,
+    active_signatures: HashMap<String, String>,
+    settled: HashMap<String, (String, TxResult)>,
+}
+
+/// 在途位的 RAII 租约：异常返回或 panic 都会释放，不会把幂等键永久占住。
+pub struct HostLease {
+    calls: SharedHostCalls,
+    slot: String,
+}
+
+impl Drop for HostLease {
+    fn drop(&mut self) {
+        if let Ok(mut calls) = self.calls.lock() {
+            calls.active.remove(&self.slot);
+            calls.active_signatures.remove(&self.slot);
+        }
+    }
+}
+
+impl HostCalls {
+    /// 原子地做三件事：查已定论结论、查同键在途、占住本次在途位。
+    /// 命中已定论结论时返回缓存结果且不占位（对应 core 幂等索引的短路）。
+    pub fn claim(
+        calls: &SharedHostCalls,
+        slot: &str,
+        signature: &str,
+        collision: &str,
+        busy: &str,
+    ) -> Result<HostClaim, String> {
+        let mut guard = calls
+            .lock()
+            .map_err(|_| "主机调用表已损坏，请重启客户端".to_string())?;
+        if let Some((known, result)) = guard.settled.get(slot) {
+            if known != signature {
+                return Err(collision.to_string());
+            }
+            return Ok(HostClaim {
+                cached: Some(result.clone()),
+                lease: None,
+            });
+        }
+        if !signature.is_empty() {
+            if let Some(known) = guard.active_signatures.get(slot) {
+                if known != signature {
+                    return Err(collision.to_string());
+                }
+            }
+        }
+        if !guard.active.insert(slot.to_string()) {
+            return Err(busy.to_string());
+        }
+        guard
+            .active_signatures
+            .insert(slot.to_string(), signature.to_string());
+        Ok(HostClaim {
+            cached: None,
+            lease: Some(HostLease {
+                calls: Arc::clone(calls),
+                slot: slot.to_string(),
+            }),
+        })
+    }
+
+    /// 主机给出终态结论后放进短缓存，下一笔同键不必再打主机。
+    pub fn settle(&mut self, slot: &str, signature: &str, result: &TxResult) {
+        if matches!(result.status(), TxStatus::Committed | TxStatus::Rejected) {
+            self.settled
+                .insert(slot.to_string(), (signature.to_string(), result.clone()));
+        }
+    }
+
+    pub fn hydrate(&mut self, rows: Vec<(String, String, TxResult)>) {
+        for (key, signature, result) in rows {
+            self.settled.insert(key, (signature, result));
+        }
+    }
+}
+
+/// 单次主机调用的准入结果：要么直接返回缓存，要么拿一张在途租约。
+pub struct HostClaim {
+    pub cached: Option<TxResult>,
+    pub lease: Option<HostLease>,
+}
+
+/// 单次重放的准入凭据：到期请求快照 + 在途租约，不含 `AppState` 锁。
+pub struct ReplayPlan {
+    remote: Arc<dyn RemoteBanking>,
+    requests: Vec<TxRequest>,
+    now: u64,
+    _lease: HostLease,
+}
+
+impl ReplayPlan {
+    /// 阶段二：按到期顺序放锁打主机。
+    pub fn call_host(&self) -> Vec<(String, Result<String, HostError>)> {
+        self.requests
+            .iter()
+            .map(|request| {
+                (
+                    request.idempotency_key().to_string(),
+                    self.remote.submit(request),
+                )
+            })
+            .collect()
+    }
+}
+
+/// 把放锁期间的响应按幂等键回放给 core；未预取的键按"仍不可达"处理，
+/// 绝不会凭空造出一个成功结论。
+struct ReplayedHost {
+    outcomes: HashMap<String, Result<String, HostError>>,
+}
+
+impl TxHost for ReplayedHost {
+    fn submit(&self, request: &TxRequest) -> Result<String, HostError> {
+        self.outcomes
+            .get(request.idempotency_key())
+            .cloned()
+            .unwrap_or(Err(HostError::Unavailable))
+    }
+}
+
+/// 单次提交的准入凭据：能力校验与审计 intent 已完成，主机尚未调用。
+pub struct TxSubmitPlan {
+    remote: Arc<dyn RemoteBanking>,
+    request: TxRequest,
+    key: String,
+    actor: String,
+    target: String,
+    code: String,
+    signature: String,
+    shortcut: Option<TxResult>,
+    lease: Option<HostLease>,
+}
+
+impl TxSubmitPlan {
+    /// 缓存/挂起重复时不打主机。
+    pub fn needs_host(&self) -> bool {
+        self.shortcut.is_none()
+    }
+
+    /// 阶段二：放锁后真正打主机。
+    pub fn call_host(&self) -> Result<String, HostError> {
+        self.remote.submit(&self.request)
+    }
+}
+
+/// 只回放已取回的响应：core 的判定/落账逻辑原封不动，网络不再发生在锁内。
+struct FixedHost {
+    outcome: Result<String, HostError>,
+}
+
+impl TxHost for FixedHost {
+    fn submit(&self, _request: &TxRequest) -> Result<String, HostError> {
+        self.outcome.clone()
+    }
+}
+
+/// 与 core 的规范化载荷签名同构：同键换交易码/金额/要素必须被认出来。
+fn payload_signature(request: &TxRequest) -> String {
+    let canonical = serde_json::to_string(&(
+        request.tx_code(),
+        request.amount_cents(),
+        request.offline_capable(),
+        request.elements(),
+    ))
+    .expect("字符串、整数、布尔与字符串映射的序列化不会失败");
+    format!("v2|{canonical}")
+}
+
+/// 单次冲正的准入凭据：授权已完成、审计 intent 已写、主机尚未调用。
+pub struct ReversalPlan {
+    remote: Arc<dyn RemoteBanking>,
+    key: String,
+    reason: String,
+    actor: String,
+    audit_action: String,
+    is_retry: bool,
+    _lease: HostLease,
+}
+
+impl ReversalPlan {
+    /// 阶段二：放锁后打主机。
+    pub fn call_host(&self) -> Result<String, RemoteError> {
+        self.remote.reverse(&self.key, &self.reason)
+    }
+}
+
+/// 单次版本探测的准入凭据：持有主机句柄与在途租约，不持有 `AppState`。
+pub struct UpdatePlan {
+    local: Option<u64>,
+    remote: Arc<dyn RemoteBanking>,
+    _lease: HostLease,
+}
+
+impl UpdatePlan {
+    /// 阶段二：放锁后真正打主机。只在可能更新时下载，保持原网络次数。
+    pub fn prefetch(&self) -> MenuPrefetch {
+        let probe = self.remote.probe_menu();
+        let download = match &probe {
+            Ok(p) if self.local.map_or(true, |v| p.latest() > v) => self.remote.download_menu(),
+            _ => Ok(Vec::new()),
+        };
+        MenuPrefetch { probe, download }
+    }
+}
+
+/// 放锁期间取回的远端响应，交给 core 原逻辑判版本/安装。
+pub struct MenuPrefetch {
+    probe: Result<MenuVersionProbe, RemoteError>,
+    download: Result<Vec<u8>, RemoteError>,
+}
+
+struct PreparedMenuSource {
+    prefetch: MenuPrefetch,
+}
+
+impl MenuSource for PreparedMenuSource {
+    fn probe_menu(&self) -> Result<MenuVersionProbe, RemoteError> {
+        self.prefetch.probe.clone()
+    }
+
+    fn download_menu(&self) -> Result<Vec<u8>, RemoteError> {
+        self.prefetch.download.clone()
+    }
+}
+
 /// 对账视图：聚合 + 最近明细。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reconciliation {
@@ -360,22 +735,19 @@ impl<'a> ShellApp<'a> {
     /// 覆盖层下的 iframe 也能发 postMessage，只有这里是唯一真相。
     /// 判定失败即写审计（拒绝原因），且绝不触达主机。
     fn require_unlocked(&self, action: &str) -> Result<(), String> {
-        match &self.state.session {
-            Some(g) if !g.is_locked() => Ok(()),
-            other => {
-                let (reason, detail) = match other {
-                    None => ("尚未登录", "未登录即调用受保护命令"),
-                    Some(g) => {
-                        let why = g.reason().map(|r| r.label()).unwrap_or("会话已锁定");
-                        ("会话已锁定", why)
-                    }
-                };
+        // 只短暂持有会话锁；审计要取柜员号并写账本，不能持锁做。
+        let denial = match self.state.session.lock() {
+            Ok(slot) => slot.denial(),
+            Err(_) => Some(("会话状态异常", "会话锁已损坏，请重启客户端".to_string())),
+        };
+        match denial {
+            None => Ok(()),
+            Some((reason, detail)) => {
                 let actor = self.actor();
                 let denial = format!("{reason}：{detail}。请回到锁屏界面解锁后再试");
-                let audited = self.audit(&actor, action, "", "denied", detail);
+                let audited = self.audit(&actor, action, "", "denied", &detail);
                 match audited {
                     Ok(()) => Err(denial),
-                    // 审计失败不能吞：调用方必须知道"拒绝"这件事没留下证据。
                     Err(e) => Err(format!("{denial}；审计写入失败：{e}")),
                 }
             }
@@ -412,7 +784,8 @@ impl<'a> ShellApp<'a> {
             Ok(head) => head,
             Err(e) => {
                 let reason = format!("审计链校验失败，已拒绝启动：{e}");
-                self.state.startup_fatal = StartupFatal(Some(reason.clone()));
+                self.state
+                    .set_startup_fatal(StartupFatal(Some(reason.clone())));
                 return Err(reason);
             }
         };
@@ -531,10 +904,11 @@ impl<'a> ShellApp<'a> {
         let filter_ms = started.elapsed().as_secs_f64() * 1000.0;
 
         self.state.snapshot = Some(snapshot.clone());
-        self.state.session = Some(SessionGuard::new(
-            SessionPolicy::default(),
-            self.clock.now_secs(),
-        ));
+        self.state
+            .session
+            .lock()
+            .map_err(|_| "会话状态已损坏，请重启客户端".to_string())?
+            .begin(&snapshot.teller_no);
         Ok(LoginOutcome {
             snapshot,
             menu,
@@ -546,7 +920,9 @@ impl<'a> ShellApp<'a> {
         if let Some(snapshot) = self.state.snapshot.clone() {
             self.audit(snapshot.teller_no(), "logout", "", "ok", "")?;
         }
-        self.state.session = None;
+        if let Ok(mut slot) = self.state.session.lock() {
+            slot.end();
+        }
         self.state.clear_session();
         Ok(())
     }
@@ -557,14 +933,45 @@ impl<'a> ShellApp<'a> {
         Ok(filter_visible(menu, snapshot))
     }
 
-    /// 后台版本探测。菜单版本更新不重置权限快照——两者独立演进。
-    pub fn check_update(&mut self) -> Result<sync::UpdateOutcome, String> {
-        let outcome = sync::check_and_update(self.state.remote.as_ref(), &self.state.store);
+    /// 版本探测的阶段一：校验/留痕/占单飞位，绝不在这里打主机。
+    pub fn prepare_check_update(&mut self) -> Result<UpdatePlan, String> {
+        self.require_auditable("check_update", "menu")?;
+        let lease = HostCalls::claim(
+            &self.state.host_calls,
+            "check_update",
+            "menu",
+            "版本探测参数冲突",
+            "版本探测正在进行中，请稍后重试",
+        )?
+        .lease
+        .ok_or_else(|| "版本探测参数冲突".to_string())?;
+        Ok(UpdatePlan {
+            local: self.state.store.current_version(),
+            remote: Arc::clone(&self.remote),
+            _lease: lease,
+        })
+    }
+
+    /// 阶段三：用放锁期间取回的响应喂给 core 原逻辑，落菜单与结论审计。
+    pub fn finish_check_update(
+        &mut self,
+        plan: UpdatePlan,
+        prefetch: MenuPrefetch,
+    ) -> Result<sync::UpdateOutcome, String> {
+        let outcome = sync::check_and_update(&PreparedMenuSource { prefetch }, &self.state.store);
         if outcome.updated() {
             if let Ok(loaded) = self.state.store.load_latest() {
                 self.state.menu = Some(loaded.into_tree());
             }
         }
+        self.audit_checked(
+            &self.actor(),
+            "check_update",
+            "menu",
+            if outcome.checked() { "ok" } else { "failed" },
+            outcome.note(),
+        )?;
+        drop(plan);
         Ok(outcome)
     }
 
@@ -624,9 +1031,8 @@ impl<'a> ShellApp<'a> {
             .collect()
     }
 
-    /// 申请冲正：本地授权 → 主机受理 → 拿到流水号后才算处置完成。
-    /// 已授权但未确认的申请可直接重试，原授权记录不撤销、不重复申请。
-    pub fn request_reversal(&mut self, key: &str, reason: &str) -> Result<String, String> {
+    /// 冲正阶段一：本地授权、审计 intent、占单飞位；不打主机。
+    pub fn prepare_reversal(&mut self, key: &str, reason: &str) -> Result<ReversalPlan, String> {
         self.require_unlocked("reversal")?;
         self.require_auditable("reversal", key)?;
         let actor = self.actor();
@@ -637,10 +1043,24 @@ impl<'a> ShellApp<'a> {
             "reversal"
         };
 
+        let claim = match HostCalls::claim(
+            &self.state.host_calls,
+            &format!("reversal:{key}"),
+            "",
+            "冲正幂等键冲突",
+            "同一笔冲正正在处理中，请勿重复申请",
+        ) {
+            Ok(claim) => claim,
+            Err(e) => {
+                let why = e.clone();
+                return Err(self.audit_and_error(&actor, audit_action, key, "denied", &why, e));
+            }
+        };
+        let _lease = claim.lease.ok_or_else(|| "冲正幂等键冲突".to_string())?;
+
         // 1. 首次申请才需要授权；重试沿用同一条凭证与同一个幂等键。
         if !is_retry {
             let request = ReversalRequest::new(key, &actor, "", 0, reason);
-            // 授权（当前是演示主管；接 IAM 后换成真实授权端口）
             if let Err(e) = self.state.reversal.request(&request, &DemoSupervisor) {
                 let result = match &e {
                     ReversalError::NotAuthorized(_) | ReversalError::SelfApproval(_) => "denied",
@@ -659,14 +1079,39 @@ impl<'a> ShellApp<'a> {
             }
         }
 
-        // 2. 主机受理。失败时保留"已授权未确认"，柜员仍可重试
-        let host_reference = match self.remote.reverse(key, reason) {
+        Ok(ReversalPlan {
+            remote: Arc::clone(&self.remote),
+            key: key.to_string(),
+            reason: reason.to_string(),
+            actor,
+            audit_action: audit_action.to_string(),
+            is_retry,
+            _lease,
+        })
+    }
+
+    /// 冲正阶段三：放锁期间主机回了流水号，才在锁内确认与写结论审计。
+    pub fn finish_reversal(
+        &mut self,
+        plan: ReversalPlan,
+        host_result: Result<String, RemoteError>,
+    ) -> Result<String, String> {
+        let ReversalPlan {
+            key,
+            actor,
+            audit_action,
+            is_retry,
+            ..
+        } = &plan;
+
+        // 2. 主机受理。失败时保留"已授权未确认"，柜员仍可重试。
+        let host_reference = match host_result {
             Ok(reference) => reference,
             Err(e) => {
                 let why = e.to_string();
-                if is_retry {
+                if *is_retry {
                     let err = self.audit_and_error(
-                        &actor,
+                        actor,
                         audit_action,
                         key,
                         "failed",
@@ -678,7 +1123,7 @@ impl<'a> ShellApp<'a> {
                     return Err(err);
                 }
                 return Err(self.audit_and_error(
-                    &actor,
+                    actor,
                     audit_action,
                     key,
                     "failed",
@@ -692,7 +1137,7 @@ impl<'a> ShellApp<'a> {
         if let Err(e) = self.state.reversal.confirm(key, &host_reference) {
             let why = e.to_string();
             return Err(self.audit_and_error(
-                &actor,
+                actor,
                 audit_action,
                 key,
                 "failed",
@@ -701,11 +1146,16 @@ impl<'a> ShellApp<'a> {
             ));
         }
 
-        self.audit_checked(&actor, audit_action, key, "ok", &host_reference)?;
+        self.audit_checked(actor, audit_action, key, "ok", &host_reference)?;
+        drop(plan);
         Ok(host_reference)
     }
 
-    pub fn submit_transaction(&mut self, mut request: TxRequest) -> Result<TxResult, String> {
+    /// 提交阶段一：会话/包能力/审计 intent、幂等与单飞校验，全部在锁内完成。
+    pub fn prepare_submit_transaction(
+        &mut self,
+        mut request: TxRequest,
+    ) -> Result<TxSubmitPlan, String> {
         self.require_unlocked("submit_tx")?;
         let code = request.tx_code().to_string();
         let call = self.take_call(request.elements_mut(), &code)?;
@@ -714,7 +1164,6 @@ impl<'a> ShellApp<'a> {
         }
         self.require_auditable("submit_tx", request.idempotency_key())?;
         // 契约 lifecycle.md 不变量 7：主机没声明幂等，就不许离线挂起。
-        // 挂起意味着"以后一定会重发"，而重发只有服务端按幂等键去重才不会重复入账。
         if request.offline_capable() && !self.remote.supports_idempotency() {
             let actor = self.actor();
             let code = request.tx_code().to_string();
@@ -728,26 +1177,110 @@ impl<'a> ShellApp<'a> {
             );
             return Err(err);
         }
-        let amount_cents = request.amount_cents();
-        let code = request.tx_code().to_string();
+
         let key = request.idempotency_key().to_string();
         let actor = self.actor();
-
-        let result = self.state.tx.submit(self.remote.as_ref(), request);
-        self.mark_if_uncertain(&key, &result);
-
-        let detail = format!(
-            "code={code} status={:?} amount_cents={amount_cents}",
-            result.status()
-        );
         let target = call
             .as_ref()
             .map(PackageCall::origin)
             .unwrap_or_else(|| code.clone());
+        // core 的提交校验只拦明显不能发给主机的请求；放锁前先做一遍，
+        // 免得非法请求白跑一趟网络。
+        let invalid = if code.trim().is_empty() {
+            Some("交易码为空".to_string())
+        } else if key.trim().is_empty() {
+            Some("缺少幂等键：无法保证重放不重复入账".to_string())
+        } else if request.amount_cents() < 0 {
+            Some("金额不能为负".to_string())
+        } else {
+            None
+        };
+        if let Some(msg) = invalid {
+            return Ok(TxSubmitPlan {
+                remote: Arc::clone(&self.remote),
+                request,
+                key,
+                actor,
+                target,
+                code,
+                signature: String::new(),
+                shortcut: Some(TxResult::rejected(&msg)),
+                lease: None,
+            });
+        }
+        let signature = payload_signature(&request);
+        let collision = "幂等键已用于另一笔交易（交易码或要素不同），请为该笔业务使用新的幂等键";
+        let busy = "同一笔交易正在处理中，请勿重复提交；若上一笔超时，请先查账确认再决定是否重试";
+        let claim = match HostCalls::claim(
+            &self.state.host_calls,
+            &format!("submit:{key}"),
+            &signature,
+            collision,
+            busy,
+        ) {
+            Ok(claim) => claim,
+            Err(e) => {
+                let why = e.clone();
+                return Err(self.audit_and_error(&actor, "submit_tx", &target, "denied", &why, e));
+            }
+        };
+        // 已定论的同键交易不再打主机；core 对重复提交也会补同样的说明。
+        let shortcut = if let Some(previous) = claim.cached {
+            let mut result = previous;
+            result.message = format!("重复提交：返回首次结果（{}）", result.message);
+            Some(result)
+        } else if self.state.tx.pending_keys().contains(&key) {
+            Some(TxResult::pending("重复提交：交易已挂起，等待重放"))
+        } else {
+            None
+        };
+
+        Ok(TxSubmitPlan {
+            remote: Arc::clone(&self.remote),
+            request,
+            key,
+            actor,
+            target,
+            code,
+            signature,
+            shortcut,
+            lease: claim.lease,
+        })
+    }
+
+    /// 提交阶段三：把放锁期间拿到的主机结论交回 core 落账，再写结论审计。
+    pub fn finish_submit_transaction(
+        &mut self,
+        plan: TxSubmitPlan,
+        outcome: Option<Result<String, HostError>>,
+    ) -> Result<TxResult, String> {
+        let amount_cents = plan.request.amount_cents();
+        let result = match &plan.shortcut {
+            Some(shortcut) => shortcut.clone(),
+            None => {
+                let host = FixedHost {
+                    outcome: outcome.unwrap_or(Err(HostError::Unavailable)),
+                };
+                // core 仍负责校验/幂等索引/挂起队列/账本收口；只是此刻的主机
+                // 是"已取回响应"的假端口，真正网络调用发生在两阶段之间。
+                self.state.tx.submit(&host, plan.request.clone())
+            }
+        };
+        if plan.shortcut.is_none() {
+            if let Ok(mut calls) = self.state.host_calls.lock() {
+                calls.settle(&format!("submit:{}", plan.key), &plan.signature, &result);
+            }
+        }
+        self.mark_if_uncertain(&plan.key, &result);
+        let detail = format!(
+            "code={} status={:?} amount_cents={amount_cents}",
+            plan.code,
+            result.status()
+        );
         self.audit_checked(
-            &actor,
+            &plan.actor,
             "submit_tx",
-            &target,
+            &plan.target,
             if result.status() == TxStatus::Committed {
                 "ok"
             } else {
@@ -755,64 +1288,103 @@ impl<'a> ShellApp<'a> {
             },
             &detail,
         )?;
+        drop(plan);
         Ok(result)
     }
 
-    pub fn replay_pending(&mut self) -> Result<String, String> {
+    /// 重放阶段一：会话闸门、审计 intent、单飞位与到期清单，都在锁内。
+    pub fn prepare_replay(&mut self) -> Result<ReplayPlan, String> {
         self.require_unlocked("replay")?;
         self.require_auditable("replay", "tx_queue")?;
-        let remote = Arc::clone(&self.remote);
+        let claim = match HostCalls::claim(
+            &self.state.host_calls,
+            "replay:all",
+            "",
+            "",
+            "上一轮重放仍在进行中，请稍后重试",
+        ) {
+            Ok(claim) => claim,
+            Err(e) => return Err(e),
+        };
+        let lease = claim.lease.ok_or_else(|| "重放状态冲突".to_string())?;
         let now = self.clock.now_secs();
+        // core 的 run_once 从账本读回挂起请求；这里读同一份账本算出到期键，
+        // 才能在放锁期间按原请求打主机。
+        let pending = match &self.state.audit {
+            Some(journal) => TxJournal::pending(journal.as_ref())
+                .map_err(|e| format!("读取待重放队列失败：{e}"))?,
+            None => Vec::new(),
+        };
+        for request in &pending {
+            self.state.replay.track(request.idempotency_key(), now);
+        }
+        let due = self.state.replay.due(now);
+        let requests = pending
+            .into_iter()
+            .filter(|request| due.contains(&request.idempotency_key()))
+            .collect();
+        Ok(ReplayPlan {
+            remote: Arc::clone(&self.remote),
+            requests,
+            now,
+            _lease: lease,
+        })
+    }
+
+    /// 重放阶段三：把放锁期间的结果喂回 core 调度器，落结论与审计。
+    pub fn finish_replay(
+        &mut self,
+        plan: ReplayPlan,
+        outcomes: Vec<(String, Result<String, HostError>)>,
+    ) -> Result<String, String> {
+        let host = ReplayedHost { outcomes };
         let run = tellerkit_core::replay::run_once(
             &mut self.state.tx,
             &mut self.state.replay,
-            remote.as_ref(),
-            now,
+            &host,
+            plan.now,
         );
 
-        if run.attempted() == 0 && run.still_pending() == 0 {
-            return Ok("没有待重放的交易".to_string());
-        }
-        if run.attempted() == 0 {
-            return Ok(format!(
-                "还有 {} 笔挂起，均未到重试时间",
-                run.still_pending()
-            ));
-        }
-
-        let detail = format!(
-            "attempted={} committed={} pending={} gave_up={} keys={}",
-            run.attempted(),
-            run.committed(),
-            run.still_pending(),
-            run.gave_up().len(),
-            run.gave_up().join(",")
-        );
-        let actor = self.actor();
-        // 放弃自动重试是异常终态，必须按 failed 留痕，不能混在 ok 里。
-        self.audit_checked(
-            &actor,
-            "replay",
-            "tx_queue",
-            if run.gave_up().is_empty() {
-                "ok"
-            } else {
-                "failed"
-            },
-            &detail,
-        )?;
-
-        Ok(format!(
-            "重放 {} 笔：成功 {} 笔，仍挂起 {} 笔{}",
-            run.attempted(),
-            run.committed(),
-            run.still_pending(),
-            if run.gave_up().is_empty() {
-                String::new()
-            } else {
-                format!("，{} 笔已放弃自动重试，需人工处理", run.gave_up().len())
-            }
-        ))
+        let message = if run.attempted() == 0 && run.still_pending() == 0 {
+            "没有待重放的交易".to_string()
+        } else if run.attempted() == 0 {
+            format!("还有 {} 笔挂起，均未到重试时间", run.still_pending())
+        } else {
+            let detail = format!(
+                "attempted={} committed={} pending={} gave_up={} keys={}",
+                run.attempted(),
+                run.committed(),
+                run.still_pending(),
+                run.gave_up().len(),
+                run.gave_up().join(",")
+            );
+            let actor = self.actor();
+            // 放弃自动重试是异常终态，必须按 failed 留痕，不能混在 ok 里。
+            self.audit_checked(
+                &actor,
+                "replay",
+                "tx_queue",
+                if run.gave_up().is_empty() {
+                    "ok"
+                } else {
+                    "failed"
+                },
+                &detail,
+            )?;
+            format!(
+                "重放 {} 笔：成功 {} 笔，仍挂起 {} 笔{}",
+                run.attempted(),
+                run.committed(),
+                run.still_pending(),
+                if run.gave_up().is_empty() {
+                    String::new()
+                } else {
+                    format!("，{} 笔已放弃自动重试，需人工处理", run.gave_up().len())
+                }
+            )
+        };
+        drop(plan);
+        Ok(message)
     }
 
     pub fn tx_pending_count(&self) -> usize {
@@ -861,58 +1433,26 @@ impl<'a> ShellApp<'a> {
 
     // ---------- 会话 ----------
 
+    // 这三个方法只是用例视角的薄包装；IPC 入口直接取会话槽，
+    // 不经过 AppState 锁（见 commands::session_*）。
     pub fn session_touch(&mut self) -> SessionView {
-        let now = self.clock.now_secs();
-        if let Some(guard) = self.state.session.as_mut() {
-            guard.touch(now);
+        match self.state.session.lock() {
+            Ok(mut slot) => slot.touch(),
+            Err(_) => poisoned_session_view(),
         }
-        self.session_view()
     }
 
     pub fn session_tick(&mut self) -> SessionView {
-        let now = self.clock.now_secs();
-        let actor = self.actor();
-        let locked = self
-            .state
-            .session
-            .as_mut()
-            .and_then(|guard| guard.evaluate(now));
-        if let Some(reason) = locked {
-            if let Err(e) = self.audit(&actor, "session_lock", "", "ok", reason.label()) {
-                eprintln!("会话锁定审计写入失败：{e}");
-            }
+        match self.state.session.lock() {
+            Ok(mut slot) => slot.tick(),
+            Err(_) => poisoned_session_view(),
         }
-        self.session_view()
     }
 
     pub fn session_blur(&mut self) -> SessionView {
-        let now = self.clock.now_secs();
-        let actor = self.actor();
-        let locked = self
-            .state
-            .session
-            .as_mut()
-            .and_then(|guard| guard.on_blur(now));
-        if let Some(reason) = locked {
-            if let Err(e) = self.audit(&actor, "session_lock", "", "ok", reason.label()) {
-                eprintln!("会话锁定审计写入失败：{e}");
-            }
-        }
-        self.session_view()
-    }
-
-    fn session_view(&self) -> SessionView {
-        match &self.state.session {
-            None => SessionView {
-                locked: false,
-                reason: None,
-                idle_secs: 0,
-            },
-            Some(guard) => SessionView {
-                locked: guard.is_locked(),
-                reason: guard.reason().map(|r| r.label().to_string()),
-                idle_secs: guard.idle_secs(self.clock.now_secs()),
-            },
+        match self.state.session.lock() {
+            Ok(mut slot) => slot.blur(),
+            Err(_) => poisoned_session_view(),
         }
     }
 
@@ -1147,10 +1687,71 @@ impl<'a> ShellApp<'a> {
     }
 }
 
+// ---------------- 三段式编排（放锁打主机） ----------------
+//
+// 这里刻意不持有 MutexGuard 跨网络：每段单独加锁、统一走 lock_app_state，
+// 启动拒绝在任意一段都能拦下。后台 worker 与命令共用同一入口。
+
+/// 交易：锁内准备与审计 intent → 放锁打主机 → 回锁落结论与审计。
+pub fn submit_transaction_with(
+    shared: &SharedState,
+    request: TxRequest,
+) -> Result<TxResult, String> {
+    let plan = {
+        let mut guard = lock_app_state(shared)?;
+        ShellApp::new(&mut guard).prepare_submit_transaction(request)?
+    };
+    let outcome = if plan.needs_host() {
+        Some(plan.call_host())
+    } else {
+        None
+    };
+    let mut guard = lock_app_state(shared)?;
+    ShellApp::new(&mut guard).finish_submit_transaction(plan, outcome)
+}
+
+/// 冲正：本地授权与审计 intent 在锁内，主机调用在锁外。
+pub fn request_reversal_with(
+    shared: &SharedState,
+    key: &str,
+    reason: &str,
+) -> Result<String, String> {
+    let plan = {
+        let mut guard = lock_app_state(shared)?;
+        ShellApp::new(&mut guard).prepare_reversal(key, reason)?
+    };
+    let outcome = plan.call_host();
+    let mut guard = lock_app_state(shared)?;
+    ShellApp::new(&mut guard).finish_reversal(plan, outcome)
+}
+
+/// 重放：命令与后台 worker 共用；到期清单在锁内取，主机调用在锁外。
+pub fn replay_pending_with(shared: &SharedState) -> Result<String, String> {
+    let plan = {
+        let mut guard = lock_app_state(shared)?;
+        ShellApp::new(&mut guard).prepare_replay()?
+    };
+    let outcomes = plan.call_host();
+    let mut guard = lock_app_state(shared)?;
+    ShellApp::new(&mut guard).finish_replay(plan, outcomes)
+}
+
+/// 版本探测：本地版本在锁内读，probe/download 在锁外，安装与结论在锁内。
+pub fn check_update_with(shared: &SharedState) -> Result<sync::UpdateOutcome, String> {
+    let plan = {
+        let mut guard = lock_app_state(shared)?;
+        ShellApp::new(&mut guard).prepare_check_update()?
+    };
+    let prefetch = plan.prefetch();
+    let mut guard = lock_app_state(shared)?;
+    ShellApp::new(&mut guard).finish_check_update(plan, prefetch)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::Condvar;
     use tellerkit_journal_sqlite::SqliteJournal;
 
     /// 冻结时钟：证明"时间来自端口"而不是系统调用。
@@ -1187,9 +1788,41 @@ mod tests {
             ),
             tellerkit_core::mock::demo_verifying_key(),
         );
-        state.clock = clock;
-        state.session = Some(SessionGuard::new(SessionPolicy::default(), 0));
+        state.set_clock(clock);
         state
+            .session
+            .lock()
+            .expect("测试里会话锁不应中毒")
+            .begin("T0000");
+        state
+    }
+
+    fn submit_sync(state: &mut AppState, request: TxRequest) -> Result<TxResult, String> {
+        let plan = ShellApp::new(state).prepare_submit_transaction(request)?;
+        let outcome = if plan.needs_host() {
+            Some(plan.call_host())
+        } else {
+            None
+        };
+        ShellApp::new(state).finish_submit_transaction(plan, outcome)
+    }
+
+    fn reversal_sync(state: &mut AppState, key: &str, reason: &str) -> Result<String, String> {
+        let plan = ShellApp::new(state).prepare_reversal(key, reason)?;
+        let outcome = plan.call_host();
+        ShellApp::new(state).finish_reversal(plan, outcome)
+    }
+
+    fn replay_sync(state: &mut AppState) -> Result<String, String> {
+        let plan = ShellApp::new(state).prepare_replay()?;
+        let outcomes = plan.call_host();
+        ShellApp::new(state).finish_replay(plan, outcomes)
+    }
+
+    fn check_update_sync(state: &mut AppState) -> Result<sync::UpdateOutcome, String> {
+        let plan = ShellApp::new(state).prepare_check_update()?;
+        let prefetch = plan.prefetch();
+        ShellApp::new(state).finish_check_update(plan, prefetch)
     }
 
     use tellerkit_core::tx::TxEngine;
@@ -1226,18 +1859,14 @@ mod tests {
 
         let mut req = TxRequest::new("account.deposit", "k-offline");
         req.set_offline_capable(true);
-        let err = ShellApp::new(&mut state)
-            .submit_transaction(req)
-            .unwrap_err();
+        let err = submit_sync(&mut state, req).unwrap_err();
         assert!(err.contains("未声明幂等"), "实际：{err}");
 
         // 在线模式不走这条拦截：会一路到端点，端点不存在则是"主机拒绝"（交易结论），
         // 不是 Err——状态机把失败表达成 TxResult，这一点不能被测试写反。
         let mut online = TxRequest::new("account.deposit", "k-online");
         online.set_offline_capable(false);
-        let result = ShellApp::new(&mut state)
-            .submit_transaction(online)
-            .expect("在线模式不应被幂等规则拦下");
+        let result = submit_sync(&mut state, online).expect("在线模式不应被幂等规则拦下");
         assert_eq!(result.status(), TxStatus::Rejected);
         assert!(
             result.message().contains("没有为该服务登记任何端点"),
@@ -1273,9 +1902,7 @@ mod tests {
     fn locked_session_refuses_all_protected_commands() {
         let mut state = locked_state();
 
-        let err = ShellApp::new(&mut state)
-            .submit_transaction(TxRequest::new("account.deposit", "k-lock"))
-            .unwrap_err();
+        let err = submit_sync(&mut state, TxRequest::new("account.deposit", "k-lock")).unwrap_err();
         assert!(err.contains("会话已锁定"), "提交应被闸门拒绝：{err}");
 
         let err = ShellApp::new(&mut state)
@@ -1283,12 +1910,10 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("会话已锁定"), "打印应被闸门拒绝：{err}");
 
-        let err = ShellApp::new(&mut state)
-            .request_reversal("k-lock", "冲正")
-            .unwrap_err();
+        let err = reversal_sync(&mut state, "k-lock", "冲正").unwrap_err();
         assert!(err.contains("会话已锁定"), "冲正应被闸门拒绝：{err}");
 
-        let err = ShellApp::new(&mut state).replay_pending().unwrap_err();
+        let err = replay_sync(&mut state).unwrap_err();
         assert!(err.contains("会话已锁定"), "重放应被闸门拒绝：{err}");
 
         let err = ShellApp::new(&mut state)
@@ -1301,19 +1926,15 @@ mod tests {
     fn missing_session_refuses_protected_commands() {
         let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
         let mut state = state_with(clock);
-        state.session = None;
+        state.session.lock().expect("测试里会话锁不应中毒").end();
 
-        let err = ShellApp::new(&mut state)
-            .submit_transaction(TxRequest::new("account.deposit", "k-none"))
-            .unwrap_err();
+        let err = submit_sync(&mut state, TxRequest::new("account.deposit", "k-none")).unwrap_err();
         assert!(err.contains("尚未登录"), "未登录应被闸门拒绝：{err}");
 
-        let err = ShellApp::new(&mut state).replay_pending().unwrap_err();
+        let err = replay_sync(&mut state).unwrap_err();
         assert!(err.contains("尚未登录"), "未登录重放应被闸门拒绝：{err}");
 
-        let err = ShellApp::new(&mut state)
-            .request_reversal("k-none", "冲正")
-            .unwrap_err();
+        let err = reversal_sync(&mut state, "k-none", "冲正").unwrap_err();
         assert!(err.contains("尚未登录"), "未登录冲正应被闸门拒绝：{err}");
     }
 
@@ -1322,8 +1943,7 @@ mod tests {
         // 反向对照：解锁后必须真的走到主机，证明闸门不是"一律拒绝"。
         let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
         let mut state = state_with(clock);
-        let result = ShellApp::new(&mut state)
-            .submit_transaction(TxRequest::new("account.deposit", "k-ok"))
+        let result = submit_sync(&mut state, TxRequest::new("account.deposit", "k-ok"))
             .expect("解锁后应放行到主机");
         assert_eq!(result.status(), TxStatus::Committed);
     }
@@ -1400,8 +2020,7 @@ mod tests {
     #[test]
     fn package_call_with_declared_tx_code_is_allowed_and_audited() {
         let mut state = state_with_package(vec!["demo.receipt".to_string()]);
-        let result = ShellApp::new(&mut state)
-            .submit_transaction(package_request("biz.demo.hello", "k-pkg-ok"))
+        let result = submit_sync(&mut state, package_request("biz.demo.hello", "k-pkg-ok"))
             .expect("清单声明的交易码应放行");
         assert_eq!(result.status(), TxStatus::Committed);
 
@@ -1457,9 +2076,11 @@ mod tests {
         let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
         let mut state = state_with(clock);
         ShellApp::fail_audits_after(0);
-        let err = ShellApp::new(&mut state)
-            .submit_transaction(TxRequest::new("account.deposit", "k-audit-block"))
-            .unwrap_err();
+        let err = submit_sync(
+            &mut state,
+            TxRequest::new("account.deposit", "k-audit-block"),
+        )
+        .unwrap_err();
         assert!(err.contains("审计写前留痕失败"), "实际：{err}");
         assert!(err.contains("未触达主机"), "实际：{err}");
         assert!(
@@ -1473,9 +2094,11 @@ mod tests {
         let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
         let mut state = state_with(clock);
         ShellApp::fail_audits_after(1);
-        let err = ShellApp::new(&mut state)
-            .submit_transaction(TxRequest::new("account.deposit", "k-audit-conclusion"))
-            .unwrap_err();
+        let err = submit_sync(
+            &mut state,
+            TxRequest::new("account.deposit", "k-audit-conclusion"),
+        )
+        .unwrap_err();
         assert!(err.contains("审计结论写入失败"), "实际：{err}");
         assert!(err.contains("业务已发生"), "实际：{err}");
         assert!(err.contains("请立即查账"), "实际：{err}");
@@ -1485,9 +2108,11 @@ mod tests {
     fn denied_audit_failure_is_not_swallowed() {
         let mut state = locked_state();
         ShellApp::fail_audits_after(0);
-        let err = ShellApp::new(&mut state)
-            .submit_transaction(TxRequest::new("account.deposit", "k-audit-denied"))
-            .unwrap_err();
+        let err = submit_sync(
+            &mut state,
+            TxRequest::new("account.deposit", "k-audit-denied"),
+        )
+        .unwrap_err();
         assert!(err.contains("会话已锁定"), "实际：{err}");
         assert!(err.contains("审计写入失败"), "实际：{err}");
     }
@@ -1502,9 +2127,7 @@ mod tests {
         state.remote = Arc::new(tellerkit_core::banking::RoutedBanking::new(
             tellerkit_core::remote::Router::new(vec![]),
         ));
-        let err = ShellApp::new(&mut state)
-            .request_reversal("k-rev-fail", "冲正")
-            .unwrap_err();
+        let err = reversal_sync(&mut state, "k-rev-fail", "冲正").unwrap_err();
         assert!(
             audit_events(&state)
                 .iter()
@@ -1516,9 +2139,8 @@ mod tests {
     #[test]
     fn package_call_with_undeclared_tx_code_is_denied_and_audited() {
         let mut state = state_with_package(vec!["demo.receipt".to_string()]);
-        let err = ShellApp::new(&mut state)
-            .submit_transaction(package_request("account.withdraw", "k-pkg-bad"))
-            .unwrap_err();
+        let err =
+            submit_sync(&mut state, package_request("account.withdraw", "k-pkg-bad")).unwrap_err();
         assert!(err.contains("未声明交易码"), "实际：{err}");
 
         let tail = ShellApp::new(&mut state).audit_tail(3).expect("审计可用");
@@ -1561,9 +2183,7 @@ mod tests {
         request
             .elements_mut()
             .insert(PKG_ORIGIN_KEY.to_string(), "pkg:biz.other".to_string());
-        let err = ShellApp::new(&mut state)
-            .submit_transaction(request)
-            .unwrap_err();
+        let err = submit_sync(&mut state, request).unwrap_err();
         assert!(err.contains("未加载或验签未通过"), "实际：{err}");
     }
     #[test]
@@ -1593,17 +2213,13 @@ mod tests {
         let mock = Arc::clone(state.mock.as_ref().unwrap());
 
         mock.set_offline(true);
-        let err = ShellApp::new(&mut state)
-            .request_reversal("k-rev", "状态不明")
-            .unwrap_err();
+        let err = reversal_sync(&mut state, "k-rev", "状态不明").unwrap_err();
         assert!(err.contains("断网"), "首次主机失败应透出原因：{err}");
         let authorized = state.reversal.reversal_of("k-rev").unwrap().clone();
         assert_eq!(authorized.host_reference(), None);
 
         // 已授权未确认时重试仍失败：不能撤销授权，也不能清异常清单。
-        let retry_err = ShellApp::new(&mut state)
-            .request_reversal("k-rev", "状态不明")
-            .unwrap_err();
+        let retry_err = reversal_sync(&mut state, "k-rev", "状态不明").unwrap_err();
         assert!(retry_err.contains("已获授权"), "{retry_err}");
         assert!(retry_err.contains("重试"), "{retry_err}");
         assert_eq!(state.reversal.reversal_of("k-rev"), Some(&authorized));
@@ -1611,9 +2227,8 @@ mod tests {
 
         // 恢复后再次重试：同一幂等键重打主机、确认成功、清单清空并留审计。
         mock.set_offline(false);
-        let reference = ShellApp::new(&mut state)
-            .request_reversal("k-rev", "状态不明")
-            .expect("待确认冲正应能重试成功");
+        let reference =
+            reversal_sync(&mut state, "k-rev", "状态不明").expect("待确认冲正应能重试成功");
         assert_eq!(reference, "REV-k-rev", "重试必须使用同一幂等键");
         assert!(state.reversal.is_confirmed("k-rev"));
         assert_eq!(
@@ -1628,6 +2243,201 @@ mod tests {
                 && line.contains("ok")
                 && line.contains("REV-k-rev")),
             "重试成功需写 reversal/retry/ok 审计，实际：{audit:?}"
+        );
+    }
+
+    /// 会话独立锁的验收点：交易持住 AppState 时，锁屏 tick 仍能拿到会话槽。
+    #[test]
+    fn session_tick_does_not_wait_for_app_state_lock() {
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let state = state_with(Arc::clone(&clock));
+        let session = Arc::clone(&state.session);
+        let shared = Mutex::new(state);
+
+        let held = shared.lock().expect("测试里 AppState 锁不应中毒");
+        clock.set(180);
+        let mut slot = session
+            .try_lock()
+            .expect("会话槽必须与 AppState 分开，否则 tick 会排在交易后面");
+        let view = slot.tick();
+        assert!(view.locked, "注入 180 秒后应锁定");
+        assert_eq!(view.reason.as_deref(), Some("无操作超时"));
+        drop(slot);
+        drop(held);
+    }
+
+    /// cfg(test) 的慢主机：进入 submit 后一直等到测试放行，用来证明放锁。
+    struct SlowHost {
+        entered: Arc<(Mutex<bool>, Condvar)>,
+        release: Arc<(Mutex<bool>, Condvar)>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl SlowHost {
+        fn new() -> Self {
+            Self {
+                entered: Arc::new((Mutex::new(false), Condvar::new())),
+                release: Arc::new((Mutex::new(false), Condvar::new())),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn wait_until_entered(&self) {
+            let (lock, cv) = &self.entered;
+            let mut seen = lock.lock().expect("测试锁不应中毒");
+            while !*seen {
+                seen = cv.wait(seen).expect("测试锁不应中毒");
+            }
+        }
+
+        fn release(&self) {
+            let (lock, cv) = &self.release;
+            let mut open = lock.lock().expect("测试锁不应中毒");
+            *open = true;
+            cv.notify_all();
+        }
+    }
+
+    impl TxHost for SlowHost {
+        fn submit(&self, _request: &TxRequest) -> Result<String, HostError> {
+            let (entered_lock, entered_cv) = &self.entered;
+            *entered_lock.lock().expect("测试锁不应中毒") = true;
+            entered_cv.notify_all();
+            let (release_lock, release_cv) = &self.release;
+            let mut open = release_lock.lock().expect("测试锁不应中毒");
+            while !*open {
+                open = release_cv.wait(open).expect("测试锁不应中毒");
+            }
+            drop(open);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok("TX-SLOW".into())
+        }
+
+        fn supports_idempotency(&self) -> bool {
+            true
+        }
+    }
+
+    impl MenuSource for SlowHost {
+        fn probe_menu(&self) -> Result<MenuVersionProbe, RemoteError> {
+            Err(RemoteError::Unavailable("慢主机".into()))
+        }
+
+        fn download_menu(&self) -> Result<Vec<u8>, RemoteError> {
+            Err(RemoteError::Unavailable("慢主机".into()))
+        }
+    }
+
+    impl RemoteBanking for SlowHost {
+        fn login(
+            &self,
+            _role: &str,
+            _version: u64,
+        ) -> Result<tellerkit_core::PermSnapshot, RemoteError> {
+            Err(RemoteError::Unavailable("慢主机".into()))
+        }
+
+        fn reverse(&self, _key: &str, _reason: &str) -> Result<String, RemoteError> {
+            Err(RemoteError::Unavailable("慢主机".into()))
+        }
+    }
+
+    fn state_with_slow_host() -> (SharedState, Arc<SlowHost>) {
+        let state = state_with(Arc::new(FrozenClock(AtomicU64::new(0))));
+        let slow = Arc::new(SlowHost::new());
+        let mut state = state;
+        state.remote = Arc::clone(&slow) as Arc<dyn RemoteBanking>;
+        (Arc::new(Mutex::new(state)), slow)
+    }
+
+    /// 放锁证明：主机阻塞期间另一线程能拿到 AppState，锁屏 tick 也能返回。
+    #[test]
+    fn slow_host_call_releases_app_state_and_session_lock() {
+        let (shared, slow) = state_with_slow_host();
+        let worker_state = Arc::clone(&shared);
+        let worker = std::thread::spawn(move || {
+            ShellApp::fail_audits_after(usize::MAX);
+            submit_transaction_with(&worker_state, TxRequest::new("account.deposit", "k-slow"))
+        });
+
+        slow.wait_until_entered();
+        let guard = shared.try_lock().expect("主机调用期间 AppState 不应被占用");
+        let session = Arc::clone(&guard.session);
+        drop(guard);
+        let mut slot = session.lock().expect("会话槽不应被交易占用");
+        assert!(!slot.tick().locked, "交易中锁屏 tick 应立即返回");
+        drop(slot);
+
+        slow.release();
+        let result = worker
+            .join()
+            .expect("交易线程不应 panic")
+            .expect("交易应成功");
+        assert_eq!(result.status(), TxStatus::Committed);
+        assert_eq!(slow.calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// 同键并发：第一笔还在飞时，第二笔必须被单飞表拒绝且不再打主机。
+    #[test]
+    fn second_submit_of_same_key_is_rejected_while_first_in_flight() {
+        let (shared, slow) = state_with_slow_host();
+        let worker_state = Arc::clone(&shared);
+        let worker = std::thread::spawn(move || {
+            ShellApp::fail_audits_after(usize::MAX);
+            submit_transaction_with(&worker_state, TxRequest::new("account.deposit", "k-dup"))
+        });
+
+        slow.wait_until_entered();
+        let err = submit_transaction_with(&shared, TxRequest::new("account.deposit", "k-dup"))
+            .expect_err("同键在途的第二笔必须被拒绝");
+        assert!(err.contains("正在处理中"), "实际：{err}");
+        slow.release();
+
+        let result = worker
+            .join()
+            .expect("交易线程不应 panic")
+            .expect("首笔应成功");
+        assert_eq!(result.status(), TxStatus::Committed);
+        assert_eq!(slow.calls.load(Ordering::SeqCst), 1, "第二笔不得再打主机");
+    }
+
+    #[test]
+    fn in_flight_key_with_different_payload_is_refused() {
+        let (shared, slow) = state_with_slow_host();
+        let worker_state = Arc::clone(&shared);
+        let worker = std::thread::spawn(move || {
+            ShellApp::fail_audits_after(usize::MAX);
+            submit_transaction_with(
+                &worker_state,
+                TxRequest::new("account.deposit", "k-change").amount(100),
+            )
+        });
+
+        slow.wait_until_entered();
+        let err = submit_transaction_with(
+            &shared,
+            TxRequest::new("account.deposit", "k-change").amount(200),
+        )
+        .expect_err("同键换要素必须被拒绝");
+        assert!(err.contains("另一笔交易"), "实际：{err}");
+        slow.release();
+        worker
+            .join()
+            .expect("交易线程不应 panic")
+            .expect("首笔应成功");
+        assert_eq!(slow.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn check_update_prefetches_outside_lock_and_audits_conclusion() {
+        let mut state = state_with(Arc::new(FrozenClock(AtomicU64::new(0))));
+        let outcome = check_update_sync(&mut state).expect("版本探测应成功");
+        assert!(outcome.checked(), "实际：{}", outcome.note());
+        assert!(
+            audit_events(&state)
+                .iter()
+                .any(|(action, result, _)| action == "check_update" && result == "ok"),
+            "版本探测结论必须留痕"
         );
     }
 }
