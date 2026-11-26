@@ -24,8 +24,8 @@ use tellerkit_core::mock::demo_verifying_key;
 use tellerkit_core::perm::PermSnapshot;
 use tellerkit_core::pkg::BizPackage;
 use tellerkit_core::pubkey_from_hex;
-use tellerkit_core::replay::{ReplayPolicy, ReplayScheduler};
-use tellerkit_core::reversal::ReversalBook;
+use tellerkit_core::replay::{ReplayAttempt, ReplayPolicy, ReplayScheduler};
+use tellerkit_core::reversal::{ExceptionKind, ReversalBook, ReversalRecord};
 use tellerkit_core::session::SessionGuard;
 use tellerkit_core::tx::TxEngine;
 use tellerkit_core::tx::{TxJournal, TxRequest, TxResult};
@@ -141,6 +141,16 @@ fn resolve_menu_verifying_key(injected: Option<&str>, debug: bool) -> Result<Ver
     }
 }
 
+/// 账本一般打不开只告警；只有明确的降级/剥离结论才拒绝业务命令。
+/// 不看宽泛的"密文"字样——迁移事务遇到锁或 I/O 失败也会带这个词，那不是篡改。
+fn journal_open_fatal(error: &str) -> Option<String> {
+    if error.contains("拒绝启动以防密文降级") || error.contains("疑似密文被剥离") {
+        Some(format!("交易账本密文校验失败，已拒绝启动：{error}"))
+    } else {
+        None
+    }
+}
+
 fn menu_verifying_key() -> Result<VerifyingKey, String> {
     resolve_menu_verifying_key(option_env!("TK_MENU_PUBKEY_HEX"), cfg!(debug_assertions))
 }
@@ -228,6 +238,45 @@ impl TxJournal for ArcJournal {
     fn pending(&self) -> Result<Vec<TxRequest>, String> {
         self.0.pending()
     }
+    fn record_and_enqueue(&self, request: &TxRequest, result: &TxResult) -> Result<(), String> {
+        self.0.record_and_enqueue(request, result)
+    }
+    fn settle(
+        &self,
+        request: &TxRequest,
+        result: &TxResult,
+        signature: Option<&str>,
+        dequeue: bool,
+    ) -> Result<(), String> {
+        self.0.settle(request, result, signature, dequeue)
+    }
+    fn load_idempotent(&self) -> Result<Vec<(String, String, TxResult)>, String> {
+        self.0.load_idempotent()
+    }
+    fn save_idempotent(&self, key: &str, signature: &str, result: &TxResult) -> Result<(), String> {
+        self.0.save_idempotent(key, signature, result)
+    }
+    fn load_attempts(&self) -> Result<Vec<ReplayAttempt>, String> {
+        self.0.load_attempts()
+    }
+    fn upsert_attempt(&self, attempt: &ReplayAttempt) -> Result<(), String> {
+        self.0.upsert_attempt(attempt)
+    }
+    fn delete_attempt(&self, key: &str) -> Result<(), String> {
+        self.0.delete_attempt(key)
+    }
+    fn load_exceptions(&self) -> Result<Vec<(String, ExceptionKind)>, String> {
+        self.0.load_exceptions()
+    }
+    fn upsert_exception(&self, key: &str, kind: ExceptionKind) -> Result<(), String> {
+        self.0.upsert_exception(key, kind)
+    }
+    fn load_reversals(&self) -> Result<Vec<ReversalRecord>, String> {
+        self.0.load_reversals()
+    }
+    fn upsert_reversal(&self, record: &ReversalRecord) -> Result<(), String> {
+        self.0.upsert_reversal(record)
+    }
 }
 
 pub fn run() {
@@ -241,21 +290,29 @@ pub fn run() {
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
             let store = MenuStore::new(menu_dir, verifying_key);
 
-            // 交易账本：打不开也不阻断启动，但要留下告警让上层显示。
-            // 同一个连接既做交易账本又做审计查询，所以用 Arc 共享。
-            let (tx, journal_warning, audit) = match SqliteJournal::open(appdata.join("tx.db")) {
-                Ok(journal) => {
-                    let shared = Arc::new(journal);
-                    let engine =
-                        TxEngine::new().with_journal(Box::new(ArcJournal(Arc::clone(&shared))));
-                    (engine, None, Some(shared))
-                }
-                Err(e) => (
-                    TxEngine::new(),
-                    Some(format!("交易账本不可用（{e}）：本会话不会落盘")),
-                    None,
-                ),
-            };
+            // 交易账本：一般打不开只告警；密文降级是另一回事——那说明账本被改写，
+            // 必须 fail-closed：拒绝所有业务命令，绝不带着被篡改的要素继续营业。
+            let (tx, journal_warning, audit, recovery_journal, cipher_fatal) =
+                match SqliteJournal::open(appdata.join("tx.db")) {
+                    Ok(journal) => {
+                        let shared = Arc::new(journal);
+                        let recovery: Arc<dyn TxJournal> =
+                            Arc::new(ArcJournal(Arc::clone(&shared)));
+                        let engine =
+                            TxEngine::new().with_journal(Box::new(ArcJournal(Arc::clone(&shared))));
+                        (engine, None, Some(shared), Some(recovery), None)
+                    }
+                    Err(e) => {
+                        let fatal = journal_open_fatal(&e);
+                        (
+                            TxEngine::new(),
+                            Some(format!("交易账本不可用（{e}）：本会话不会落盘")),
+                            None,
+                            None,
+                            fatal,
+                        )
+                    }
+                };
             // 端点配置（changes/008）：release 缺配置/配置非法即拒绝启动
             let (remote, remote_note, startup_fatal) = build_remote(&appdata);
             let app_handle = app.handle().clone();
@@ -268,7 +325,35 @@ pub fn run() {
                 remote,
                 verifying_key,
             );
+            let mut startup_fatal = startup_fatal;
+            if let Some(reason) = cipher_fatal {
+                startup_fatal = StartupFatal(Some(reason));
+            }
             state.startup_fatal = startup_fatal;
+            // 幂等索引由 TxEngine::with_journal 读回；这里补读异常/冲正与重放进度。
+            // 读盘失败只告警不阻断启动，但不能静默当作"没有待办"。
+            if let Some(journal) = recovery_journal {
+                let replay =
+                    ReplayScheduler::with_journal(ReplayPolicy::default(), Arc::clone(&journal));
+                let reversal = ReversalBook::with_journal(journal);
+                let mut notes = Vec::new();
+                if let Some(e) = replay.journal_error() {
+                    notes.push(e.to_string());
+                }
+                if let Some(e) = reversal.journal_error() {
+                    notes.push(e.to_string());
+                }
+                if !notes.is_empty() {
+                    let note = format!("恢复状态不完整：{}", notes.join("；"));
+                    state.journal_warning = Some(match state.journal_warning.take() {
+                        Some(old) => format!("{old}；{note}"),
+                        None => note.clone(),
+                    });
+                    eprintln!("{note}");
+                }
+                state.replay = replay;
+                state.reversal = reversal;
+            }
             if let Some(note) = remote_note {
                 eprintln!("{note}");
             }
@@ -344,5 +429,14 @@ mod tests {
     fn release_without_injection_refuses_to_start() {
         let err = resolve_menu_verifying_key(None, false).unwrap_err();
         assert!(err.contains("release"), "错误信息要说明是发布构建：{err}");
+    }
+
+    #[test]
+    fn cipher_downgrade_is_fatal_but_other_journal_errors_only_warn() {
+        assert!(journal_open_fatal("拒绝启动以防密文降级").is_some());
+        assert!(journal_open_fatal("疑似密文被剥离").is_some());
+        // 迁移遇到锁/I/O 失败也会提到"密文"，但那不是篡改，不能升级成启动拒绝。
+        assert!(journal_open_fatal("密文迁移事务失败：database is locked").is_none());
+        assert!(journal_open_fatal("打开账本失败：database is locked").is_none());
     }
 }

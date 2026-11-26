@@ -7,8 +7,9 @@
 //! 所以这里是**调度策略**而不是执行器：回答"现在该重放哪几笔"、
 //! "失败几次算放弃"、"下次什么时候再试"。执行仍由 `TxEngine::replay_pending` 做。
 
-use crate::tx::{TxEngine, TxHost, TxStatus};
+use crate::tx::{TxEngine, TxHost, TxJournal, TxStatus};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// 重放策略。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,9 +56,26 @@ pub struct ReplayAttempt {
     key: String,
     attempts: u32,
     next_at_secs: u64,
+    /// 已达重试上限、不再自动重试；它是持久化状态，不能只靠 attempts 现算。
+    gave_up: bool,
 }
 
 impl ReplayAttempt {
+    pub fn new(key: &str, attempts: u32, next_at_secs: u64) -> Self {
+        Self {
+            key: key.to_string(),
+            attempts,
+            next_at_secs,
+            gave_up: false,
+        }
+    }
+
+    /// 从账本读回时保留"已放弃"标记。
+    pub fn with_gave_up(mut self, gave_up: bool) -> Self {
+        self.gave_up = gave_up;
+        self
+    }
+
     pub fn key(&self) -> &str {
         &self.key
     }
@@ -69,13 +87,35 @@ impl ReplayAttempt {
     pub fn next_at_secs(&self) -> u64 {
         self.next_at_secs
     }
+
+    pub fn gave_up(&self) -> bool {
+        self.gave_up
+    }
 }
 
-/// 重放调度器。纯逻辑：时间由调用方传入。
-#[derive(Debug, Default)]
+/// 重放调度器。纯逻辑：时间由调用方传入；账本可选用来读写进度。
 pub struct ReplayScheduler {
     policy: ReplayPolicy,
     attempts: HashMap<String, ReplayAttempt>,
+    journal: Option<Arc<dyn TxJournal>>,
+    journal_error: Option<String>,
+}
+
+impl Default for ReplayScheduler {
+    fn default() -> Self {
+        Self::new(ReplayPolicy::default())
+    }
+}
+
+impl std::fmt::Debug for ReplayScheduler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReplayScheduler")
+            .field("policy", &self.policy)
+            .field("attempts", &self.attempts)
+            .field("journaled", &self.journal.is_some())
+            .field("journal_error", &self.journal_error)
+            .finish()
+    }
 }
 
 impl ReplayScheduler {
@@ -83,6 +123,61 @@ impl ReplayScheduler {
         Self {
             policy,
             attempts: HashMap::new(),
+            journal: None,
+            journal_error: None,
+        }
+    }
+
+    /// 启动时接上账本并读回进度：反复重启不能把失败预算清零。
+    pub fn with_journal(policy: ReplayPolicy, journal: Arc<dyn TxJournal>) -> Self {
+        let mut scheduler = Self::new(policy);
+        match journal.load_attempts() {
+            Ok(rows) => scheduler.restore(rows),
+            Err(e) => {
+                scheduler.journal_error = Some(format!("读取重放进度失败：{e}"));
+            }
+        }
+        scheduler.journal = Some(journal);
+        scheduler
+    }
+
+    /// 启动时一次性读回。调用方传空表表示此前没有进度。
+    pub fn restore(&mut self, attempts: Vec<ReplayAttempt>) {
+        self.attempts.clear();
+        for attempt in attempts {
+            self.attempts.insert(attempt.key().to_string(), attempt);
+        }
+    }
+
+    /// 写回用的快照（按幂等键排序）。
+    pub fn snapshot(&self) -> Vec<ReplayAttempt> {
+        let mut out: Vec<ReplayAttempt> = self.attempts.values().cloned().collect();
+        out.sort_by(|a, b| a.key().cmp(b.key()));
+        out
+    }
+
+    /// 读盘或写盘失败都要能被调用方看见，不能静默当作"没有进度"。
+    pub fn journal_error(&self) -> Option<&str> {
+        self.journal_error.as_deref()
+    }
+
+    fn persist_upsert(&mut self, attempt: &ReplayAttempt) {
+        let written = self
+            .journal
+            .as_deref()
+            .map(|journal| journal.upsert_attempt(attempt));
+        if let Some(Err(e)) = written {
+            self.journal_error = Some(format!("重放进度落盘失败：{e}"));
+        }
+    }
+
+    fn persist_delete(&mut self, key: &str) {
+        let written = self
+            .journal
+            .as_deref()
+            .map(|journal| journal.delete_attempt(key));
+        if let Some(Err(e)) = written {
+            self.journal_error = Some(format!("重放进度删除失败：{e}"));
         }
     }
 
@@ -98,7 +193,9 @@ impl ReplayScheduler {
             .attempts
             .values()
             // 已达上限的留在表里等人工，但绝不再自动重放。
-            .filter(|a| a.next_at_secs <= now_secs && a.attempts < self.policy.max_attempts)
+            .filter(|a| {
+                !a.gave_up && a.next_at_secs <= now_secs && a.attempts < self.policy.max_attempts
+            })
             .collect();
         // HashMap 遍历顺序不稳定，必须显式排序：先按到期时刻，再按幂等键。
         due.sort_by(|a, b| {
@@ -114,13 +211,12 @@ impl ReplayScheduler {
     /// 名字不是 "update"：这里不会刷新任何进度，只保证它在调度表里。
     pub fn track(&mut self, key: &str, now_secs: u64) {
         // 已在管则不重置退避：重复登记不能把已经等到的下一次重放又推回"立即"。
-        self.attempts
-            .entry(key.to_string())
-            .or_insert_with(|| ReplayAttempt {
-                key: key.to_string(),
-                attempts: 0,
-                next_at_secs: now_secs,
-            });
+        if self.attempts.contains_key(key) {
+            return;
+        }
+        let attempt = ReplayAttempt::new(key, 0, now_secs);
+        self.attempts.insert(key.to_string(), attempt.clone());
+        self.persist_upsert(&attempt);
     }
 
     /// 重放失败：累加次数并按退避推迟下一次。返回累计尝试次数。
@@ -130,37 +226,38 @@ impl ReplayScheduler {
             let attempt = self
                 .attempts
                 .entry(key.to_string())
-                .or_insert_with(|| ReplayAttempt {
-                    key: key.to_string(),
-                    attempts: 0,
-                    next_at_secs: now_secs,
-                });
+                .or_insert_with(|| ReplayAttempt::new(key, 0, now_secs));
             attempt.attempts = attempt.attempts.saturating_add(1);
             attempt.attempts
         };
         // 先算退避再可变借用，避免同时借用 self 与 self.attempts。
         let next_at_secs = now_secs.saturating_add(self.backoff_for(attempts));
-        // 用模式匹配而不是 expect：让编译器证明条目存在，而不是靠注释解释
+        let gave_up = attempts >= self.policy.max_attempts;
         if let Some(entry) = self.attempts.get_mut(key) {
             entry.next_at_secs = next_at_secs;
+            entry.gave_up = gave_up;
+        }
+        if let Some(attempt) = self.attempts.get(key).cloned() {
+            self.persist_upsert(&attempt);
         }
         attempts
     }
 
-    /// 重放成功：从调度器移除。
+    /// 重放成功：从调度器移除并删掉落盘进度。
     ///
     /// 未登记也安全（幂等）。
     pub fn record_success(&mut self, key: &str) {
         self.attempts.remove(key);
+        self.persist_delete(key);
     }
 
     /// 是否已放弃自动重放（达到上限），需要人工介入。
     pub fn exhausted(&self, key: &str) -> bool {
         // 未登记不等于已放弃；只有累计次数真正达到上限才算。
-        match self.attempts.get(key) {
-            Some(attempt) => attempt.attempts >= self.policy.max_attempts,
-            None => false,
-        }
+        self.attempts
+            .get(key)
+            .map(|a| a.gave_up || a.attempts >= self.policy.max_attempts)
+            .unwrap_or(false)
     }
 
     /// 第 `attempts` 次失败后的退避秒数（指数增长，受上限约束）。
@@ -183,6 +280,7 @@ impl ReplayScheduler {
     /// 这个是"人已经处理过，重新开始计数"。混用会让审计里出现假成功。
     pub fn release(&mut self, key: &str) {
         self.attempts.remove(key);
+        self.persist_delete(key);
     }
 
     /// 当前在管的交易数（含已达上限、等人工的）。
@@ -357,6 +455,31 @@ mod tests {
         let s = ReplayScheduler::new(policy.clone());
         assert_eq!(s.policy(), &policy);
     }
+
+    /// 重启后失败预算与退避都必须原样读回，绝不能重新立即重试。
+    #[test]
+    fn attempts_and_gave_up_survive_scheduler_restart() {
+        use crate::tx::test_support::MemoryJournal;
+        use crate::tx::TxJournal;
+
+        let journal: Arc<dyn TxJournal> = Arc::new(MemoryJournal::default());
+        let policy = ReplayPolicy::new(2, 30, 600);
+        let mut first = ReplayScheduler::with_journal(policy.clone(), Arc::clone(&journal));
+        first.track("K-001", 100);
+        assert_eq!(first.record_failure("K-001", 100), 1);
+
+        let mut restarted = ReplayScheduler::with_journal(policy, journal);
+        let restored = restarted.snapshot();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].attempts(), 1, "重启后次数不得归零");
+        assert_eq!(restored[0].next_at_secs(), 130, "退避时刻不得重置");
+        assert!(restarted.due(129).is_empty());
+
+        assert_eq!(restarted.record_failure("K-001", 130), 2);
+        assert!(restarted.exhausted("K-001"));
+        assert!(restarted.snapshot()[0].gave_up());
+        assert!(restarted.due(u64::MAX).is_empty(), "放弃状态也必须跨重启");
+    }
 }
 
 /// 一轮自动重放的结果。
@@ -419,6 +542,10 @@ pub fn run_once(
             Some((_, result)) => {
                 if result.status() == TxStatus::Committed {
                     committed += 1;
+                }
+                // 明确拒绝也是终态（已出队并写幂等），调度名额必须一并释放；
+                // 否则它会继续退避重放，直到被误报成"放弃人工处理"。
+                if matches!(result.status(), TxStatus::Committed | TxStatus::Rejected) {
                     scheduler.record_success(key);
                 } else {
                     scheduler.record_failure(key, now_secs);
@@ -563,5 +690,25 @@ mod coordinator_tests {
         assert_eq!(run.attempted(), 1);
         assert_eq!(run.committed(), 0);
         assert_eq!(scheduler.tracked(), 0);
+    }
+
+    #[test]
+    fn rejected_replay_is_terminal_for_scheduler_too() {
+        let mut engine = engine_with_pending(&["k1"]);
+        let mut scheduler = ReplayScheduler::new(ReplayPolicy::default());
+        let host = ScriptedHost::new(vec![
+            Err(HostError::Rejected("余额不足".into())),
+            Ok("MUST-NOT-HAPPEN".into()),
+        ]);
+
+        let first = run_once(&mut engine, &mut scheduler, &host, 100);
+        assert_eq!(first.committed(), 0);
+        assert!(first.gave_up().is_empty(), "拒绝不是失败预算耗尽");
+        assert_eq!(engine.pending_count(), 0, "终态必须出队");
+        assert_eq!(scheduler.tracked(), 0, "终态必须释放调度名额");
+
+        let second = run_once(&mut engine, &mut scheduler, &host, 999);
+        assert_eq!(second.attempted(), 0);
+        assert_eq!(host.calls(), 1, "业务拒绝后不得再次重放");
     }
 }
