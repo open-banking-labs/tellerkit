@@ -314,6 +314,21 @@ impl TxEngine {
         self
     }
 
+    /// 挂起中的交易不是终态，不写幂等索引；但同一键再次提交时也不能重新打主机、
+    /// 二次入队——否则重放时会把同一笔请求发两遍。由挂起队列本身去重。
+    fn pending_duplicate(&self, request: &TxRequest, signature: &str) -> Option<TxResult> {
+        let queued = self
+            .pending
+            .iter()
+            .find(|r| r.idempotency_key == request.idempotency_key)?;
+        if request_signature(queued) != signature {
+            return Some(TxResult::rejected(
+                "幂等键已用于另一笔挂起交易（交易码或要素不同），请为该笔业务使用新的幂等键",
+            ));
+        }
+        Some(TxResult::pending("重复提交：交易已挂起，等待重放"))
+    }
+
     /// 提交一笔交易。
     ///
     /// 顺序刻意如此：先校验、再查幂等、最后才碰主机。
@@ -334,8 +349,11 @@ impl TxEngine {
             replay.message = format!("重复提交：返回首次结果（{}）", previous.message);
             return replay;
         }
+        if let Some(duplicate) = self.pending_duplicate(&request, &signature) {
+            return duplicate;
+        }
 
-        // 瞬时失败（超时/不可达）**不写幂等索引**：
+        // 瞬时失败（超时/不可达/HTTP 504）**不写幂等索引**：
         // 此刻我们并不知道主机是否已处理。若把"拒绝"永久缓存，柜员就再也无法安全重试；
         // 而换个新键重试又可能重复入账。正确做法是保留原键，让重试打到主机，
         // 由主机的幂等键去重收口。
@@ -348,7 +366,8 @@ impl TxEngine {
                 self.pending.push(request.clone());
                 (
                     TxResult::pending("网络不可用：交易已挂起，将在恢复后重放"),
-                    true,
+                    // 挂起不是终态：不写幂等索引，去重由 pending 队列负责。
+                    false,
                 )
             }
             Err(HostError::Timeout) | Err(HostError::Unavailable) => (
@@ -434,8 +453,12 @@ impl TxEngine {
             }
         }
 
-        self.idempotent
-            .insert(key.clone(), (signature, result.clone()));
+        // 只有终态（成功/明确拒绝）写幂等索引；重放失败仍留在队列里，
+        // 重复提交由挂起队列去重，不能把"状态不明"缓存成拒绝。
+        if matches!(result.status(), TxStatus::Committed | TxStatus::Rejected) {
+            self.idempotent
+                .insert(key.clone(), (signature, result.clone()));
+        }
         Some((key, result))
     }
 
@@ -459,8 +482,10 @@ impl TxEngine {
                     TxResult::pending("重放失败：仍不可达，保留在队列中")
                 }
             };
-            self.idempotent
-                .insert(key.clone(), (signature, result.clone()));
+            if matches!(result.status(), TxStatus::Committed | TxStatus::Rejected) {
+                self.idempotent
+                    .insert(key.clone(), (signature, result.clone()));
+            }
             outcomes.push((key, result));
         }
         outcomes
@@ -839,6 +864,22 @@ mod tests {
         assert_eq!(second.status(), TxStatus::Committed);
         assert_eq!(second.reference(), Some("TX-RECOVERED"));
         assert_eq!(host.calls(), 2, "瞬时失败不得缓存，重试必须打到主机");
+    }
+
+    // 504（主机超时、状态不明）走的是 HostError::Timeout：同样不得缓存成拒绝。
+    #[test]
+    fn timeout_retry_reaches_host_with_the_same_key() {
+        let host = ScriptedHost::new(vec![Err(HostError::Timeout), Ok("TX-AFTER-504".into())]);
+        let mut engine = TxEngine::new();
+
+        let first = engine.submit(&host, req("k-504"));
+        assert_eq!(first.status(), TxStatus::MarkedForReversal);
+        assert!(first.message().contains("待冲正"));
+
+        let second = engine.submit(&host, req("k-504"));
+        assert_eq!(second.status(), TxStatus::Committed);
+        assert_eq!(second.reference(), Some("TX-AFTER-504"));
+        assert_eq!(host.calls(), 2, "504 后同键重试必须再次调用主机");
     }
 
     // S-02 边界：校验失败不得占用幂等键。首次因金额为负被本地拒绝后，

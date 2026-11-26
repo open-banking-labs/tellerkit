@@ -116,16 +116,26 @@ pub enum TransportError {
     Timeout,
     #[error("协议错误：{0}")]
     Protocol(String),
+    /// 服务端明确给出的 HTTP 状态。保留码与体，由路由层按契约分类；
+    /// 不能在这里折成 Protocol——那会把 504 误判为业务拒绝。
+    #[error("HTTP {code}：{body}")]
+    Status { code: u16, body: String },
 }
 
 impl TransportError {
-    /// 只有"连接不上/超时/协议暂时对不上"值得换下一个端点；
-    /// 明确的服务端拒绝不该触发主备切换（会把请求打到不该去的地方）。
+    /// 客户端只对 5xx 与网络错误重试（contracts/remote-api.md）；
+    /// 4xx 是最终结论，切端点只会把同一请求打到别处。
     pub fn retryable(&self) -> bool {
-        matches!(
-            self,
-            TransportError::Unreachable(_) | TransportError::Timeout
-        )
+        match self {
+            Self::Unreachable(_) | Self::Timeout => true,
+            Self::Status { code, .. } => (500..600).contains(code),
+            Self::Protocol(_) => false,
+        }
+    }
+
+    /// 504 表示请求可能已到主机但结果未知：按超时处置，不能当业务拒绝。
+    pub fn timed_out(&self) -> bool {
+        matches!(self, Self::Timeout | Self::Status { code: 504, .. })
     }
 }
 
@@ -240,6 +250,9 @@ pub struct RouteError {
     detail: String,
     /// 是否属于"换个端点可能成功"。全为不可重试错误时为 false。
     retryable: bool,
+    /// 有端点返回过状态不明的超时（含 HTTP 504）。
+    /// 这条信息压过 retryable：上层要按"待冲正"处置，而不是"可重试的普通失败"。
+    timed_out: bool,
 }
 
 impl RouteError {
@@ -249,6 +262,7 @@ impl RouteError {
             attempts,
             detail: detail.to_string(),
             retryable,
+            timed_out: false,
         }
     }
 
@@ -266,6 +280,11 @@ impl RouteError {
 
     pub fn retryable(&self) -> bool {
         self.retryable
+    }
+
+    /// 是否有过超时/504：状态不明，不能被当成业务拒绝。
+    pub fn timed_out(&self) -> bool {
+        self.timed_out
     }
 }
 
@@ -328,11 +347,13 @@ impl Router {
                 attempts: 0,
                 detail: "没有为该服务登记任何端点".to_string(),
                 retryable: false,
+                timed_out: false,
             });
         }
 
         let mut failures = Vec::new();
         let mut all_retryable = true;
+        let mut any_timeout = false;
         for endpoint in &candidates {
             let wire = match endpoint.codec.encode(request) {
                 Ok(w) => w,
@@ -343,6 +364,7 @@ impl Router {
                         attempts: failures.len() + 1,
                         detail: format!("{} 编码失败：{e}", endpoint.codec.name()),
                         retryable: false,
+                        timed_out: false,
                     });
                 }
             };
@@ -360,24 +382,28 @@ impl Router {
                         continue;
                     }
                 },
-                Err(e) if e.retryable() => {
-                    failures.push(format!(
-                        "{}@{} {}",
-                        endpoint.transport.name(),
-                        endpoint.priority,
-                        e
-                    ));
-                    continue;
-                }
                 Err(e) => {
-                    all_retryable = false;
+                    // 504 与超时一样是"状态不明"：仍按可重试切端点，
+                    // 但整条路由的结论必须记住它，上层不能报"业务拒绝"。
+                    if e.timed_out() {
+                        any_timeout = true;
+                    }
+                    if !e.retryable() {
+                        all_retryable = false;
+                        failures.push(format!(
+                            "{}@{} {}",
+                            endpoint.transport.name(),
+                            endpoint.priority,
+                            e
+                        ));
+                        break;
+                    }
                     failures.push(format!(
                         "{}@{} {}",
                         endpoint.transport.name(),
                         endpoint.priority,
                         e
                     ));
-                    break;
                 }
             }
         }
@@ -387,6 +413,7 @@ impl Router {
             attempts: failures.len(),
             detail: failures.join("；"),
             retryable: all_retryable,
+            timed_out: any_timeout,
         })
     }
 }
@@ -843,5 +870,71 @@ mod tests {
         router.call(&request("svc", "op", json!({}))).unwrap();
         assert_eq!(a.calls(), 1, "priority 0 必须先尝试");
         assert_eq!(b.calls(), 1);
+    }
+
+    #[test]
+    fn status_4xx_keeps_status_and_does_not_switch_endpoint() {
+        let primary = Arc::new(MockTransport::new(
+            "http",
+            vec![Err(TransportError::Status {
+                code: 409,
+                body: "duplicate key".into(),
+            })],
+        ));
+        let secondary = Arc::new(MockTransport::echoing("http"));
+        let router = Router::new(vec![
+            endpoint("svc", 0, primary.clone(), Arc::new(JsonCodec)),
+            endpoint("svc", 1, secondary.clone(), Arc::new(JsonCodec)),
+        ]);
+
+        let err = router
+            .call(&request("svc", "submit_tx", json!({})))
+            .unwrap_err();
+        assert_eq!(err.attempts(), 1);
+        assert!(!err.retryable(), "409 是最终结论");
+        assert!(!err.timed_out());
+        assert!(err.detail().contains("409"));
+        assert_eq!(secondary.calls(), 0, "4xx 不得切端点");
+    }
+
+    #[test]
+    fn status_503_is_retryable_and_falls_back() {
+        let primary = Arc::new(MockTransport::new(
+            "http",
+            vec![Err(TransportError::Status {
+                code: 503,
+                body: "busy".into(),
+            })],
+        ));
+        let secondary = Arc::new(MockTransport::echoing("http"));
+        let router = Router::new(vec![
+            endpoint("svc", 0, primary.clone(), Arc::new(JsonCodec)),
+            endpoint("svc", 1, secondary.clone(), Arc::new(JsonCodec)),
+        ]);
+
+        router
+            .call(&request("svc", "submit_tx", json!({})))
+            .unwrap();
+        assert_eq!(primary.calls(), 1);
+        assert_eq!(secondary.calls(), 1, "503 应切到备用端点");
+    }
+
+    #[test]
+    fn status_504_is_reported_as_timeout_not_business_rejection() {
+        let transport = Arc::new(MockTransport::new(
+            "http",
+            vec![Err(TransportError::Status {
+                code: 504,
+                body: "upstream timeout".into(),
+            })],
+        ));
+        let router = Router::new(vec![endpoint("svc", 0, transport, Arc::new(JsonCodec))]);
+
+        let err = router
+            .call(&request("svc", "submit_tx", json!({})))
+            .unwrap_err();
+        assert!(err.retryable(), "504 与超时一样可重试");
+        assert!(err.timed_out(), "504 状态不明，必须让上层知道");
+        assert!(err.detail().contains("504"));
     }
 }
