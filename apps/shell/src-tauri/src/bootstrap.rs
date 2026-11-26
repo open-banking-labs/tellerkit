@@ -98,8 +98,12 @@ pub fn policy_from_env(release: bool) -> Result<LoadPolicy, String> {
         std::env::var("TK_REQUIRE_TLS").ok().as_deref(),
     )?;
     let policy = policy(release, signed, tls);
+    // 启动摘要只报实际生效的公钥指纹：改进程环境在 release 里改不了它。
+    eprintln!("{}", crate::config_sig::startup_digest(policy.pubkey()));
     if release && policy.require_signed() && policy.pubkey().is_none() {
-        return Err("release 构建必须设置 TK_CONFIG_PUBKEY：拒绝加载未验签的端点".into());
+        return Err(
+            "release 构建必须在构建时设置 TK_CONFIG_PUBKEY_HEX：拒绝加载未验签的端点".into(),
+        );
     }
     Ok(policy)
 }
@@ -263,6 +267,21 @@ mod tests {
             .err()
             .expect("release 明文端点应拒绝启动");
         assert!(err.contains("明文"), "要指出是明文端点：{err}");
+    }
+
+    #[test]
+    fn release_with_tcp_endpoint_refuses_to_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(
+            dir.path(),
+            r#"{ "services": { "acct.core": [
+              { "transport": "tcp", "codec": "json", "host": "10.0.8.11", "port": 7001 } ] } }"#,
+        );
+        let err = resolve_remote(&path, true, &lp(true, false, true))
+            .err()
+            .expect("release tcp 端点无 TLS 协商，应拒绝启动");
+        assert!(err.contains("tcp"), "要说明被拒的是 tcp：{err}");
+        assert!(err.contains("TLS"), "要说明 TCP 没有 TLS 协商：{err}");
     }
 
     #[test]
