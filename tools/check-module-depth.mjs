@@ -36,7 +36,7 @@ const countByFile = (entries) => {
   return out;
 };
 
-const files = rustFiles.map((p) => ({ path: p, rel: rel(p), text: read(p) }));
+const files = rustFiles.map((p) => ({ path: p, rel: rel(p).replace(/\\/g, "/"), text: read(p) }));
 
 // —— 1. 模块可见性（按文件记账，便于发现新增平铺） ——
 let pubMods = 0;
