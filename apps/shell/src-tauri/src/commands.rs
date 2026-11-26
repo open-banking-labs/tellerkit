@@ -363,7 +363,9 @@ pub fn tx_pending_count(state: State<'_, Mutex<AppState>>) -> Result<usize, Stri
 #[tauri::command]
 pub fn package_module(route: String, state: State<'_, Mutex<AppState>>) -> Result<String, String> {
     let mut guard = lock(&state)?;
-    ShellApp::new(&mut guard).package_module(&route)
+    let view = ShellApp::new(&mut guard).package_module(&route)?;
+    // IPC 契约仍是 string：把源码与能力装进一个字符串信封，避免改契约/生成物。
+    serde_json::to_string(&view).map_err(|e| format!("业务包视图编码失败：{e}"))
 }
 
 // ---------------- 审计与会话 ----------------
