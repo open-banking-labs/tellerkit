@@ -21,10 +21,32 @@ pub enum Channel {
 /// 服务端给出的候选版本。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateCandidate {
-    pub version: Version,
-    pub channel: Channel,
+    version: Version,
+    channel: Channel,
     /// 灰度比例 0-100。100 表示全量。
-    pub rollout_percent: u8,
+    rollout_percent: u8,
+}
+
+impl UpdateCandidate {
+    pub fn new(version: Version, channel: Channel, rollout_percent: u8) -> Self {
+        Self {
+            version,
+            channel,
+            rollout_percent,
+        }
+    }
+
+    pub fn version(&self) -> &Version {
+        &self.version
+    }
+
+    pub fn channel(&self) -> Channel {
+        self.channel
+    }
+
+    pub fn rollout_percent(&self) -> u8 {
+        self.rollout_percent
+    }
 }
 
 /// 本次检查的结论。
@@ -41,8 +63,25 @@ pub enum UpdateAction {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateDecision {
-    pub action: UpdateAction,
-    pub reason: String,
+    action: UpdateAction,
+    reason: String,
+}
+
+impl UpdateDecision {
+    pub fn new(action: UpdateAction, reason: &str) -> Self {
+        Self {
+            action,
+            reason: reason.into(),
+        }
+    }
+
+    pub fn action(&self) -> UpdateAction {
+        self.action
+    }
+
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
 }
 
 /// 决定是否更新。
@@ -63,34 +102,36 @@ pub fn decide(
     // 3. 灰度命中：只有该网点被选中才继续；未命中就是"这次没轮到你"。
     // 4. 最后看时段：命中灰度后，营业高峰只下载、不提示，避免柜员在
     //    交易中看到重启提示。
-    if candidate.channel != channel {
+    if candidate.channel() != channel {
         return UpdateDecision {
             action: UpdateAction::Skip,
             reason: format!(
                 "候选版本 {} 属于 {} 通道，当前终端在 {} 通道，跳过",
-                version_label(&candidate.version),
-                channel_label(candidate.channel),
+                version_label(candidate.version()),
+                channel_label(candidate.channel()),
                 channel_label(channel),
             ),
         };
     }
 
-    if candidate.version <= *current {
+    if candidate.version() <= current {
         return UpdateDecision {
             action: UpdateAction::Skip,
             reason: format!("当前版本 {} 已是最新，无需更新", version_label(current)),
         };
     }
 
-    let bucket = rollout_bucket(outlet, &candidate.version);
+    let bucket = rollout_bucket(outlet, candidate.version());
     // `rollout_percent >= 100`（含服务端越界下发）一律视为全量，
     // 0 则任何网点都不命中：`bucket` 最大 99，`99 < 0` 不成立。
-    if candidate.rollout_percent < 100 && bucket >= candidate.rollout_percent {
+    if candidate.rollout_percent() < 100 && bucket >= candidate.rollout_percent() {
         return UpdateDecision {
             action: UpdateAction::Skip,
             reason: format!(
                 "灰度 {}% 未命中灰度（网点 {} 散列桶 {}），本次跳过",
-                candidate.rollout_percent, outlet, bucket,
+                candidate.rollout_percent(),
+                outlet,
+                bucket,
             ),
         };
     }
@@ -100,7 +141,7 @@ pub fn decide(
             action: UpdateAction::DownloadOnly,
             reason: format!(
                 "命中灰度 {}%，但当前 {} 点处于营业高峰，营业高峰只下载不提示，等日终或次日开机生效",
-                candidate.rollout_percent, local_hour,
+                candidate.rollout_percent(), local_hour,
             ),
         };
     }
@@ -109,7 +150,7 @@ pub fn decide(
         action: UpdateAction::DownloadAndNotify,
         reason: format!(
             "命中灰度 {}%，且不在营业高峰，下载后提示柜员下次启动生效",
-            candidate.rollout_percent,
+            candidate.rollout_percent(),
         ),
     }
 }
@@ -122,7 +163,12 @@ fn channel_label(channel: Channel) -> &'static str {
 }
 
 fn version_label(version: &Version) -> String {
-    format!("{}.{}.{}", version.major, version.minor, version.patch)
+    format!(
+        "{}.{}.{}",
+        version.major(),
+        version.minor(),
+        version.patch()
+    )
 }
 
 /// 灰度判定：把"网点 + 版本"稳定散列到 0-99。
@@ -134,7 +180,7 @@ pub fn rollout_bucket(outlet: &str, version: &Version) -> u8 {
     // 长度前缀 + 三段定宽 u64：拼接无歧义，避免 "ab" + 1 与 "a" + b1 撞成同一输入。
     hash = fnv1a(hash, &(outlet.len() as u64).to_le_bytes());
     hash = fnv1a(hash, outlet.as_bytes());
-    for part in [version.major, version.minor, version.patch] {
+    for part in [version.major(), version.minor(), version.patch()] {
         hash = fnv1a(hash, &part.to_be_bytes());
     }
     (mix64(hash) % 100) as u8
@@ -176,18 +222,12 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
-    const CURRENT: Version = Version {
-        major: 0,
-        minor: 1,
-        patch: 0,
-    };
+    fn current() -> Version {
+        Version::new(0, 1, 0)
+    }
 
     fn ver(major: u64, minor: u64, patch: u64) -> Version {
-        Version {
-            major,
-            minor,
-            patch,
-        }
+        Version::new(major, minor, patch)
     }
 
     fn cand(version: Version, channel: Channel, rollout_percent: u8) -> UpdateCandidate {
@@ -201,7 +241,7 @@ mod tests {
     /// 走一次 Stable 通道的默认决策，省掉用例里的样板。
     fn stable(version: Version, percent: u8, outlet: &str, hour: u8) -> UpdateDecision {
         decide(
-            &CURRENT,
+            &current(),
             &cand(version, Channel::Stable, percent),
             Channel::Stable,
             outlet,
@@ -232,7 +272,7 @@ mod tests {
     fn s03_channel_mismatch_is_skipped_with_channel_reason() {
         // 版本更新、灰度 100% 也不升：通道不对就不是这个终端的候选。
         let d = decide(
-            &CURRENT,
+            &current(),
             &cand(ver(0, 2, 0), Channel::Canary, 100),
             Channel::Stable,
             "O-001",
@@ -243,7 +283,7 @@ mod tests {
 
         // 反向同理：Canary 终端不接收 Stable 候选。
         let d = decide(
-            &CURRENT,
+            &current(),
             &cand(ver(0, 2, 0), Channel::Stable, 100),
             Channel::Canary,
             "O-001",

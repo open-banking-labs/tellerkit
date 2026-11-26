@@ -22,56 +22,144 @@ pub const PKG_SIGNATURE_LEN: usize = 64;
 /// 业务包清单。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BizManifest {
-    pub id: String,
-    pub name: String,
-    pub version: String,
+    id: String,
+    name: String,
+    version: String,
     /// 兼容的主壳版本下限（含）。
-    pub min_shell: String,
+    min_shell: String,
     /// 兼容的主壳版本上限（含）。支持 `0.x` 这类主版本通配。
-    pub max_shell: String,
+    max_shell: String,
     #[serde(default)]
-    pub deps: Vec<String>,
-    pub entry: String,
+    deps: Vec<String>,
+    entry: String,
+}
+
+impl BizManifest {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        id: &str,
+        name: &str,
+        version: &str,
+        min_shell: &str,
+        max_shell: &str,
+        deps: Vec<String>,
+        entry: &str,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            version: version.into(),
+            min_shell: min_shell.into(),
+            max_shell: max_shell.into(),
+            deps,
+            entry: entry.into(),
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    pub fn min_shell(&self) -> &str {
+        &self.min_shell
+    }
+
+    pub fn max_shell(&self) -> &str {
+        &self.max_shell
+    }
+
+    pub fn deps(&self) -> &[String] {
+        &self.deps
+    }
+
+    pub fn entry(&self) -> &str {
+        &self.entry
+    }
 }
 
 /// 包内容。字段与 `packages/biz-demo/` 下的文件一一对应。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BizPackage {
-    pub manifest: BizManifest,
+    manifest: BizManifest,
     #[serde(default)]
-    pub menus: Vec<MenuNode>,
+    menus: Vec<MenuNode>,
     /// 本包**声明**能提供哪些权限码。授权仍在服务端，这里不产生任何权限。
     #[serde(default)]
-    pub permissions: Permissions,
+    permissions: Permissions,
     #[serde(default)]
-    pub routes: BTreeMap<String, String>,
+    routes: BTreeMap<String, String>,
     #[serde(default)]
-    pub transactions: Vec<TxMeta>,
+    transactions: Vec<TxMeta>,
     /// 前端资源：包内路径 → 模块源码。
     ///
     /// 打包时把 `ui/*.js` 的内容嵌进来，是因为包在运行时是**外部文件**，
     /// 前端没法 `import("/path/to/ui/entry.js")`——只能由主壳把源码交给前端，
     /// 前端用 Blob URL 加载。代价是包体积变大，收益是不需要本地文件服务器。
     #[serde(default)]
-    pub assets: BTreeMap<String, String>,
+    assets: BTreeMap<String, String>,
 }
 
 /// 权限声明。只有 actions：菜单 code 已经在 `menus` 里了，重复声明会两头不一致。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Permissions {
     #[serde(default)]
-    pub actions: Vec<String>,
+    actions: Vec<String>,
+}
+
+impl Permissions {
+    pub fn new(actions: Vec<String>) -> Self {
+        Self { actions }
+    }
+
+    pub fn actions(&self) -> &[String] {
+        &self.actions
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TxMeta {
-    pub code: String,
+    code: String,
     #[serde(default)]
-    pub idempotency: String,
+    idempotency: String,
     #[serde(default)]
-    pub offline_capable: bool,
+    offline_capable: bool,
     #[serde(default)]
-    pub devices: Vec<String>,
+    devices: Vec<String>,
+}
+
+impl TxMeta {
+    pub fn new(code: &str, idempotency: &str, offline_capable: bool, devices: Vec<String>) -> Self {
+        Self {
+            code: code.into(),
+            idempotency: idempotency.into(),
+            offline_capable,
+            devices,
+        }
+    }
+
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    pub fn idempotency(&self) -> &str {
+        &self.idempotency
+    }
+
+    pub fn offline_capable(&self) -> bool {
+        self.offline_capable
+    }
+
+    pub fn devices(&self) -> &[String] {
+        &self.devices
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -102,12 +190,32 @@ pub enum PkgError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Version {
-    pub major: u64,
-    pub minor: u64,
-    pub patch: u64,
+    major: u64,
+    minor: u64,
+    patch: u64,
 }
 
 impl Version {
+    pub fn new(major: u64, minor: u64, patch: u64) -> Self {
+        Self {
+            major,
+            minor,
+            patch,
+        }
+    }
+
+    pub fn major(&self) -> u64 {
+        self.major
+    }
+
+    pub fn minor(&self) -> u64 {
+        self.minor
+    }
+
+    pub fn patch(&self) -> u64 {
+        self.patch
+    }
+
     /// 只接受 `major.minor.patch`。
     ///
     /// 不做宽容解析：柜面终端的版本兼容判断不能建立在"猜"上，
@@ -135,12 +243,24 @@ impl Version {
 /// 因为柜面主壳按主版本发版，业务包要能跨次版本存活。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShellRange {
-    pub min: Version,
+    min: Version,
     /// 开区间上界：等于 max 所在主版本 + 1。
-    pub max_exclusive: Version,
+    max_exclusive: Version,
 }
 
 impl ShellRange {
+    pub fn new(min: Version, max_exclusive: Version) -> Self {
+        Self { min, max_exclusive }
+    }
+
+    pub fn min(&self) -> &Version {
+        &self.min
+    }
+
+    pub fn max_exclusive(&self) -> &Version {
+        &self.max_exclusive
+    }
+
     pub fn parse(min: &str, max: &str) -> Result<Self, PkgError> {
         let min_v = Version::parse(min)?;
         let max_exclusive = if max.ends_with(".x") {
@@ -175,6 +295,49 @@ impl ShellRange {
 // ---------------- 容器 ----------------
 
 impl BizPackage {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        manifest: BizManifest,
+        menus: Vec<MenuNode>,
+        permissions: Permissions,
+        routes: BTreeMap<String, String>,
+        transactions: Vec<TxMeta>,
+        assets: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            manifest,
+            menus,
+            permissions,
+            routes,
+            transactions,
+            assets,
+        }
+    }
+
+    pub fn manifest(&self) -> &BizManifest {
+        &self.manifest
+    }
+
+    pub fn menus(&self) -> &[MenuNode] {
+        &self.menus
+    }
+
+    pub fn permissions(&self) -> &Permissions {
+        &self.permissions
+    }
+
+    pub fn routes(&self) -> &BTreeMap<String, String> {
+        &self.routes
+    }
+
+    pub fn transactions(&self) -> &[TxMeta] {
+        &self.transactions
+    }
+
+    pub fn assets(&self) -> &BTreeMap<String, String> {
+        &self.assets
+    }
+
     /// 打包成带签名的 `.bizpkg` 字节流。
     pub fn encode(&self, signing_key: &SigningKey) -> Result<Vec<u8>, PkgError> {
         validate_manifest(&self.manifest)?;
@@ -276,17 +439,53 @@ fn validate_menu_namespace(package: &BizPackage) -> Result<(), PkgError> {
 /// 一个包的加载结论。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PackageDecision {
-    pub id: String,
-    pub loaded: bool,
-    pub reason: String,
+    id: String,
+    loaded: bool,
+    reason: String,
+}
+
+impl PackageDecision {
+    pub fn new(id: &str, loaded: bool, reason: &str) -> Self {
+        Self {
+            id: id.into(),
+            loaded,
+            reason: reason.into(),
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn loaded(&self) -> bool {
+        self.loaded
+    }
+
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct LoadPlan {
     /// 通过校验、按依赖拓扑排好序的包。
-    pub ordered: Vec<BizPackage>,
+    ordered: Vec<BizPackage>,
     /// 被跳过的包及原因（不加载 ≠ 报错，柜面要能继续用别的功能）。
-    pub skipped: Vec<PackageDecision>,
+    skipped: Vec<PackageDecision>,
+}
+
+impl LoadPlan {
+    pub fn new(ordered: Vec<BizPackage>, skipped: Vec<PackageDecision>) -> Self {
+        Self { ordered, skipped }
+    }
+
+    pub fn ordered(&self) -> &[BizPackage] {
+        &self.ordered
+    }
+
+    pub fn skipped(&self) -> &[PackageDecision] {
+        &self.skipped
+    }
 }
 
 /// 按主壳版本、依赖关系排出加载顺序。

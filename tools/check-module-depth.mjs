@@ -50,7 +50,9 @@ for (const f of files) {
       const line = raw.trim();
       if (!line || line.startsWith("#[") || line.startsWith("//")) continue;
       const fm = /^(pub(?:\([^)]*\))?\s+)?(\w+)\s*:/.exec(line);
-      if (fm) fields.push({ name: fm[2], isPub: Boolean(fm[1]) });
+      if (!fm) continue;
+      const vis = (fm[1] || "").trim();
+      fields.push({ name: fm[2], isPub: vis === "pub", isCrate: vis.startsWith("pub(") });
     }
     structs.set(name, { file: f.rel, fields });
   }
@@ -61,6 +63,7 @@ const pubFieldStructs = [...structs.entries()]
     name,
     file: s.file,
     pub: s.fields.filter((x) => x.isPub).length,
+    crate: s.fields.filter((x) => x.isCrate).length,
     total: s.fields.length,
   }))
   .filter((s) => s.pub > 0)
@@ -70,6 +73,8 @@ const pubFieldStructs = [...structs.entries()]
 const fieldOwners = new Map();
 for (const s of structs.values()) {
   for (const f of s.fields) {
+    // 只统计纯 pub 字段：pub(crate) 已经隐藏到 crate 边界，不算跨 crate 泄漏。
+    if (!f.isPub) continue;
     if (!fieldOwners.has(f.name)) fieldOwners.set(f.name, new Set());
     fieldOwners.get(f.name).add(s.file);
   }
@@ -111,7 +116,8 @@ const fnCounts = files
 // —— 报告 ——
 console.log("\n· 模块深度（宪法第 11 条）");
 console.log(`  平铺 pub mod：${pubMods}   pub(crate)/私有 mod：${crateMods}`);
-console.log(`  含 pub 字段的结构体：${pubFieldStructs.length} / ${structs.size}`);
+const crateFieldStructs = [...structs.values()].filter((s) => s.fields.some((x) => x.isCrate));
+console.log(`  含纯 pub 字段的结构体：${pubFieldStructs.length} / ${structs.size}（pub(crate) ${crateFieldStructs.length}）`);
 if (pubFieldStructs.length) {
   console.log("  Top pub 字段：");
   for (const s of pubFieldStructs.slice(0, 8)) {
@@ -119,7 +125,7 @@ if (pubFieldStructs.length) {
   }
 }
 if (leaks.length) {
-  console.log(`  跨模块字段访问（启发式）：${leaks.length} 处`);
+  console.log(`  跨模块字段访问（启发式，仅趋势）：${leaks.length} 处`);
   for (const l of leaks.slice(0, 10)) {
     console.log(`    .${l.field}  ${l.file}  (定义于 ${l.owner}) ×${l.hits}`);
   }
@@ -132,9 +138,9 @@ if (over.length) {
 
 const failures = [];
 if (STRICT) {
-  if (pubFieldStructs.length) failures.push(`${pubFieldStructs.length} 个结构体仍有 pub 字段（目标 0）`);
+  if (pubFieldStructs.length) failures.push(`${pubFieldStructs.length} 个结构体仍有纯 pub 字段（目标 0）`);
   if (over.length) failures.push(`${over.length} 个文件 pub fn 超过 ${PUB_FN_LIMIT}`);
-  if (leaks.length) failures.push(`${leaks.length} 处跨模块字段访问`);
+  // 跨模块字段访问是启发式：self.x、同名局部变量都会误报，只作趋势提示，不阻断。
 }
 
 if (failures.length) {

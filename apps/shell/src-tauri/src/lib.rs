@@ -42,44 +42,44 @@ pub struct AppState {
     /// ③ 边界：远端后台。菜单、登录、交易都走这一个端口。
     ///
     /// 默认是内置 mock；配置了 `endpoints.json` 时换成 `RoutedBanking`。
-    pub remote: Arc<dyn RemoteBanking>,
+    pub(crate) remote: Arc<dyn RemoteBanking>,
     /// 演示开关句柄。只有 mock 模式存在；接入真实端点后为 None。
-    pub mock: Option<Arc<ports::MockRemote>>,
-    pub store: MenuStore,
+    pub(crate) mock: Option<Arc<ports::MockRemote>>,
+    pub(crate) store: MenuStore,
     /// 当前登录用户的权限快照。登出/切号必须置空。
-    pub snapshot: Option<PermSnapshot>,
+    pub(crate) snapshot: Option<PermSnapshot>,
     /// 全量菜单树（不做权限过滤），供每次过滤复用。
-    pub menu: Option<MenuTree>,
-    pub appdata_dir: String,
+    pub(crate) menu: Option<MenuTree>,
+    pub(crate) appdata_dir: String,
     /// 启动被拒绝的原因。非空时**所有命令**都直接失败，只保留可读错误页。
     ///
     /// 放在这里而不是单独的托管状态：`lock()` 是所有命令的唯一入口，
     /// 在这里拦一次，比在 23 个命令里各写一遍可靠。
-    pub startup_fatal: bootstrap::StartupFatal,
+    pub(crate) startup_fatal: bootstrap::StartupFatal,
     /// 账本打不开时的告警。柜面宁可"能开但提示异常"，也不要"打不开"。
-    pub journal_warning: Option<String>,
+    pub(crate) journal_warning: Option<String>,
     /// 交易引擎：幂等索引 + 待重放队列（P1.4 会落盘）。
-    pub tx: TxEngine,
+    pub(crate) tx: TxEngine,
     /// 设备集合：P1.2 的 mock 适配器，P3 换真机只换这一处构造。
-    pub devices: Devices,
+    pub(crate) devices: Devices,
     /// 已加载的业务包（按依赖拓扑序）。前端按 route 找模块。
-    pub packages: Vec<BizPackage>,
+    pub(crate) packages: Vec<BizPackage>,
     /// 审计日志句柄。`None` 表示账本不可用（降级为内存模式）。
-    pub audit: Option<Arc<SqliteJournal>>,
+    pub(crate) audit: Option<Arc<SqliteJournal>>,
     /// 外设型号白名单。默认只允许 mock 型号——没登记就拒绝。
-    pub policy: DevicePolicy,
+    pub(crate) policy: DevicePolicy,
     /// 会话锁屏状态。`None` 表示未登录。
-    pub session: Option<SessionGuard>,
+    pub(crate) session: Option<SessionGuard>,
     /// 时钟端口。锁屏/退避/审计都靠它，注入才能在测试里控制时间。
-    pub clock: StdArc<dyn ports::Clock>,
+    pub(crate) clock: StdArc<dyn ports::Clock>,
     /// 自动重放调度。挂起交易按退避节奏逐笔重试，不再一次全推。
-    pub replay: ReplayScheduler,
+    pub(crate) replay: ReplayScheduler,
     /// 冲正账本：记录"状态不明"的交易与冲正申请。
-    pub reversal: ReversalBook,
+    pub(crate) reversal: ReversalBook,
     /// 菜单包 / 业务包的验签公钥。
     ///
     /// 生产由构建期 `TK_MENU_PUBKEY_HEX` 注入；调试构建没有注入时才回退演示公钥。
-    pub verifying_key: VerifyingKey,
+    pub(crate) verifying_key: VerifyingKey,
 }
 
 impl AppState {

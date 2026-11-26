@@ -233,11 +233,7 @@ pub fn demo_roles() -> Vec<(&'static str, &'static str)> {
 
 /// 主壳版本，用于业务包兼容判定。
 pub fn shell_version() -> Version {
-    Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or(Version {
-        major: 0,
-        minor: 0,
-        patch: 0,
-    })
+    Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or(Version::new(0, 0, 0))
 }
 
 #[cfg(test)]

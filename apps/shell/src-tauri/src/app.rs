@@ -186,17 +186,18 @@ impl<'a> ShellApp<'a> {
             &self.state.verifying_key,
             crate::ports::shell_version(),
         );
-        let conflicts = pkg::merge_packages(&mut tree, &plan.ordered);
-        self.state.packages = plan.ordered;
+        let conflicts = pkg::merge_packages(&mut tree, plan.ordered());
+        self.state.packages = plan.ordered().to_vec();
 
         for package in &self.state.packages {
             notes.push(format!(
                 "已加载业务包 {} v{}",
-                package.manifest.id, package.manifest.version
+                package.manifest().id(),
+                package.manifest().version()
             ));
         }
         for failure in &failures {
-            notes.push(format!("跳过业务包 {}：{}", failure.id, failure.reason));
+            notes.push(format!("跳过业务包 {}：{}", failure.id(), failure.reason()));
         }
         for conflict in &conflicts {
             notes.push(format!("业务包菜单冲突，保留主壳版本：{conflict}"));
@@ -550,9 +551,9 @@ impl<'a> ShellApp<'a> {
     pub fn package_module(&self, route: &str) -> Result<String, String> {
         self.require_unlocked("package_module")?;
         for package in &self.state.packages {
-            if let Some(module) = package.routes.get(route) {
-                return package.assets.get(module).cloned().ok_or_else(|| {
-                    format!("包 {} 的模块 {module} 未随包提供", package.manifest.id)
+            if let Some(module) = package.routes().get(route) {
+                return package.assets().get(module).cloned().ok_or_else(|| {
+                    format!("包 {} 的模块 {module} 未随包提供", package.manifest().id())
                 });
             }
         }
