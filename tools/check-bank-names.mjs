@@ -57,12 +57,45 @@ function loadConfig() {
     console.error("✗ 缺少 tools/bank-names.json：无法执行银行名称检查");
     process.exit(2);
   }
-  const cfg = JSON.parse(readFileSync(CONFIG, "utf8"));
+  let cfg;
+  try {
+    cfg = JSON.parse(readFileSync(CONFIG, "utf8"));
+  } catch (e) {
+    console.error(`✗ tools/bank-names.json 不是合法 JSON：${e.message}`);
+    process.exit(2);
+  }
   if (!Array.isArray(cfg.terms) || !cfg.terms.length) {
     console.error("✗ tools/bank-names.json 的 terms 为空");
     process.exit(2);
   }
+  const allow = cfg.allow ?? [];
+  if (!Array.isArray(allow)) {
+    console.error("✗ tools/bank-names.json 的 allow 必须是数组");
+    process.exit(2);
+  }
+  for (const [i, entry] of allow.entries()) {
+    if (
+      !entry ||
+      typeof entry !== "object" ||
+      typeof entry.path !== "string" ||
+      !entry.path.trim() ||
+      typeof entry.reason !== "string" ||
+      !entry.reason.trim()
+    ) {
+      console.error(`✗ tools/bank-names.json 的 allow[${i}] 缺少非空 path 或 reason：豁免必须写理由`);
+      process.exit(2);
+    }
+  }
   return cfg;
+}
+
+/** 中英文之间空格、全角/半角空格都不该让禁用词漏网。 */
+function normalize(text) {
+  return text
+    .replace(/[　   -   ﻿]/g, " ")
+    .replace(/([^\x00-\x7F])\s+([A-Za-z0-9])/g, "$1$2")
+    .replace(/([A-Za-z0-9])\s+([^\x00-\x7F])/g, "$1$2")
+    .replace(/\s/g, "");
 }
 
 function escapeRe(s) {
@@ -99,38 +132,50 @@ const allow = new Set((cfg.allow ?? []).map((a) => String(a.path).replace(/\\/g,
 
 const hits = [];
 let scanned = 0;
+let skippedDirFiles = 0;
+let skippedLarge = 0;
 
 for (const file of gitFiles()) {
   const key = file.replace(/\\/g, "/");
   if (allow.has(key)) continue;
-  if (SKIP.some((re) => re.test(key))) continue;
+  if (SKIP.some((re) => re.test(key))) {
+    if (key.includes("/")) skippedDirFiles++;
+    continue;
+  }
   if (!TEXT_EXT.has(extname(key).toLowerCase())) continue;
   const abs = join(ROOT, file);
   if (!existsSync(abs)) continue;
   const st = statSync(abs);
-  if (!st.isFile() || st.size > 2 * 1024 * 1024) continue;
+  if (!st.isFile()) continue;
+  if (st.size > 2 * 1024 * 1024) {
+    skippedLarge++;
+    continue;
+  }
   const buf = readFileSync(abs);
   if (buf.includes(0)) continue;
   const lines = buf.toString("utf8").split(/\r?\n/);
   scanned++;
 
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+    const line = normalize(lines[i]);
     if (!line) continue;
     for (const { text, re } of patterns) {
       re.lastIndex = 0;
       if (!re.test(line)) continue;
-      hits.push({ file: key, line: i + 1, term: text, text: line.trim().slice(0, 120) });
+      hits.push({ file: key, line: i + 1, term: text, text: lines[i].trim().slice(0, 120) });
     }
   }
 }
+const skipInfo = `跳过目录内文件 ${skippedDirFiles} 个、大文件 ${skippedLarge} 个`;
 
 if (!hits.length) {
-  console.log(`✓ check-bank-names 通过（扫描 ${scanned} 个文本文件，未发现具体银行名称/缩写）`);
+  console.log(
+    `✓ check-bank-names 通过（扫描 ${scanned} 个文本文件，${skipInfo}，未发现具体银行名称/缩写）`,
+  );
   process.exit(0);
 }
 
-console.error(`✗ check-bank-names 失败：发现 ${hits.length} 处具体银行名称/缩写\n`);
+console.error(`✗ check-bank-names 失败：发现 ${hits.length} 处具体银行名称/缩写（${skipInfo}）\n`);
 for (const h of hits.slice(0, 50)) {
   console.error(`  ${h.file}:${h.line}  [${h.term}]  ${h.text}`);
 }

@@ -12,7 +12,7 @@
  * 手改生成物或忘了重新生成都会红。
  */
 import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,11 +25,18 @@ const run = (args) => {
   execFileSync("cargo", args, { cwd: ROOT, stdio: "inherit" });
 };
 
+const RESERVED = new Set(["index.ts", "commands.ts"]);
+
+// 先清旧类型：删掉 #[ts(export)] 的字段/类型后，ts-rs 不会主动删除旧文件，
+// 陈旧 .ts 会一直"同步"通过 manifest 与契约检查，掩盖契约漂移。
+const stale = readdirSync(DIR).filter((f) => f.endsWith(".ts") && !RESERVED.has(f));
+for (const f of stale) unlinkSync(join(DIR, f));
+if (stale.length) console.log(`· 清理 ${stale.length} 个旧生成类型（重新导出中）`);
+
 console.log("· 导出 ts-rs 绑定");
 run(["test", "-q", "-p", "tellerkit-core", "--lib"]);
 run(["test", "-q", "-p", "tellerkit", "--lib"]);
 
-const RESERVED = new Set(["index.ts", "commands.ts"]);
 const typeFiles = readdirSync(DIR)
   .filter((f) => f.endsWith(".ts") && !RESERVED.has(f))
   .sort();

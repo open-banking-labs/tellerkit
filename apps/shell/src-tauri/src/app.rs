@@ -8,6 +8,7 @@
 //! 为什么不用"一个用例一个 struct"：没有第二个实现，结构体只是把函数换了个形状
 //! （见 §6 的三问结论）。
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use tellerkit_core as sync;
@@ -25,6 +26,58 @@ use tellerkit_journal_sqlite::AuditEvent;
 
 use crate::ports::{Clock, RemoteBanking};
 use crate::AppState;
+
+/// 包调用的来源标记：宿主注入到 IPC 的 map 参数里，Rust 校验前移除。
+/// 前端在包参数上覆盖写入，包自己给的同名字段不能生效。
+pub const PKG_ORIGIN_KEY: &str = "__pkg_origin";
+
+/// `package_module` 的返回视图。源码与能力一起下发，命令层负责编码为字符串。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PackageModuleView {
+    source: String,
+    origin: String,
+    capabilities: pkg::PackageCapabilities,
+}
+
+impl PackageModuleView {
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub fn origin(&self) -> &str {
+        &self.origin
+    }
+
+    pub fn capabilities(&self) -> &pkg::PackageCapabilities {
+        &self.capabilities
+    }
+}
+
+/// 从 IPC map 中提取的来源。只识别 `pkg:<id>`，格式不合法一律拒绝。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PackageCall {
+    id: String,
+}
+
+impl PackageCall {
+    fn take(fields: &mut BTreeMap<String, String>) -> Result<Option<Self>, String> {
+        match fields.remove(PKG_ORIGIN_KEY) {
+            None => Ok(None),
+            Some(origin) => {
+                let id = origin.strip_prefix("pkg:").unwrap_or("");
+                if id.is_empty() {
+                    Err(format!("业务包来源格式非法：{origin}"))
+                } else {
+                    Ok(Some(Self { id: id.to_string() }))
+                }
+            }
+        }
+    }
+
+    fn origin(&self) -> String {
+        format!("pkg:{}", self.id)
+    }
+}
 
 /// 启动结果。命令层据此拼 `BootInfo`。
 #[derive(Debug, Clone)]
@@ -530,8 +583,13 @@ impl<'a> ShellApp<'a> {
         Ok(host_reference)
     }
 
-    pub fn submit_transaction(&mut self, request: TxRequest) -> Result<TxResult, String> {
+    pub fn submit_transaction(&mut self, mut request: TxRequest) -> Result<TxResult, String> {
         self.require_unlocked("submit_tx")?;
+        let code = request.tx_code().to_string();
+        let call = self.take_call(request.elements_mut(), &code)?;
+        if let Some(call) = &call {
+            self.authorize_package_call(call, "submit", &code, None)?;
+        }
         // 契约 lifecycle.md 不变量 7：主机没声明幂等，就不许离线挂起。
         // 挂起意味着"以后一定会重发"，而重发只有服务端按幂等键去重才不会重复入账。
         if request.offline_capable() && !self.remote.supports_idempotency() {
@@ -556,11 +614,18 @@ impl<'a> ShellApp<'a> {
         let result = self.state.tx.submit(self.remote.as_ref(), request);
         self.mark_if_uncertain(&key, &result);
 
-        let detail = format!("status={:?} amount_cents={amount_cents}", result.status());
+        let detail = format!(
+            "code={code} status={:?} amount_cents={amount_cents}",
+            result.status()
+        );
+        let target = call
+            .as_ref()
+            .map(PackageCall::origin)
+            .unwrap_or_else(|| code.clone());
         self.audit(
             &actor,
             "submit_tx",
-            &code,
+            &target,
             if result.status() == TxStatus::Committed {
                 "ok"
             } else {
@@ -621,15 +686,21 @@ impl<'a> ShellApp<'a> {
 
     // ---------- 设备 ----------
 
-    pub fn print_voucher(&mut self, voucher: Voucher) -> Result<PrintReceipt, String> {
+    pub fn print_voucher(&mut self, mut voucher: Voucher) -> Result<PrintReceipt, String> {
         self.require_unlocked("print_voucher")?;
+        let tx_code = voucher.tx_code().to_string();
+        let template = voucher.template().to_string();
+        let mut fields = voucher.fields().clone();
+        let call = self.take_call(&mut fields, &tx_code)?;
+        voucher.set_fields(fields);
+        if let Some(call) = &call {
+            self.authorize_package_call(call, "print", &tx_code, Some(&template))?;
+        }
         // 白名单先于动作：未登记的型号连纸都不该动
         self.state
             .devices
             .ensure_allowed(&self.state.policy)
             .map_err(|e| e.to_string())?;
-        let tx_code = voucher.tx_code().to_string();
-        let template = voucher.template().to_string();
         let outcome = self
             .state
             .devices
@@ -637,12 +708,17 @@ impl<'a> ShellApp<'a> {
             .print(&voucher)
             .map_err(|e| e.to_string());
         let actor = self.actor();
+        let detail = format!("code={tx_code} template={template}");
+        let target = call
+            .as_ref()
+            .map(PackageCall::origin)
+            .unwrap_or_else(|| tx_code.clone());
         self.audit(
             &actor,
             "print",
-            &tx_code,
+            &target,
             if outcome.is_ok() { "ok" } else { "failed" },
-            &template,
+            &detail,
         );
         outcome
     }
@@ -702,16 +778,81 @@ impl<'a> ShellApp<'a> {
 
     // ---------- 业务包 ----------
 
-    pub fn package_module(&self, route: &str) -> Result<String, String> {
+    /// 返回包源码 + 签名清单推导出的能力 + 审计用的来源标识。
+    /// 前端只按 capabilities 暴露方法，不自行判断业务权限。
+    pub fn package_module(&self, route: &str) -> Result<PackageModuleView, String> {
         self.require_unlocked("package_module")?;
         for package in &self.state.packages {
             if let Some(module) = package.route(route) {
-                return package
+                let source = package
                     .asset(&module)
-                    .ok_or_else(|| format!("包 {} 的模块 {module} 未随包提供", package.id()));
+                    .ok_or_else(|| format!("包 {} 的模块 {module} 未随包提供", package.id()))?;
+                return Ok(PackageModuleView {
+                    source,
+                    origin: format!("pkg:{}", package.id()),
+                    capabilities: package.capabilities(),
+                });
             }
         }
         Err("该路由不是业务包提供的".to_string())
+    }
+
+    /// 取出调用来源；格式非法也要留痕，不能静默当成主壳调用。
+    fn take_call(
+        &self,
+        fields: &mut BTreeMap<String, String>,
+        code: &str,
+    ) -> Result<Option<PackageCall>, String> {
+        PackageCall::take(fields).map_err(|err| {
+            self.audit(
+                &self.actor(),
+                "package_capability",
+                "pkg:unknown",
+                "denied",
+                &format!("code={code} {err}"),
+            );
+            err
+        })
+    }
+
+    /// 所有包调用的真实放行点：包必须已加载验签，且方法/交易码/模板均在清单里。
+    fn authorize_package_call(
+        &self,
+        call: &PackageCall,
+        method: &str,
+        tx_code: &str,
+        template: Option<&str>,
+    ) -> Result<(), String> {
+        let package = self
+            .state
+            .packages
+            .iter()
+            .find(|p| p.id() == call.id)
+            .ok_or_else(|| self.deny_package_call(call, tx_code, "来源包未加载或验签未通过"))?;
+        let caps = package.capabilities();
+        if !caps.allows_method(method) {
+            return Err(self.deny_package_call(call, tx_code, &format!("未声明方法 {method}")));
+        }
+        if !caps.allows_tx_code(tx_code) {
+            return Err(self.deny_package_call(call, tx_code, "未声明交易码"));
+        }
+        if let Some(template) = template {
+            if !caps.allows_template(template) {
+                return Err(self.deny_package_call(call, template, "未声明模板"));
+            }
+        }
+        Ok(())
+    }
+
+    fn deny_package_call(&self, call: &PackageCall, code: &str, reason: &str) -> String {
+        self.audit(
+            &self.actor(),
+            "package_capability",
+            &call.origin(),
+            "denied",
+            &format!("code={code} {reason}"),
+        );
+        format!("业务包能力校验未通过：{reason}")
     }
 
     // ---------- 审计 ----------
@@ -817,6 +958,7 @@ impl<'a> ShellApp<'a> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use tellerkit_journal_sqlite::SqliteJournal;
 
     /// 冻结时钟：证明"时间来自端口"而不是系统调用。
     struct FrozenClock(AtomicU64);
@@ -988,5 +1130,147 @@ mod tests {
             .submit_transaction(TxRequest::new("account.deposit", "k-ok"))
             .expect("解锁后应放行到主机");
         assert_eq!(result.status(), TxStatus::Committed);
+    }
+
+    fn state_with_package(templates: Vec<String>) -> AppState {
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let mut state = state_with(clock);
+        state.audit = Some(Arc::new(SqliteJournal::in_memory().expect("内存账本")));
+
+        let mut routes = BTreeMap::new();
+        routes.insert("/biz/demo/hello".to_string(), "ui/entry.js".to_string());
+        let mut assets = BTreeMap::new();
+        assets.insert(
+            "ui/entry.js".to_string(),
+            "export function mount() {}".to_string(),
+        );
+        let tx = tellerkit_core::pkg::TxMeta::new("biz.demo.hello", "client-uuid", false, vec![])
+            .with_templates(templates);
+        state.packages.push(tellerkit_core::BizPackage::new(
+            tellerkit_core::pkg::BizManifest::new(
+                "biz.demo",
+                "示例包",
+                "0.1.0",
+                "0.1.0",
+                "0.x",
+                vec![],
+                "ui/entry.js",
+            ),
+            vec![tellerkit_core::MenuNode::page(
+                "biz.demo.hello",
+                None,
+                "示例交易",
+                0,
+            )],
+            pkg::Permissions::default(),
+            routes,
+            vec![tx],
+            assets,
+        ));
+        state
+    }
+
+    fn package_request(code: &str, key: &str) -> TxRequest {
+        let mut request = TxRequest::new(code, key);
+        request
+            .elements_mut()
+            .insert(PKG_ORIGIN_KEY.to_string(), "pkg:biz.demo".to_string());
+        request
+    }
+
+    fn package_voucher(template: &str) -> Voucher {
+        let mut voucher = Voucher::new(template, "biz.demo.hello");
+        let mut fields = BTreeMap::new();
+        fields.insert(PKG_ORIGIN_KEY.to_string(), "pkg:biz.demo".to_string());
+        voucher.set_fields(fields);
+        voucher
+    }
+
+    #[test]
+    fn package_module_view_carries_source_and_capabilities() {
+        let mut state = state_with_package(vec!["demo.receipt".to_string()]);
+        let view = ShellApp::new(&mut state)
+            .package_module("/biz/demo/hello")
+            .expect("已加载的包应返回视图");
+        assert_eq!(view.origin(), "pkg:biz.demo");
+        assert!(view.source().contains("mount"));
+        assert!(view.capabilities().allows_method("print"));
+        assert!(view.capabilities().allows_method("submit"));
+        assert!(view.capabilities().allows_method("log"));
+        assert!(view.capabilities().allows_tx_code("biz.demo.hello"));
+        assert!(view.capabilities().allows_template("demo.receipt"));
+    }
+
+    #[test]
+    fn package_call_with_declared_tx_code_is_allowed_and_audited() {
+        let mut state = state_with_package(vec!["demo.receipt".to_string()]);
+        let result = ShellApp::new(&mut state)
+            .submit_transaction(package_request("biz.demo.hello", "k-pkg-ok"))
+            .expect("清单声明的交易码应放行");
+        assert_eq!(result.status(), TxStatus::Committed);
+
+        let tail = ShellApp::new(&mut state).audit_tail(3).expect("审计可用");
+        assert!(
+            tail.iter().any(|line| line.contains("pkg:biz.demo")),
+            "实际：{tail:?}"
+        );
+        assert!(
+            tail.iter().any(|line| line.contains("code=biz.demo.hello")),
+            "实际：{tail:?}"
+        );
+    }
+
+    #[test]
+    fn package_call_with_undeclared_tx_code_is_denied_and_audited() {
+        let mut state = state_with_package(vec!["demo.receipt".to_string()]);
+        let err = ShellApp::new(&mut state)
+            .submit_transaction(package_request("account.withdraw", "k-pkg-bad"))
+            .unwrap_err();
+        assert!(err.contains("未声明交易码"), "实际：{err}");
+
+        let tail = ShellApp::new(&mut state).audit_tail(3).expect("审计可用");
+        assert!(
+            tail.iter()
+                .any(|line| line.contains("pkg:biz.demo") && line.contains("account.withdraw")),
+            "实际：{tail:?}"
+        );
+    }
+
+    #[test]
+    fn package_call_with_undeclared_template_is_denied_and_audited() {
+        let mut state = state_with_package(vec!["demo.receipt".to_string()]);
+        let err = ShellApp::new(&mut state)
+            .print_voucher(package_voucher("foreign.receipt"))
+            .unwrap_err();
+        assert!(err.contains("未声明模板"), "实际：{err}");
+
+        let tail = ShellApp::new(&mut state).audit_tail(3).expect("审计可用");
+        assert!(
+            tail.iter()
+                .any(|line| line.contains("pkg:biz.demo") && line.contains("foreign.receipt")),
+            "实际：{tail:?}"
+        );
+    }
+
+    #[test]
+    fn undeclared_method_is_denied_before_device_is_touched() {
+        let mut state = state_with_package(vec![]);
+        let err = ShellApp::new(&mut state)
+            .print_voucher(package_voucher("demo.receipt"))
+            .unwrap_err();
+        assert!(err.contains("未声明方法 print"), "实际：{err}");
+    }
+
+    #[test]
+    fn unknown_package_origin_is_denied() {
+        let mut state = state_with_package(vec!["demo.receipt".to_string()]);
+        let mut request = package_request("biz.demo.hello", "k-unknown");
+        request
+            .elements_mut()
+            .insert(PKG_ORIGIN_KEY.to_string(), "pkg:biz.other".to_string());
+        let err = ShellApp::new(&mut state)
+            .submit_transaction(request)
+            .unwrap_err();
+        assert!(err.contains("未加载或验签未通过"), "实际：{err}");
     }
 }
