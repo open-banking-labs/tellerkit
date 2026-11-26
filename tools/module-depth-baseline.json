@@ -4,7 +4,7 @@
     "apps/shell/src-tauri/src/bootstrap.rs": 1
   },
   "pub_fns": {
-    "packages/core/src/pkg.rs": 24,
+    "packages/core/src/pkg.rs": 30,
     "apps/shell/src-tauri/src/commands.rs": 23,
     "packages/core/src/device.rs": 20,
     "apps/shell/src-tauri/src/app.rs": 19,
