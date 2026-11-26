@@ -6,7 +6,7 @@
   "pub_fns": {
     "packages/core/src/pkg.rs": 24,
     "apps/shell/src-tauri/src/commands.rs": 23,
-    "packages/core/src/device.rs": 19,
+    "packages/core/src/device.rs": 20,
     "apps/shell/src-tauri/src/app.rs": 19,
     "packages/core/src/tx.rs": 16,
     "packages/core/src/mock.rs": 15,
