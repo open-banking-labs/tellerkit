@@ -29,6 +29,7 @@ use tellerkit_journal_sqlite::{AuditEvent, SqliteJournal};
 
 use crate::bootstrap::StartupFatal;
 use crate::lock_app_state;
+use crate::logging;
 use crate::ports::{Clock, RemoteBanking, RemoteError};
 use crate::{AppState, SharedState};
 
@@ -45,7 +46,7 @@ const ERROR_RECONCILIATION: &str = "E_RECONCILIATION_FAILED";
 
 /// 内部错误统一在这里收口：原文只写终端日志，返回值是错误码 + 固定中文。
 fn public_error(code: &str, friendly: &str, detail: &str) -> String {
-    eprintln!("[{code}] {detail}");
+    logging::error("app", &format!("[{code}] {detail}"));
     format!("[{code}] {friendly}")
 }
 
@@ -362,7 +363,7 @@ impl SessionSlot {
             reason.label(),
         );
         if let Err(e) = journal.audit(&event) {
-            eprintln!("会话锁定审计写入失败：{e}");
+            logging::warn("audit", &format!("会话锁定审计写入失败：{e}"));
         }
     }
 }
@@ -895,7 +896,10 @@ impl<'a> ShellApp<'a> {
                 let detail = format!("登录失败（角色 {role_id}）：{reason}");
                 // 原文只留审计：审计写不进去也不能把 SQLite/远端细节回给前端。
                 if let Err(e) = self.audit("unknown", "login", role_id, "failed", &detail) {
-                    eprintln!("[{ERROR_LOGIN}] 登录失败审计写入失败：{e}");
+                    logging::error(
+                        "audit",
+                        &format!("[{ERROR_LOGIN}] 登录失败审计写入失败：{e}"),
+                    );
                 }
                 Err(public_error(
                     ERROR_LOGIN,

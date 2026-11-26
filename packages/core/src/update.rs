@@ -25,6 +25,12 @@ pub struct UpdateCandidate {
     channel: Channel,
     /// 灰度比例 0-100。100 表示全量。
     rollout_percent: u8,
+    /// 服务端急停开关。为真时**不管版本、通道、灰度**一律不下载、不提示。
+    ///
+    /// 为什么必须有：发出去的版本发现严重问题时，"让还没升的网点先别升"是唯一
+    /// 能立刻止损的手段；靠调低 `rollout_percent` 不成立——已经命中灰度的网点
+    /// 下次检查仍会命中（桶是稳定的，这正是我们要的性质）。
+    kill_switch: bool,
 }
 
 impl UpdateCandidate {
@@ -33,7 +39,14 @@ impl UpdateCandidate {
             version,
             channel,
             rollout_percent,
+            kill_switch: false,
         }
+    }
+
+    /// 服务端下发急停；保持字段私有，避免调用方直接构造导致开关漏判。
+    pub fn with_kill_switch(mut self, kill_switch: bool) -> Self {
+        self.kill_switch = kill_switch;
+        self
     }
 
     pub fn version(&self) -> &Version {
@@ -46,6 +59,10 @@ impl UpdateCandidate {
 
     pub fn rollout_percent(&self) -> u8 {
         self.rollout_percent
+    }
+
+    pub fn kill_switch(&self) -> bool {
+        self.kill_switch
     }
 }
 
@@ -96,12 +113,21 @@ pub fn decide(
     local_hour: u8,
 ) -> UpdateDecision {
     // 顺序有讲究：
+    // 0. 急停优先于一切：它要能在"任何通道、任何版本差、任何灰度桶"下立刻生效，
+    //    否则急停只对"恰好有新版本"的网点有效，等于没急停。
     // 1. 通道先行：候选不属于本终端通道时，它根本不该被评估，先报"通道"
     //    比报"已是最新"更接近真实原因（试点包对新旧版本都无关）。
     // 2. 再比版本：没有新版本就不该消耗灰度名额，也不该打扰柜员。
     // 3. 灰度命中：只有该网点被选中才继续；未命中就是"这次没轮到你"。
     // 4. 最后看时段：命中灰度后，营业高峰只下载、不提示，避免柜员在
     //    交易中看到重启提示。
+    if candidate.kill_switch() {
+        return UpdateDecision {
+            action: UpdateAction::Skip,
+            reason: "服务端已急停（kill switch）：本次不下载、不提示".to_string(),
+        };
+    }
+
     if candidate.channel() != channel {
         return UpdateDecision {
             action: UpdateAction::Skip,
@@ -231,11 +257,36 @@ mod tests {
     }
 
     fn cand(version: Version, channel: Channel, rollout_percent: u8) -> UpdateCandidate {
-        UpdateCandidate {
-            version,
-            channel,
-            rollout_percent,
-        }
+        UpdateCandidate::new(version, channel, rollout_percent)
+    }
+
+    // ---- P1-3：灰度急停 ----
+
+    #[test]
+    fn kill_switch_stops_even_a_newer_candidate() {
+        let decision = decide(
+            &current(),
+            &cand(ver(9, 9, 9), Channel::Stable, 100).with_kill_switch(true),
+            Channel::Stable,
+            "OUTLET-01",
+            10,
+        );
+        assert_eq!(decision.action(), UpdateAction::Skip);
+        assert!(
+            decision.reason().contains("急停"),
+            "原因要能直接说出是被服务端停了：{}",
+            decision.reason()
+        );
+    }
+
+    #[test]
+    fn kill_switch_outranks_channel_mismatch() {
+        // 即便候选版本属于别的通道，急停仍然是"最先说出来"的原因：
+        // 排障时先看到"服务端停了"，比看到"通道不符"更接近真实。
+        let candidate = cand(ver(9, 9, 9), Channel::Canary, 100).with_kill_switch(true);
+        let decision = decide(&current(), &candidate, Channel::Stable, "OUTLET-01", 10);
+        assert_eq!(decision.action(), UpdateAction::Skip);
+        assert!(decision.reason().contains("急停"), "{}", decision.reason());
     }
 
     /// 走一次 Stable 通道的默认决策，省掉用例里的样板。
