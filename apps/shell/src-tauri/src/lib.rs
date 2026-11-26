@@ -11,6 +11,7 @@ pub mod bootstrap;
 pub mod commands;
 pub mod config_sig;
 pub mod endpoint_config;
+pub(crate) mod logging;
 pub mod ports;
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -225,7 +226,7 @@ fn build_remote(appdata: &std::path::Path) -> (ports::RemoteChoice, Option<Strin
         Err(reason) => {
             // 进程还要起来：只有起来，才能把"为什么被拒绝"显示成人能读的页面。
             // 业务命令一律先过 `StartupFatal::check`，所以演示远端不会被真正使用。
-            eprintln!("启动被拒绝：{reason}");
+            logging::error("startup", &format!("启动被拒绝：{reason}"));
             let mock = Arc::new(ports::MockRemote::default());
             (
                 ports::RemoteChoice::new(Arc::clone(&mock) as Arc<dyn RemoteBanking>, Some(mock)),
@@ -290,7 +291,7 @@ fn spawn_session_tick_worker_with_interval(
                         let _ = slot.tick();
                     }
                 }
-                Err(_) => eprintln!("会话槽已损坏，后台锁屏检查暂停"),
+                Err(_) => logging::error("session", "会话槽已损坏，后台锁屏检查暂停"),
             }
         }
     })
@@ -363,11 +364,20 @@ pub fn run() {
     let app = tauri::Builder::default()
         .setup(move |app| {
             let appdata = app.path().app_data_dir()?;
+            // 日志尽量早初始化：越早，启动期的问题越有据可查。
+            let log_path = match logging::init(&appdata) {
+                Ok(path) => Some(path),
+                Err(e) => {
+                    eprintln!("日志不可用（{e}）：本会话只能靠 stderr");
+                    None
+                }
+            };
             let menu_dir = appdata.join("menu");
             // P0：公钥内置在客户端；生产环境由构建配置注入，私钥永不进客户端。
             // 注入缺失/非法时直接拒绝启动，不允许静默回退到演示公钥。
             let verifying_key = menu_verifying_key()
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+            let pubkey_hex = hex::encode(verifying_key.to_bytes());
             let store = MenuStore::new(menu_dir, verifying_key);
 
             // 单实例：同一数据目录只允许一个柜面终端。没拿到锁也让进程起来，
@@ -450,7 +460,7 @@ pub fn run() {
                         Some(old) => format!("{old}；{note}"),
                         None => note.clone(),
                     });
-                    eprintln!("{note}");
+                    logging::warn("startup", &note);
                 }
                 state.replay = replay;
                 state.reversal = reversal;
@@ -471,12 +481,38 @@ pub fn run() {
                             );
                         }
                     }
-                    Err(e) => eprintln!("读取幂等结论供主机单飞表使用失败：{e}"),
+                    Err(e) => {
+                        logging::warn("startup", &format!("读取幂等结论供主机单飞表使用失败：{e}"))
+                    }
                 }
             }
             if let Some(note) = remote_note {
-                eprintln!("{note}");
+                logging::info("startup", &note);
             }
+            // 启动摘要：现场第一眼看这一条就知道"哪个版本、连的谁、账本好不好"。
+            logging::info(
+                "startup",
+                &format!(
+                    "客户端启动 version={:?} pubkey={} 账本={} 实例锁={} 数据目录={} 日志={}",
+                    ports::shell_version(),
+                    pubkey_hex,
+                    if state.audit.is_some() {
+                        "ok"
+                    } else {
+                        "degraded"
+                    },
+                    if state.instance_lock.is_some() {
+                        "held"
+                    } else {
+                        "not-held"
+                    },
+                    state.appdata_dir,
+                    log_path
+                        .as_deref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "stderr".to_string()),
+                ),
+            );
             // 会话槽单独托管的是同一个 Arc（不是副本），`session_*` 命令按类型直接取。
             // 先留一份给后台 tick，再 move state 进托管态。
             let session_for_tick = Arc::clone(&state.session);
