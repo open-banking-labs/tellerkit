@@ -374,12 +374,20 @@ impl Router {
                 Ok(response) => match endpoint.codec.decode(&response) {
                     Ok(body) => return Ok(body),
                     Err(e) => {
-                        failures.push(format!(
-                            "{}@{} 解码失败：{e}",
-                            endpoint.transport.name(),
-                            endpoint.priority
-                        ));
-                        continue;
+                        // 主机已收到请求，只是响应无法解析：切备端会用同一幂等键
+                        // 重复提交，结果不明时必须停在此端点，交给上层人工处置。
+                        return Err(RouteError {
+                            service: request.service.clone(),
+                            attempts: failures.len() + 1,
+                            detail: format!(
+                                "{}@{}（{:?}）解码失败：{e}",
+                                endpoint.transport.name(),
+                                endpoint.priority,
+                                endpoint.addr
+                            ),
+                            retryable: false,
+                            timed_out: any_timeout,
+                        });
                     }
                 },
                 Err(e) => {
@@ -491,6 +499,9 @@ impl FieldSpec {
 ///
 /// 报文形如：`[4 字节大端长度][按 layout 拼接的 ASCII 字段]`。
 /// 这是很多行内老系统的实际形态（不 XML、不 JSON），所以必须能进这套抽象。
+///
+/// 解码要求整段字节是合法 UTF-8，数字字段必须是合法数字，否则返回
+/// [`CodecError::Decode`]，不把乱码或坏字段当成功值。
 #[derive(Debug, Clone)]
 pub struct FixedWidthCodec {
     layout: Vec<FieldSpec>,
@@ -577,27 +588,42 @@ impl Codec for FixedWidthCodec {
             )));
         }
 
+        // 整段必须是合法 UTF-8；lossy 会把主机给的乱码变成替换字符，
+        // 上层因此把坏响应当成合法值。
+        std::str::from_utf8(payload).map_err(|e| {
+            CodecError::Decode(format!(
+                "定长报文含非法 UTF-8（偏移 {}）：{e}",
+                e.valid_up_to()
+            ))
+        })?;
+
         let mut map = serde_json::Map::new();
         let mut offset = 0;
-        for field in &self.layout {
-            // 按字节切：定长布局是字节偏移，切完再用 lossy 转字符串，
-            // 这样即使字段里混入非 ASCII 也不会 panic（会显示替换字符）
+        for (index, field) in self.layout.iter().enumerate() {
+            // 按字节切：定长布局是字节偏移；切在 UTF-8 字符中间也是解码错误。
             let chunk = &payload[offset..offset + field.width];
             offset += field.width;
-            let slice = String::from_utf8_lossy(chunk);
-            let slice = slice.as_ref();
+            let slice = std::str::from_utf8(chunk).map_err(|_| {
+                CodecError::Decode(format!(
+                    "字段 {}（下标 {}）不是合法 UTF-8",
+                    field.name, index
+                ))
+            })?;
             let trimmed = if field.numeric {
-                slice.trim_start_matches('0')
+                slice.trim().trim_start_matches('0')
             } else {
                 slice.trim_end()
             };
             let value = if field.numeric && trimmed.is_empty() {
                 Value::Number(0.into())
             } else if field.numeric {
-                trimmed
-                    .parse::<i64>()
-                    .map(Value::from)
-                    .unwrap_or_else(|_| Value::String(trimmed.to_string()))
+                let number = trimmed.parse::<i64>().map_err(|_| {
+                    CodecError::Decode(format!(
+                        "字段 {}（下标 {}）不是合法数字：{trimmed}",
+                        field.name, index
+                    ))
+                })?;
+                Value::Number(number.into())
             } else {
                 Value::String(trimmed.to_string())
             };
@@ -728,6 +754,12 @@ mod tests {
         }
     }
 
+    fn fixed_wire(payload: &[u8]) -> WireMessage {
+        let mut body = (payload.len() as u32).to_be_bytes().to_vec();
+        body.extend_from_slice(payload);
+        WireMessage::new(BTreeMap::new(), body)
+    }
+
     #[test]
     fn primary_failure_falls_back_to_secondary() {
         let primary = Arc::new(MockTransport::new(
@@ -770,6 +802,28 @@ mod tests {
         assert_eq!(err.attempts, 1, "协议错误不该触发主备切换");
         assert!(err.detail.contains("报文头非法"));
         assert_eq!(secondary.calls(), 0);
+    }
+
+    #[test]
+    fn decode_failure_stops_failover() {
+        let primary = Arc::new(MockTransport::new(
+            "tcp",
+            vec![Ok(WireMessage::new(BTreeMap::new(), b"not json".to_vec()))],
+        ));
+        let secondary = Arc::new(MockTransport::echoing("http"));
+        let router = Router::new(vec![
+            endpoint("acct.core", 0, primary.clone(), Arc::new(JsonCodec)),
+            endpoint("acct.core", 1, secondary.clone(), Arc::new(JsonCodec)),
+        ]);
+
+        let err = router
+            .call(&request("acct.core", "submit_tx", json!({})))
+            .unwrap_err();
+        assert_eq!(err.attempts(), 1, "主机已受理但响应不明，不得切端点");
+        assert!(!err.retryable(), "同一幂等键不能在备端重放");
+        assert!(err.detail().contains("tcp@0"), "必须指出哪个端点解码失败");
+        assert!(err.detail().contains("解码失败"));
+        assert_eq!(secondary.calls(), 0, "备端点不得被调用");
     }
 
     #[test]
@@ -829,6 +883,25 @@ mod tests {
         let back = codec.decode(&wire).unwrap();
         assert_eq!(back.as_json().unwrap()["seq"], json!(42));
         assert_eq!(back.as_json().unwrap()["name"], json!("柜面"));
+    }
+
+    #[test]
+    fn fixed_width_rejects_invalid_numeric_field() {
+        let codec = FixedWidthCodec::new(vec![FieldSpec::numeric("amount", 6)]);
+        let err = codec.decode(&fixed_wire(b"12X456")).unwrap_err();
+        assert!(matches!(err, CodecError::Decode(_)));
+        assert!(err.to_string().contains("amount"), "必须指出字段名");
+        assert!(err.to_string().contains("下标 0"));
+    }
+
+    #[test]
+    fn fixed_width_rejects_invalid_utf8() {
+        let codec = FixedWidthCodec::new(vec![FieldSpec::text("name", 4)]);
+        let err = codec
+            .decode(&fixed_wire(&[b'a', b'b', 0xff, b'c']))
+            .unwrap_err();
+        assert!(matches!(err, CodecError::Decode(_)));
+        assert!(err.to_string().contains("UTF-8"), "不得静默 lossy");
     }
 
     #[test]
