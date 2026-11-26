@@ -209,7 +209,7 @@ const over = fnCounts.filter((x) => x.n > PUB_FN_LIMIT);
 if (over.length) {
   console.log(`  pub fn > ${PUB_FN_LIMIT} 的文件：`);
   for (const x of over) {
-    const was = baseline.pub_fns[x.file] ?? 0;
+    const was = baseline.pub_fns[x.file.replace(/\\/g, "/")] ?? 0;
     console.log(`    ${x.file}: ${x.n}${was ? `（基线 ${was}）` : ""}`);
   }
 }
@@ -223,7 +223,7 @@ if (STRICT) {
   };
   for (const [key, label] of Object.entries(labels)) {
     for (const [file, n] of Object.entries(metrics[key])) {
-      const was = Number(baseline[key][file] ?? 0);
+      const was = Number(baseline[key][file.replace(/\\/g, "/")] ?? 0);
       if (n > was) failures.push(`${label}：${file} 现在 ${n}，基线 ${was}`);
     }
   }
