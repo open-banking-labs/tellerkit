@@ -130,6 +130,8 @@ P0-1 命名门禁 + 本台账 + 评审/待办入库。
 27. P1-3 第 3 步（PR #58）：灰度急停。`update::decide` 已有稳定分桶与比例，新增 `UpdateCandidate.kill_switch`，**排在通道/版本/灰度之前**判定——否则急停只对"恰好有新版本"的网点生效。2 个测试（压过升级候选、压过通道不符）。core 先行 186。
 28. P1-3 剩余写提案（PR #59，changes/020）：诊断包导出命令（目录形式不引压缩依赖；白名单只含 meta/日志/审计尾部计数；严禁 tx.db、ledger.key、卡号、金额明文；脱敏双保险）+ 更新策略下发字段（kill_switch/channel/rollout_percent 进契约，更新器执行 Skip/DownloadOnly/DownloadAndNotify，未登录不评估）。批准后才动 contracts/。
 
+29. 规模评审 P1-11（PR #61，**非项目级项**，只记执行记录）：菜单校验与过滤去掉 O(n²)。`MenuTree::validate` 的「Action 不能当父节点」原先每个 Action 扫全表；`filter_visible` 的访问集是 `Vec<String>` + 线性查重 + 每节点 clone。改成父 code `HashSet` 与访问集 `HashSet<&str>`。新增 `packages/core/tests/menu_scale.rs`（60,020 节点，20 分组 × 1000 页面 × 每页 1 按钮码，比验收口径的 2 万更重）：改前 debug validate 15,025ms / filter 2,538ms，改后 debug 116ms / 48ms、release 16.8ms / 12.9ms。测试只钉复杂度级别（500ms 上限）——精确毫秒在 Windows CI 会抖。刻意取舍：debug 下 validate 变慢（31→116ms），因为旧实现只有"没有 Action 节点"时才碰巧快，真实菜单每页都挂按钮码正好在退化区。
+
 ## 7. 维护方式
 
 - 每完成一个项目级控制点，更新本表“批次”为 ✅，并在源台账勾掉细项；不新开平行台账。
@@ -144,13 +146,13 @@ P0-1 命名门禁 + 本台账 + 评审/待办入库。
 
 链：`#31→main`，`#32→#31`，`#33→#32`，`#34→#33`，`#35→#34`，`#36→#35`，`#37→#36`，`#38→#36`，`#39→#36`，`#40→#39`，`#41→#37`，`#42→#40`，`#43→#42`。
 head 分支依次为 `chore/naming-and-backlog`、`chore/lockfile-reproducible`、`feat/menu-key-injection`、`fix/trajectory-gate-truthful`、`fix/fail-closed-startup`、`fix/session-lock-gate`、`fix/doc-truthfulness`、`agent/p11-audit-chain`、`agent/p07-package-capability`、`agent/p08-write-ahead`、`docs/backlog-progress`、`agent/p09-persistent-state`、`fix/audit-fails-closed`。
-P0-10 追加线性链（接在 #43 之后）：`#44→#43`、`#45→#44`、`#46→#45`、`#47→#46`，head 依次为 `feat/ipc-async`、`feat/session-lock-split`、`feat/tx-singleflight`、`feat/ipc-network-out-of-lock`、`feat/reversal-out-of-lock`、`feat/replay-two-phase-core`、`feat/replay-out-of-lock`、`feat/update-out-of-lock`、`feat/single-instance`、`feat/observability-logging`、`feat/obs-command-trace`、`feat/update-kill-switch`、`docs/p1-3-proposal`（即 #44→#45→#46→#47→#49→#50→#51→#53→#54→#56→#57→#58→#59，必须按编号顺序合）；台账更新单独四条 `docs/p0-10-progress`（#48）、`docs/p0-10-progress-2`（#52）、`docs/p0-10-closeout`（#55）、`docs/p1-3-progress`（#60），只改本文件，可与代码链并行合并，但必须排在 #41 之后。
+P0-10 追加线性链（接在 #43 之后）：`#44→#43`、`#45→#44`、`#46→#45`、`#47→#46`，head 依次为 `feat/ipc-async`、`feat/session-lock-split`、`feat/tx-singleflight`、`feat/ipc-network-out-of-lock`、`feat/reversal-out-of-lock`、`feat/replay-two-phase-core`、`feat/replay-out-of-lock`、`feat/update-out-of-lock`、`feat/single-instance`、`feat/observability-logging`、`feat/obs-command-trace`、`feat/update-kill-switch`、`docs/p1-3-proposal`、`fix/menu-scale`（即 #44→#45→#46→#47→#49→#50→#51→#53→#54→#56→#57→#58→#59→#61，必须按编号顺序合）；台账更新单独五条 `docs/p0-10-progress`（#48）、`docs/p0-10-progress-2`（#52）、`docs/p0-10-closeout`（#55）、`docs/p1-3-progress`（#60）、`docs/p1-11-progress`（#62），只改本文件，可与代码链并行合并，但必须排在 #41 之后。
 合并顺序：线性链先合 #31 再逐层向下；#38/#39 与 #37 是兄弟，合并顺序无关（文件集互斥）；#44–#47 必须按编号顺序合（每层都改上一层文件）。沿用 ready-for-review 惯例，等负责人合并。
 
 ### 8.2 完成度快照
 
 - **批次 2 全部 ✅**（P0-7…P0-11）；P0-10 收口在 #53，口径见 8.3 第 8 条。
-- **批次 3 进行中**：P1-2 ✅（#54）；P1-3 端侧部分 ✅（日志/追踪/急停，见 8.3 之后新增的 P1-3 段），剩诊断包导出与策略下发等 changes/020 批准、差分升级归 P1-1；P1-1 交付链未开始（等证书与发布决策）。
+- **批次 3 进行中**：P1-2 ✅（#54）；P1-3 端侧部分 ✅（日志/追踪/急停），剩诊断包导出与策略下发等 changes/020 批准、差分升级归 P1-1；顺带完成规模评审 P1-11（菜单 O(n²)，非项目级项，见记录 29）；P1-1 交付链未开始（等证书与发布决策）。
 - 批次 4–5 未开始。
 
 ### 8.3 P0-10 进度与剩余（必须分 PR）
