@@ -171,13 +171,22 @@ pub fn check_and_update(host: &dyn MenuSource, store: &MenuStore) -> UpdateOutco
         }
     };
 
-    if local == Some(probe.latest()) {
+    if local.map_or(false, |current| probe.latest() <= current) {
+        let note = match local {
+            Some(current) if probe.latest() < current => {
+                format!(
+                    "本地菜单 v{current} 新于服务端 v{}，无需更新",
+                    probe.latest()
+                )
+            }
+            _ => format!("菜单已是最新（v{}）", probe.latest()),
+        };
         return UpdateOutcome {
             checked: true,
             local,
             latest: Some(probe.latest()),
             updated: false,
-            note: format!("菜单已是最新（v{}）", probe.latest()),
+            note,
         };
     }
 
@@ -194,13 +203,49 @@ pub fn check_and_update(host: &dyn MenuSource, store: &MenuStore) -> UpdateOutco
         }
     };
 
+    // 探测版本只是声明；真正会装进来的包必须自证版本，且不能回退本地。
+    let version = match pack::peek_version(&bytes) {
+        Some(version) => version,
+        None => {
+            return UpdateOutcome {
+                checked: true,
+                local,
+                latest: Some(probe.latest()),
+                updated: false,
+                note: "下载菜单包版本无法解析，已拒绝安装".to_string(),
+            }
+        }
+    };
+    if version != probe.latest() {
+        return UpdateOutcome {
+            checked: true,
+            local,
+            latest: Some(probe.latest()),
+            updated: false,
+            note: format!(
+                "探测版本 v{} 与下载包版本 v{} 不符，已拒绝安装",
+                probe.latest(),
+                version
+            ),
+        };
+    }
+    if local.map_or(false, |current| version < current) {
+        return UpdateOutcome {
+            checked: true,
+            local,
+            latest: Some(probe.latest()),
+            updated: false,
+            note: format!("下载包版本 v{version} 低于本地，已拒绝安装"),
+        };
+    }
+
     match store.install(&bytes) {
         Ok(_) => UpdateOutcome {
             checked: true,
             local,
             latest: Some(probe.latest()),
             updated: true,
-            note: format!("已静默更新到菜单 v{}", probe.latest()),
+            note: format!("已静默更新到菜单 v{version}"),
         },
         Err(err) => UpdateOutcome {
             checked: true,
@@ -215,7 +260,40 @@ pub fn check_and_update(host: &dyn MenuSource, store: &MenuStore) -> UpdateOutco
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::banking::{MenuVersionProbe, RemoteError};
     use crate::mock::{demo_verifying_key, MockHost};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// 探测版本与下载包版本可分别指定的假后台。
+    struct StubHost {
+        probe: MenuVersionProbe,
+        pack: Vec<u8>,
+        downloads: Arc<AtomicUsize>,
+    }
+
+    impl StubHost {
+        fn new(probe_version: u64, pack_version: u64) -> Self {
+            Self {
+                probe: MenuVersionProbe::new(probe_version, 1, 1),
+                pack: MockHost::new(pack_version, false, false)
+                    .download_menu()
+                    .unwrap(),
+                downloads: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+    }
+
+    impl MenuSource for StubHost {
+        fn probe_menu(&self) -> Result<MenuVersionProbe, RemoteError> {
+            Ok(self.probe.clone())
+        }
+
+        fn download_menu(&self) -> Result<Vec<u8>, RemoteError> {
+            self.downloads.fetch_add(1, Ordering::SeqCst);
+            Ok(self.pack.clone())
+        }
+    }
 
     fn store_for(dir: &std::path::Path) -> MenuStore {
         MenuStore::new(dir.join("menu"), demo_verifying_key())
@@ -331,6 +409,42 @@ mod tests {
         assert!(!outcome.updated);
         assert!(outcome.note.contains("版本探测不可用"));
         assert_eq!(store.current_version(), Some(7), "断网不得破坏本地包");
+    }
+
+    #[test]
+    fn download_with_mismatched_version_is_not_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_for(dir.path());
+        store
+            .install(&MockHost::new(7, false, false).download_menu().unwrap())
+            .unwrap();
+
+        // 探测说 v9，下发的却是签名有效的旧包 v7：验签通过也不代表版本对
+        let host = StubHost::new(9, 7);
+        let outcome = check_and_update(&host, &store);
+        assert!(outcome.checked);
+        assert!(!outcome.updated);
+        assert_eq!(store.current_version(), Some(7));
+        assert_eq!(host.downloads.load(Ordering::SeqCst), 1);
+        assert!(outcome.note.contains("v9"), "实际：{}", outcome.note);
+        assert!(outcome.note.contains("v7"), "实际：{}", outcome.note);
+        assert!(outcome.note.contains("拒绝安装"), "实际：{}", outcome.note);
+    }
+
+    #[test]
+    fn older_server_version_does_not_download_or_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_for(dir.path());
+        store
+            .install(&MockHost::new(7, false, false).download_menu().unwrap())
+            .unwrap();
+
+        let host = StubHost::new(5, 5);
+        let outcome = check_and_update(&host, &store);
+        assert!(!outcome.updated);
+        assert_eq!(host.downloads.load(Ordering::SeqCst), 0, "旧包不应被下载");
+        assert!(outcome.note.contains("无需更新"), "实际：{}", outcome.note);
+        assert_eq!(store.current_version(), Some(7));
     }
 
     #[test]
