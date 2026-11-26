@@ -172,16 +172,16 @@ fn serve_op(op: &str, request: &Value, config: &FakeBankConfig) -> Value {
                 .pointer("/payload/perm_version")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(1);
-            let snapshot = PermSnapshot {
-                user_id: format!("U-{role}"),
-                teller_no: "T0231".to_string(),
-                outlet_code: "01023".to_string(),
+            let snapshot = PermSnapshot::new(
+                &format!("U-{role}"),
+                "T0231",
+                "01023",
                 perm_version,
-                menu_codes: vec!["account".into(), "account.deposit".into()],
-                action_codes: vec!["account.deposit.print".into()],
-                shortcuts: Default::default(),
-                role_label: role.to_string(),
-            };
+                vec!["account".into(), "account.deposit".into()],
+                vec!["account.deposit.print".into()],
+                Default::default(),
+                role,
+            );
             serde_json::to_value(snapshot).unwrap_or(Value::Null)
         }
         "reverse" => {

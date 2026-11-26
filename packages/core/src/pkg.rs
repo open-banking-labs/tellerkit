@@ -863,23 +863,20 @@ mod tests {
         merge_packages(&mut tree, &[pkg("biz.demo", &[])]);
 
         // 服务端没授予该 code：包声明了也没用
-        let snapshot = PermSnapshot {
-            user_id: "u".into(),
-            teller_no: "T".into(),
-            outlet_code: "O".into(),
-            perm_version: 1,
-            menu_codes: vec![],
-            action_codes: vec![],
-            shortcuts: Map::new(),
-            role_label: "柜员".into(),
-        };
+        let snapshot = PermSnapshot::new("u", "T", "O", 1, vec![], vec![], Map::new(), "柜员");
         assert!(filter_visible(&tree, &snapshot).is_empty());
 
         // 服务端授予后才出现
-        let granted = PermSnapshot {
-            menu_codes: vec!["biz.demo.home".into()],
-            ..snapshot
-        };
+        let granted = PermSnapshot::new(
+            "u",
+            "T",
+            "O",
+            1,
+            vec!["biz.demo.home".into()],
+            vec![],
+            Map::new(),
+            "柜员",
+        );
         assert_eq!(filter_visible(&tree, &granted).len(), 1);
     }
 

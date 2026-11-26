@@ -335,7 +335,7 @@ mod tests {
         let banking = RoutedBanking::new(router);
 
         assert_eq!(banking.probe_menu().unwrap().latest(), 9);
-        assert_eq!(banking.login("teller", 901).unwrap().teller_no, "T01");
+        assert_eq!(banking.login("teller", 901).unwrap().teller_no(), "T01");
 
         let mut req = TxRequest::new("account.deposit", "k1");
         req.set_amount_cents(100);

@@ -49,8 +49,8 @@ fn full_chain_reaches_a_real_backend_over_tcp() {
     assert_eq!(probe.latest(), 11);
 
     let snapshot = banking.login("teller", 1101).expect("登录");
-    assert_eq!(snapshot.teller_no, "T0231");
-    assert_eq!(snapshot.perm_version, 1101);
+    assert_eq!(snapshot.teller_no(), "T0231");
+    assert_eq!(snapshot.perm_version(), 1101);
 
     let mut req = TxRequest::new("account.deposit", "key-001");
     req.set_amount_cents(100_000);

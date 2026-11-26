@@ -208,21 +208,20 @@ impl DemoRole {
     }
 
     pub fn snapshot(self, perm_version: u64) -> PermSnapshot {
-        PermSnapshot {
-            user_id: format!("u-{}", self.id()),
-            teller_no: match self {
+        PermSnapshot::new(
+            &format!("u-{}", self.id()),
+            match self {
                 DemoRole::Teller => "T0231",
                 DemoRole::Supervisor => "T0101",
                 DemoRole::Lobby => "T0450",
-            }
-            .to_string(),
-            outlet_code: "01023".to_string(),
+            },
+            "01023",
             perm_version,
-            menu_codes: self.menu_codes().into_iter().map(String::from).collect(),
-            action_codes: self.action_codes().into_iter().map(String::from).collect(),
-            shortcuts: self.shortcuts(),
-            role_label: self.label().to_string(),
-        }
+            self.menu_codes().into_iter().map(String::from).collect(),
+            self.action_codes().into_iter().map(String::from).collect(),
+            self.shortcuts(),
+            self.label(),
+        )
     }
 }
 

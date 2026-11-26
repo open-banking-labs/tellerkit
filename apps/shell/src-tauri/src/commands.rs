@@ -34,79 +34,79 @@ fn lock<'a>(
 #[ts(export)]
 pub struct LoadReport {
     #[ts(type = "number")]
-    pub menu_version: u64,
+    menu_version: u64,
     /// `local` = 本地文件命中；`network` = 回退服务端拉取。
-    pub source: String,
-    pub menu_nodes: usize,
-    pub pack_bytes: usize,
+    source: String,
+    menu_nodes: usize,
+    pack_bytes: usize,
     /// 读文件 + 验签 + 反序列化耗时（毫秒）。
-    pub load_ms: f64,
+    load_ms: f64,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct BootInfo {
-    pub shell_version: String,
-    pub pubkey_hex: String,
-    pub appdata_dir: String,
-    pub offline: bool,
+    shell_version: String,
+    pubkey_hex: String,
+    appdata_dir: String,
+    offline: bool,
     #[ts(type = "Array<number>")]
-    pub local_versions: Vec<u64>,
-    pub load: LoadReport,
-    pub notes: Vec<String>,
+    local_versions: Vec<u64>,
+    load: LoadReport,
+    notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct LoginResult {
-    pub snapshot: PermSnapshot,
-    pub menu: Vec<MenuView>,
-    pub filter_ms: f64,
+    snapshot: PermSnapshot,
+    menu: Vec<MenuView>,
+    filter_ms: f64,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct UpdateReport {
-    pub checked: bool,
+    checked: bool,
     #[ts(type = "number")]
-    pub local: u64,
+    local: u64,
     #[ts(type = "number")]
-    pub latest: u64,
-    pub updated: bool,
-    pub note: String,
+    latest: u64,
+    updated: bool,
+    note: String,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct ReloadReport {
     #[ts(type = "number")]
-    pub menu_version: u64,
-    pub source: String,
-    pub recovered: bool,
-    pub verify_failed: bool,
-    pub note: String,
-    pub menu: Option<Vec<MenuView>>,
+    menu_version: u64,
+    source: String,
+    recovered: bool,
+    verify_failed: bool,
+    note: String,
+    menu: Option<Vec<MenuView>>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct DevState {
-    pub offline: bool,
-    pub tampered: bool,
+    offline: bool,
+    tampered: bool,
     #[ts(type = "number")]
-    pub server_version: u64,
+    server_version: u64,
     #[ts(type = "Array<number>")]
-    pub local_versions: Vec<u64>,
+    local_versions: Vec<u64>,
 }
 
 /// 会话状态。锁屏是授权状态的一部分，只能由 Rust 持有。
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct SessionState {
-    pub locked: bool,
-    pub reason: Option<String>,
+    locked: bool,
+    reason: Option<String>,
     #[ts(type = "number")]
-    pub idle_secs: u64,
+    idle_secs: u64,
 }
 
 impl From<crate::app::SessionView> for SessionState {
@@ -123,9 +123,9 @@ impl From<crate::app::SessionView> for SessionState {
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct TxException {
-    pub key: String,
+    key: String,
     /// `marked_for_reversal` | `marked_for_roll_forward`
-    pub kind: String,
+    kind: String,
 }
 
 #[tauri::command]
@@ -156,31 +156,31 @@ pub fn request_reversal(
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct StatusRow {
-    pub status: String,
+    status: String,
     #[ts(type = "number")]
-    pub count: i64,
+    count: i64,
     #[ts(type = "number")]
-    pub amount_cents: i64,
+    amount_cents: i64,
 }
 
 /// 最近一笔交易（对账明细）。
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct RecentTx {
-    pub key: String,
-    pub tx_code: String,
+    key: String,
+    tx_code: String,
     #[ts(type = "number")]
-    pub amount_cents: i64,
-    pub status: String,
-    pub reference: Option<String>,
+    amount_cents: i64,
+    status: String,
+    reference: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct Reconciliation {
-    pub since: String,
-    pub summary: Vec<StatusRow>,
-    pub recent: Vec<RecentTx>,
+    since: String,
+    summary: Vec<StatusRow>,
+    recent: Vec<RecentTx>,
 }
 
 /// 日终对账：只读本地账本，不打主机。

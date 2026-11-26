@@ -250,11 +250,11 @@ impl<'a> ShellApp<'a> {
             self.clock.now_secs(),
         ));
         self.audit(
-            &snapshot.teller_no,
+            snapshot.teller_no(),
             "login",
-            &snapshot.outlet_code,
+            snapshot.outlet_code(),
             "ok",
-            &format!("角色 {}", snapshot.role_label),
+            &format!("角色 {}", snapshot.role_label()),
         );
 
         Ok(LoginOutcome {
@@ -266,7 +266,7 @@ impl<'a> ShellApp<'a> {
 
     pub fn logout(&mut self) -> Result<(), String> {
         if let Some(snapshot) = self.state.snapshot.clone() {
-            self.audit(&snapshot.teller_no, "logout", "", "ok", "");
+            self.audit(snapshot.teller_no(), "logout", "", "ok", "");
         }
         self.state.session = None;
         self.state.clear_session();
@@ -661,7 +661,7 @@ impl<'a> ShellApp<'a> {
         self.state
             .snapshot
             .as_ref()
-            .map(|s| s.teller_no.clone())
+            .map(|s| s.teller_no().to_string())
             .unwrap_or_else(|| "unknown".into())
     }
 }

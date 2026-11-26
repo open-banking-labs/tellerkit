@@ -19,27 +19,27 @@ use ts_rs::TS;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct MenuView {
-    pub code: String,
-    pub title: String,
+    code: String,
+    title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub title_key: Option<String>,
+    title_key: Option<String>,
     #[serde(rename = "type")]
-    pub node_type: NodeType,
+    node_type: NodeType,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub route: Option<String>,
+    route: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub icon: Option<String>,
-    pub sort: i32,
+    icon: Option<String>,
+    sort: i32,
     /// `shell` 或 `pkg:<id>`。前端据此决定用主壳页面还是加载业务包模块。
-    pub source: String,
+    source: String,
     /// 自身是否被授予权限。`false` 表示它只是"容器"（因为子孙有权才留下），
     /// 前端应渲染为不可点击的分组标题。
-    pub direct: bool,
+    direct: bool,
     /// 过滤后的按钮级权限码。
     #[serde(default)]
-    pub actions: Vec<String>,
+    actions: Vec<String>,
     #[serde(default)]
-    pub children: Vec<MenuView>,
+    children: Vec<MenuView>,
 }
 
 impl MenuView {
@@ -148,16 +148,16 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn snapshot(menus: &[&str], actions: &[&str]) -> PermSnapshot {
-        PermSnapshot {
-            user_id: "u".into(),
-            teller_no: "T1".into(),
-            outlet_code: "O1".into(),
-            perm_version: 1,
-            menu_codes: menus.iter().map(|s| s.to_string()).collect(),
-            action_codes: actions.iter().map(|s| s.to_string()).collect(),
-            shortcuts: BTreeMap::new(),
-            role_label: "test".into(),
-        }
+        PermSnapshot::new(
+            "u",
+            "T1",
+            "O1",
+            1,
+            menus.iter().map(|s| s.to_string()).collect(),
+            actions.iter().map(|s| s.to_string()).collect(),
+            BTreeMap::new(),
+            "test",
+        )
     }
 
     fn sample_tree() -> MenuTree {
