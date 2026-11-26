@@ -8,9 +8,11 @@
     "apps/shell/src-tauri/src/commands.rs": 23,
     "packages/core/src/device.rs": 20,
     "apps/shell/src-tauri/src/app.rs": 19,
-    "packages/core/src/tx.rs": 16,
+    "packages/core/src/tx.rs": 17,
     "packages/core/src/mock.rs": 15,
-    "packages/core/src/remote.rs": 15
+    "packages/core/src/remote.rs": 15,
+    "packages/core/src/replay.rs": 15,
+    "packages/core/src/reversal.rs": 15
   },
   "pub_mods": {
     "packages/core/src/lib.rs": 11,
