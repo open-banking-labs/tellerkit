@@ -206,8 +206,7 @@ fn serve_op(op: &str, request: &Value, config: &FakeBankConfig) -> Value {
     match op {
         "probe_menu" => json!({
             "latest": config.menu_version(),
-            "shell_compat_min": 1,
-            "shell_compat_max": 1
+            "shell_compat": { "min": 1, "max": 1 }
         }),
         "login" => {
             let role = request

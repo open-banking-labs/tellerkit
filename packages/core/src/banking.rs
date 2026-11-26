@@ -13,20 +13,62 @@ use crate::perm::PermSnapshot;
 use crate::remote::{Body, Request, RouteError, Router};
 use crate::tx::{HostError, TxHost, TxRequest};
 
-/// 菜单版本探测结果。体积必须很小：它是启动后的第一个后台请求。
+/// 契约响应里的 shell 兼容范围（contracts/remote-api.md）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ShellCompat {
+    min: u16,
+    max: u16,
+}
+
+/// 菜单版本探测结果。体积必须很小：它是启动后的第一个后台请求。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MenuVersionProbe {
     latest: u64,
-    shell_compat_min: u16,
-    shell_compat_max: u16,
+    shell_compat: ShellCompat,
+}
+
+/// 契约形状是嵌套 `shell_compat`；旧后台的扁平字段仍可读。
+impl<'de> serde::Deserialize<'de> for MenuVersionProbe {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            latest: u64,
+            #[serde(default)]
+            shell_compat: Option<ShellCompat>,
+            #[serde(default, alias = "shell_compat_min")]
+            legacy_min: Option<u16>,
+            #[serde(default, alias = "shell_compat_max")]
+            legacy_max: Option<u16>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let shell_compat = match (wire.shell_compat, wire.legacy_min, wire.legacy_max) {
+            (Some(compat), _, _) => compat,
+            (None, Some(min), Some(max)) => ShellCompat { min, max },
+            _ => {
+                return Err(serde::de::Error::custom(
+                    "探测响应缺少 shell_compat 兼容范围",
+                ))
+            }
+        };
+        Ok(Self {
+            latest: wire.latest,
+            shell_compat,
+        })
+    }
 }
 
 impl MenuVersionProbe {
     pub fn new(latest: u64, shell_compat_min: u16, shell_compat_max: u16) -> Self {
         Self {
             latest,
-            shell_compat_min,
-            shell_compat_max,
+            shell_compat: ShellCompat {
+                min: shell_compat_min,
+                max: shell_compat_max,
+            },
         }
     }
 
@@ -35,11 +77,11 @@ impl MenuVersionProbe {
     }
 
     pub fn shell_compat_min(&self) -> u16 {
-        self.shell_compat_min
+        self.shell_compat.min
     }
 
     pub fn shell_compat_max(&self) -> u16 {
-        self.shell_compat_max
+        self.shell_compat.max
     }
 }
 
@@ -371,11 +413,29 @@ mod tests {
     }
 
     #[test]
+    fn probe_parses_contract_shape_and_legacy_flat_shape() {
+        let contract: MenuVersionProbe =
+            serde_json::from_str(r#"{"latest":7,"shell_compat":{"min":1,"max":3}}"#).unwrap();
+        assert_eq!(contract.latest(), 7);
+        assert_eq!(contract.shell_compat_min(), 1);
+        assert_eq!(contract.shell_compat_max(), 3);
+
+        let legacy: MenuVersionProbe =
+            serde_json::from_str(r#"{"latest":7,"shell_compat_min":1,"shell_compat_max":3}"#)
+                .unwrap();
+        assert_eq!(legacy, contract);
+        assert_eq!(
+            serde_json::to_value(&contract).unwrap(),
+            serde_json::json!({"latest":7,"shell_compat":{"min":1,"max":3}})
+        );
+    }
+
+    #[test]
     fn routes_each_capability_to_its_own_service() {
         let menu = Arc::new(MockTransport::new(
             "menu",
             vec![Ok(reply(serde_json::json!({
-                "payload": { "latest": 9, "shell_compat_min": 1, "shell_compat_max": 1 }
+                "payload": { "latest": 9, "shell_compat": { "min": 1, "max": 1 } }
             })))],
         ));
         let auth = Arc::new(MockTransport::new(
