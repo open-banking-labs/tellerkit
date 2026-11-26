@@ -12,7 +12,7 @@ use crate::menu::pack::PackError;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 pub const PKG_MAGIC: &[u8; 8] = b"MTKPKG01";
 pub const PKG_FORMAT_VERSION: u16 = 1;
@@ -133,6 +133,9 @@ pub struct TxMeta {
     offline_capable: bool,
     #[serde(default)]
     devices: Vec<String>,
+    /// 该交易允许使用的套打模板名。清单没写的模板一律不许打印。
+    #[serde(default)]
+    templates: Vec<String>,
 }
 
 impl TxMeta {
@@ -142,7 +145,14 @@ impl TxMeta {
             idempotency: idempotency.into(),
             offline_capable,
             devices,
+            templates: Vec::new(),
         }
+    }
+
+    /// 声明本交易可用的模板（构建包时由签名清单带入）。
+    pub fn with_templates(mut self, templates: Vec<String>) -> Self {
+        self.templates = templates;
+        self
     }
 
     pub fn code(&self) -> &str {
@@ -159,6 +169,64 @@ impl TxMeta {
 
     pub fn devices(&self) -> &[String] {
         &self.devices
+    }
+
+    pub fn templates(&self) -> &[String] {
+        &self.templates
+    }
+}
+
+/// 包清单允许宿主代为执行的命令与参数集合。
+///
+/// 这是**签名清单的投影**，不是运行时可配置对象：包代码拿不到它，
+/// 只能由宿主在加载包时从 `BizPackage` 推导。默认拒绝未声明的项。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PackageCapabilities {
+    #[serde(rename = "methods")]
+    methods: BTreeSet<String>,
+    #[serde(rename = "txCodes")]
+    tx_codes: BTreeSet<String>,
+    #[serde(rename = "templates")]
+    templates: BTreeSet<String>,
+}
+
+impl PackageCapabilities {
+    /// log 只在主壳控制台输出，不动账、不动设备；其余能力必须由清单项撑起来。
+    fn derive(package: &BizPackage) -> Self {
+        let mut methods = BTreeSet::from(["log".to_string()]);
+        let mut tx_codes = BTreeSet::new();
+        let mut templates = BTreeSet::new();
+        for tx in &package.transactions {
+            tx_codes.insert(tx.code().to_string());
+            templates.extend(tx.templates().iter().cloned());
+        }
+        if !tx_codes.is_empty() {
+            methods.insert("submit".to_string());
+        }
+        if !templates.is_empty() {
+            methods.insert("print".to_string());
+        }
+        Self {
+            methods,
+            tx_codes,
+            templates,
+        }
+    }
+
+    pub fn methods(&self) -> &BTreeSet<String> {
+        &self.methods
+    }
+
+    pub fn allows_method(&self, method: &str) -> bool {
+        self.methods.contains(method)
+    }
+
+    pub fn allows_tx_code(&self, code: &str) -> bool {
+        self.tx_codes.contains(code)
+    }
+
+    pub fn allows_template(&self, template: &str) -> bool {
+        self.templates.contains(template)
     }
 }
 
@@ -357,6 +425,20 @@ impl BizPackage {
     /// 依赖包 ID 列表（副本）。
     pub fn deps(&self) -> Vec<String> {
         self.manifest.deps.clone()
+    }
+
+    /// 交易码集合（清单原文），供诊断与审计使用。
+    pub fn transaction_codes(&self) -> Vec<String> {
+        self.transactions
+            .iter()
+            .map(|tx| tx.code().to_string())
+            .collect()
+    }
+
+    /// 从签名清单推导宿主能力：方法、交易码、模板。
+    /// 校验失败时调用方必须硬拒绝，不能回退到"先放行再说"。
+    pub fn capabilities(&self) -> PackageCapabilities {
+        PackageCapabilities::derive(self)
     }
 
     /// 打包成带签名的 `.bizpkg` 字节流。
@@ -953,5 +1035,34 @@ mod tests {
         let depth = dependency_depth(&plan.ordered);
         assert_eq!(depth["biz.a"], 0);
         assert_eq!(depth["biz.b"], 1);
+    }
+
+    #[test]
+    fn capabilities_are_derived_from_signed_manifest() {
+        let mut package = pkg("biz.demo", &[]);
+        package.transactions = vec![TxMeta::new("biz.demo.hello", "client-uuid", false, vec![])
+            .with_templates(vec!["demo.receipt".into()])];
+
+        let caps = package.capabilities();
+        assert!(caps.allows_method("submit"));
+        assert!(caps.allows_method("print"));
+        assert!(caps.allows_method("log"));
+        assert!(caps.allows_tx_code("biz.demo.hello"));
+        assert!(caps.allows_template("demo.receipt"));
+        assert!(!caps.allows_tx_code("account.withdraw"));
+        assert!(!caps.allows_template("foreign.receipt"));
+    }
+
+    #[test]
+    fn undeclared_capabilities_are_default_denied() {
+        let mut package = pkg("biz.demo", &[]);
+        package.transactions = vec![TxMeta::new("biz.demo.hello", "client-uuid", false, vec![])];
+        let caps = package.capabilities();
+
+        // 没声明模板就不该暴露打印方法；不能靠调用方补一个模板名上来。
+        assert!(!caps.allows_method("print"));
+        assert!(!caps.allows_template("voucher"));
+        assert!(caps.allows_method("submit"));
+        assert!(caps.allows_method("log"));
     }
 }

@@ -6,6 +6,7 @@ defineProps<{
   boot: BootInfo | null;
   busy: boolean;
   error: string;
+  loginError: string;
 }>();
 
 const emit = defineEmits<{ (e: "select", roleId: string): void }>();
@@ -47,6 +48,7 @@ function sourceLabel(source?: string): string {
       </div>
 
       <div v-if="error" class="error-box">{{ error }}</div>
+      <div v-if="loginError" class="error-box" role="alert">{{ loginError }}</div>
 
       <div class="roles">
         <button

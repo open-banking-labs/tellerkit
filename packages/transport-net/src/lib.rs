@@ -317,13 +317,9 @@ fn parse_http_response(raw: &[u8]) -> Result<WireMessage, TransportError> {
         .ok_or_else(|| TransportError::Protocol(format!("状态行非法：{status_line}")))?;
 
     if !(200..300).contains(&status) {
-        return Err(TransportError::Protocol(format!(
-            "HTTP {status}：{}",
-            String::from_utf8_lossy(body)
-                .chars()
-                .take(120)
-                .collect::<String>()
-        )));
+        // 保留状态码：503 可重试、504 状态不明，折成 Protocol 会让上层误判成拒绝。
+        let body = String::from_utf8_lossy(body).chars().take(120).collect();
+        return Err(TransportError::Status { code: status, body });
     }
 
     let mut head = std::collections::BTreeMap::new();
@@ -550,9 +546,45 @@ mod tests {
                 Duration::from_secs(5),
             )
             .unwrap_err();
+        assert!(
+            matches!(&err, TransportError::Status { code, body } if *code == 422 && body.contains("TX_REJECTED")),
+            "实际：{err:?}"
+        );
         assert!(err.to_string().contains("422"));
         assert!(!err.retryable(), "4xx 不该触发主备切换");
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn http_transport_keeps_5xx_status_for_the_router() {
+        for code in [503, 504] {
+            let (port, handle) = serve_once(move |mut stream| {
+                let _ = read_http_request(&mut stream);
+                let reply = format!("{{\"code\":\"HTTP_{code}\"}}");
+                let head = format!(
+                    "HTTP/1.1 {code} Upstream\r\nContent-Length: {}\r\n\r\n",
+                    reply.len()
+                );
+                stream.write_all(head.as_bytes()).unwrap();
+                stream.write_all(reply.as_bytes()).unwrap();
+            });
+
+            let err = HttpTransport::default()
+                .exchange(
+                    &EndpointAddr::Http {
+                        base_url: format!("http://127.0.0.1:{port}"),
+                    },
+                    &WireMessage::new(Default::default(), b"{}".to_vec()),
+                    Duration::from_secs(5),
+                )
+                .unwrap_err();
+            assert!(
+                matches!(&err, TransportError::Status { code: got, .. } if *got == code),
+                "实际：{err:?}"
+            );
+            assert!(err.retryable(), "5xx 应可重试");
+            handle.join().unwrap();
+        }
     }
 
     #[test]
