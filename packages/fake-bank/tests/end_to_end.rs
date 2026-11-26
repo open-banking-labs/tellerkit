@@ -51,7 +51,7 @@ fn full_chain_reaches_a_real_backend_over_tcp() {
     assert_eq!(snapshot.perm_version, 1101);
 
     let mut req = TxRequest::new("account.deposit", "key-001");
-    req.amount_cents = 100_000;
+    req.set_amount_cents(100_000);
     assert_eq!(banking.submit(&req).expect("提交"), "FAKE-key-001");
 
     // 二进制下载走的是另一个服务与另一个编解码
@@ -75,7 +75,7 @@ fn business_rejection_surfaces_as_rejected_not_unavailable() {
     let banking = RoutedBanking::new(router_for(&bank));
 
     let mut req = TxRequest::new("account.deposit", "key-002");
-    req.amount_cents = 1;
+    req.set_amount_cents(1);
     let err = banking.submit(&req).unwrap_err();
     let text = err.to_string();
     assert!(text.contains("余额不足"), "实际：{text}");
@@ -158,7 +158,7 @@ fn same_idempotency_key_is_charged_once() {
     let banking = RoutedBanking::new(router_for(&bank)).with_idempotency(true);
 
     let mut req = TxRequest::new("account.deposit", "dup-key-1");
-    req.amount_cents = 50_000;
+    req.set_amount_cents(50_000);
 
     let first = banking.submit(&req).expect("首次提交");
     let second = banking.submit(&req).expect("重试");

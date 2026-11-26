@@ -218,12 +218,12 @@ impl TxHost for MockRemote {
         }
         // 同键复用流水号：这就是服务端该有的幂等行为
         if let Ok(mut map) = self.accepted.lock() {
-            if let Some(existing) = map.get(&request.idempotency_key) {
+            if let Some(existing) = map.get(request.idempotency_key()) {
                 return Ok(existing.clone());
             }
             let n = self.tx_seq.fetch_add(1, Ordering::SeqCst) + 1;
             let reference = format!("TX{n:08}");
-            map.insert(request.idempotency_key.clone(), reference.clone());
+            map.insert(request.idempotency_key().to_string(), reference.clone());
             return Ok(reference);
         }
         Err(HostError::Unavailable)

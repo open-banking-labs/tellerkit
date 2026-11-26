@@ -296,7 +296,7 @@ mod tests {
         assert_eq!(banking.login("teller", 901).unwrap().teller_no, "T01");
 
         let mut req = TxRequest::new("account.deposit", "k1");
-        req.amount_cents = 100;
+        req.set_amount_cents(100);
         assert_eq!(banking.submit(&req).unwrap(), "TX42");
 
         // 三个能力确实打到了三个不同的服务

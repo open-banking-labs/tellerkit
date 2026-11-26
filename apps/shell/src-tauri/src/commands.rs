@@ -329,13 +329,12 @@ pub fn submit_transaction(
     state: State<'_, Mutex<AppState>>,
 ) -> Result<TxResult, String> {
     let mut guard = lock(&state)?;
-    ShellApp::new(&mut guard).submit_transaction(TxRequest {
-        tx_code,
-        idempotency_key,
-        amount_cents,
-        elements,
-        offline_capable,
-    })
+    ShellApp::new(&mut guard).submit_transaction(
+        TxRequest::new(&tx_code, &idempotency_key)
+            .amount(amount_cents)
+            .with_elements(elements)
+            .offline(offline_capable),
+    )
 }
 
 #[tauri::command]

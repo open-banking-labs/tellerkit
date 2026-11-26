@@ -90,12 +90,21 @@ for (const f of files) {
 }
 leaks.sort((a, b) => b.hits - a.hits);
 
-// —— 4. 单文件 pub fn ——
+// —— 4. 单文件 pub fn（排除与字段同名的 getter / set_<field>，它们不算接口宽度） ——
+const fieldsByFile = new Map();
+for (const s of structs.values()) {
+  if (!fieldsByFile.has(s.file)) fieldsByFile.set(s.file, new Set());
+  for (const f of s.fields) fieldsByFile.get(s.file).add(f.name);
+}
 const fnCounts = files
-  .map((f) => ({
-    file: f.rel,
-    n: (stripTest(f.text).match(/^\s*pub (?:async )?fn \w+/gm) || []).length,
-  }))
+  .map((f) => {
+    const fieldNames = fieldsByFile.get(f.rel) || new Set();
+    const fns = [...stripTest(f.text).matchAll(/^\s*pub (?:async )?fn (\w+)/gm)].map((m) => m[1]);
+    const accessors = fns.filter(
+      (n) => fieldNames.has(n) || (n.startsWith("set_") && fieldNames.has(n.slice(4))),
+    );
+    return { file: f.rel, n: fns.length - accessors.length };
+  })
   .filter((x) => x.n > 0)
   .sort((a, b) => b.n - a.n);
 

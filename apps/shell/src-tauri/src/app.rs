@@ -112,11 +112,7 @@ struct DemoSupervisor;
 
 impl Authorizer for DemoSupervisor {
     fn authorize(&self, _request: &ReversalRequest) -> Authorization {
-        Authorization {
-            approver: "T0101".to_string(),
-            granted: true,
-            reason: "演示：主管授权".to_string(),
-        }
+        Authorization::new("T0101", true, "演示：主管授权")
     }
 }
 
@@ -323,7 +319,7 @@ impl<'a> ShellApp<'a> {
 
     /// 状态不明的交易：标记待冲正。这是超时后的**唯一**正确处置。
     fn mark_if_uncertain(&mut self, key: &str, result: &TxResult) {
-        if result.status == TxStatus::MarkedForReversal {
+        if result.status() == TxStatus::MarkedForReversal {
             self.state
                 .reversal
                 .mark(key, ExceptionKind::MarkedForReversal);
@@ -351,13 +347,7 @@ impl<'a> ShellApp<'a> {
     pub fn request_reversal(&mut self, key: &str, reason: &str) -> Result<String, String> {
         self.require_unlocked("reversal")?;
         let actor = self.actor();
-        let request = ReversalRequest {
-            idempotency_key: key.to_string(),
-            initiator: actor.clone(),
-            tx_code: String::new(),
-            amount_cents: 0,
-            reason: reason.to_string(),
-        };
+        let request = ReversalRequest::new(key, &actor, "", 0, reason);
 
         // 1. 授权（当前是演示主管；接 IAM 后换成真实授权端口）
         self.state
@@ -385,9 +375,9 @@ impl<'a> ShellApp<'a> {
         self.require_unlocked("submit_tx")?;
         // 契约 lifecycle.md 不变量 7：主机没声明幂等，就不许离线挂起。
         // 挂起意味着"以后一定会重发"，而重发只有服务端按幂等键去重才不会重复入账。
-        if request.offline_capable && !self.remote.supports_idempotency() {
+        if request.offline_capable() && !self.remote.supports_idempotency() {
             let actor = self.actor();
-            let code = request.tx_code.clone();
+            let code = request.tx_code().to_string();
             self.audit(
                 &actor,
                 "submit_tx",
@@ -399,20 +389,20 @@ impl<'a> ShellApp<'a> {
                 "该主机未声明幂等支持，不能离线挂起交易（请联系管理员确认主机契约）".to_string(),
             );
         }
-        let amount_cents = request.amount_cents;
-        let code = request.tx_code.clone();
-        let key = request.idempotency_key.clone();
+        let amount_cents = request.amount_cents();
+        let code = request.tx_code().to_string();
+        let key = request.idempotency_key().to_string();
         let actor = self.actor();
 
         let result = self.state.tx.submit(self.remote.as_ref(), request);
         self.mark_if_uncertain(&key, &result);
 
-        let detail = format!("status={:?} amount_cents={amount_cents}", result.status);
+        let detail = format!("status={:?} amount_cents={amount_cents}", result.status());
         self.audit(
             &actor,
             "submit_tx",
             &code,
-            if result.status == TxStatus::Committed {
+            if result.status() == TxStatus::Committed {
                 "ok"
             } else {
                 "failed"
@@ -438,31 +428,34 @@ impl<'a> ShellApp<'a> {
         if let Some(err) = journal_error {
             self.audit(&actor, "replay", "tx_queue", "failed", &err);
         }
-        if run.attempted == 0 && run.still_pending == 0 {
+        if run.attempted() == 0 && run.still_pending() == 0 {
             return Ok("没有待重放的交易".to_string());
         }
-        if run.attempted == 0 {
-            return Ok(format!("还有 {} 笔挂起，均未到重试时间", run.still_pending));
+        if run.attempted() == 0 {
+            return Ok(format!(
+                "还有 {} 笔挂起，均未到重试时间",
+                run.still_pending()
+            ));
         }
 
         let detail = format!(
             "attempted={} committed={} pending={} gave_up={}",
-            run.attempted,
-            run.committed,
-            run.still_pending,
-            run.gave_up.len()
+            run.attempted(),
+            run.committed(),
+            run.still_pending(),
+            run.gave_up().len()
         );
         self.audit(&actor, "replay", "tx_queue", "ok", &detail);
 
         Ok(format!(
             "重放 {} 笔：成功 {} 笔，仍挂起 {} 笔{}",
-            run.attempted,
-            run.committed,
-            run.still_pending,
-            if run.gave_up.is_empty() {
+            run.attempted(),
+            run.committed(),
+            run.still_pending(),
+            if run.gave_up().is_empty() {
                 String::new()
             } else {
-                format!("，{} 笔已放弃自动重试，需人工处理", run.gave_up.len())
+                format!("，{} 笔已放弃自动重试，需人工处理", run.gave_up().len())
             }
         ))
     }
@@ -747,7 +740,7 @@ mod tests {
         ));
 
         let mut req = TxRequest::new("account.deposit", "k-offline");
-        req.offline_capable = true;
+        req.set_offline_capable(true);
         let err = ShellApp::new(&mut state)
             .submit_transaction(req)
             .unwrap_err();
@@ -756,15 +749,15 @@ mod tests {
         // 在线模式不走这条拦截：会一路到端点，端点不存在则是"主机拒绝"（交易结论），
         // 不是 Err——状态机把失败表达成 TxResult，这一点不能被测试写反。
         let mut online = TxRequest::new("account.deposit", "k-online");
-        online.offline_capable = false;
+        online.set_offline_capable(false);
         let result = ShellApp::new(&mut state)
             .submit_transaction(online)
             .expect("在线模式不应被幂等规则拦下");
-        assert_eq!(result.status, TxStatus::Rejected);
+        assert_eq!(result.status(), TxStatus::Rejected);
         assert!(
-            result.message.contains("没有为该服务登记任何端点"),
+            result.message().contains("没有为该服务登记任何端点"),
             "实际：{}",
-            result.message
+            result.message()
         );
     }
 
@@ -847,6 +840,6 @@ mod tests {
         let result = ShellApp::new(&mut state)
             .submit_transaction(TxRequest::new("account.deposit", "k-ok"))
             .expect("解锁后应放行到主机");
-        assert_eq!(result.status, TxStatus::Committed);
+        assert_eq!(result.status(), TxStatus::Committed);
     }
 }
