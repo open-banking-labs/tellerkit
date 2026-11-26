@@ -12,7 +12,7 @@
 use crate::menu::model::{MenuNode, MenuTree, NodeStatus, NodeType};
 use crate::perm::PermSnapshot;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use ts_rs::TS;
 
 /// 给前端渲染用的可见菜单节点。
@@ -76,7 +76,9 @@ pub fn filter_visible(tree: &MenuTree, snapshot: &PermSnapshot) -> Vec<MenuView>
     }
     roots.sort_by(|a, b| a.sort().cmp(&b.sort()).then_with(|| a.code().cmp(b.code())));
 
-    let mut visited = Vec::new();
+    // 访问集用 HashSet：Vec 线性查重会让过滤退化成 O(n²)，
+    // 顺手用 insert 完成「查重 + 登记」，无需每个节点 clone code。
+    let mut visited: HashSet<&str> = HashSet::new();
     roots
         .into_iter()
         .filter_map(|node| build(node, &children, &menu_set, &action_set, &mut visited))
@@ -87,21 +89,20 @@ fn sort_nodes(list: &mut [&MenuNode]) {
     list.sort_by(|a, b| a.sort().cmp(&b.sort()).then_with(|| a.code().cmp(b.code())));
 }
 
-fn build(
-    node: &MenuNode,
-    children: &HashMap<&str, Vec<&MenuNode>>,
-    menu_set: &std::collections::HashSet<&str>,
-    action_set: &std::collections::HashSet<&str>,
-    visited: &mut Vec<String>,
+fn build<'a>(
+    node: &'a MenuNode,
+    children: &HashMap<&'a str, Vec<&'a MenuNode>>,
+    menu_set: &HashSet<&'a str>,
+    action_set: &HashSet<&'a str>,
+    visited: &mut HashSet<&'a str>,
 ) -> Option<MenuView> {
     if node.status() == NodeStatus::Hidden {
         return None;
     }
     // 防御：环或重复访问直接剪掉，保证不死循环。
-    if visited.iter().any(|c| c.as_str() == node.code()) {
+    if !visited.insert(node.code()) {
         return None;
     }
-    visited.push(node.code().to_string());
 
     let mut kids = Vec::new();
     if let Some(list) = children.get(node.code()) {
