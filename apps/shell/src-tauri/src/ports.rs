@@ -168,11 +168,7 @@ impl MenuSource for MockRemote {
         let state = self.snapshot();
         self.mock_host(&state)
             .probe()
-            .map(|p| MenuVersionProbe {
-                latest: p.latest,
-                shell_compat_min: p.shell_compat_min,
-                shell_compat_max: p.shell_compat_max,
-            })
+            .map(|p| MenuVersionProbe::new(p.latest(), p.shell_compat_min(), p.shell_compat_max()))
             .map_err(|e| RemoteError::Unavailable(e.to_string()))
     }
 

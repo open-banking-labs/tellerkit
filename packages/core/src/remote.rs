@@ -25,8 +25,22 @@ use serde_json::Value;
 /// 所以传输层不需要知道业务语义。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WireMessage {
-    pub head: BTreeMap<String, String>,
-    pub body: Vec<u8>,
+    head: BTreeMap<String, String>,
+    body: Vec<u8>,
+}
+
+impl WireMessage {
+    pub fn new(head: BTreeMap<String, String>, body: Vec<u8>) -> Self {
+        Self { head, body }
+    }
+
+    pub fn head(&self) -> &BTreeMap<String, String> {
+        &self.head
+    }
+
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
 }
 
 /// 应用层载荷。三种形态覆盖现有与预期的报文：
@@ -60,9 +74,31 @@ impl Body {
 /// 一次调用请求。`service` 是路由键，`op` 是服务内操作名。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Request {
-    pub service: String,
-    pub op: String,
-    pub body: Body,
+    service: String,
+    op: String,
+    body: Body,
+}
+
+impl Request {
+    pub fn new(service: &str, op: &str, body: Body) -> Self {
+        Self {
+            service: service.to_string(),
+            op: op.to_string(),
+            body,
+        }
+    }
+
+    pub fn service(&self) -> &str {
+        &self.service
+    }
+
+    pub fn op(&self) -> &str {
+        &self.op
+    }
+
+    pub fn body(&self) -> &Body {
+        &self.body
+    }
 }
 
 /// 传输层能连到哪里。由实现解释（HTTP 只看 base_url，TCP 只看 host/port）。
@@ -130,12 +166,56 @@ pub trait Codec: Send + Sync {
 ///
 /// "同一服务多个端点"就是多条 `Endpoint`，用 `priority` 排序（0 最高）。
 pub struct Endpoint {
-    pub service: String,
-    pub addr: EndpointAddr,
-    pub transport: Arc<dyn Transport>,
-    pub codec: Arc<dyn Codec>,
-    pub priority: u8,
-    pub timeout_ms: u64,
+    service: String,
+    addr: EndpointAddr,
+    transport: Arc<dyn Transport>,
+    codec: Arc<dyn Codec>,
+    priority: u8,
+    timeout_ms: u64,
+}
+
+impl Endpoint {
+    pub fn new(
+        service: &str,
+        addr: EndpointAddr,
+        transport: Arc<dyn Transport>,
+        codec: Arc<dyn Codec>,
+        priority: u8,
+        timeout_ms: u64,
+    ) -> Self {
+        Self {
+            service: service.to_string(),
+            addr,
+            transport,
+            codec,
+            priority,
+            timeout_ms,
+        }
+    }
+
+    pub fn service(&self) -> &str {
+        &self.service
+    }
+
+    pub fn addr(&self) -> &EndpointAddr {
+        &self.addr
+    }
+
+    pub fn transport(&self) -> &Arc<dyn Transport> {
+        &self.transport
+    }
+
+    pub fn codec(&self) -> &Arc<dyn Codec> {
+        &self.codec
+    }
+
+    pub fn priority(&self) -> u8 {
+        self.priority
+    }
+
+    pub fn timeout_ms(&self) -> u64 {
+        self.timeout_ms
+    }
 }
 
 impl std::fmt::Debug for Endpoint {
@@ -155,11 +235,38 @@ impl std::fmt::Debug for Endpoint {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("服务 {service} 调用失败（尝试 {attempts} 个端点）：{detail}")]
 pub struct RouteError {
-    pub service: String,
-    pub attempts: usize,
-    pub detail: String,
+    service: String,
+    attempts: usize,
+    detail: String,
     /// 是否属于"换个端点可能成功"。全为不可重试错误时为 false。
-    pub retryable: bool,
+    retryable: bool,
+}
+
+impl RouteError {
+    pub fn new(service: &str, attempts: usize, detail: &str, retryable: bool) -> Self {
+        Self {
+            service: service.to_string(),
+            attempts,
+            detail: detail.to_string(),
+            retryable,
+        }
+    }
+
+    pub fn service(&self) -> &str {
+        &self.service
+    }
+
+    pub fn attempts(&self) -> usize {
+        self.attempts
+    }
+
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+
+    pub fn retryable(&self) -> bool {
+        self.retryable
+    }
 }
 
 /// 按服务名路由，按优先级主备切换。

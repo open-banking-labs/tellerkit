@@ -16,9 +16,31 @@ use crate::tx::{HostError, TxHost, TxRequest};
 /// 菜单版本探测结果。体积必须很小：它是启动后的第一个后台请求。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MenuVersionProbe {
-    pub latest: u64,
-    pub shell_compat_min: u16,
-    pub shell_compat_max: u16,
+    latest: u64,
+    shell_compat_min: u16,
+    shell_compat_max: u16,
+}
+
+impl MenuVersionProbe {
+    pub fn new(latest: u64, shell_compat_min: u16, shell_compat_max: u16) -> Self {
+        Self {
+            latest,
+            shell_compat_min,
+            shell_compat_max,
+        }
+    }
+
+    pub fn latest(&self) -> u64 {
+        self.latest
+    }
+
+    pub fn shell_compat_min(&self) -> u16 {
+        self.shell_compat_min
+    }
+
+    pub fn shell_compat_max(&self) -> u16 {
+        self.shell_compat_max
+    }
 }
 
 /// 远端调用的错误。**不携带 HTTP 细节**：应用层只需要知道处置方式。
@@ -57,10 +79,37 @@ pub trait RemoteBanking: MenuSource + TxHost + Send + Sync {
 /// 服务名。路由键是服务而不是模块：同一个模块可以调多个服务。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceNames {
-    pub menu: String,
-    pub pack: String,
-    pub auth: String,
-    pub tx: String,
+    menu: String,
+    pack: String,
+    auth: String,
+    tx: String,
+}
+
+impl ServiceNames {
+    pub fn new(menu: &str, pack: &str, auth: &str, tx: &str) -> Self {
+        Self {
+            menu: menu.to_string(),
+            pack: pack.to_string(),
+            auth: auth.to_string(),
+            tx: tx.to_string(),
+        }
+    }
+
+    pub fn menu(&self) -> &str {
+        &self.menu
+    }
+
+    pub fn pack(&self) -> &str {
+        &self.pack
+    }
+
+    pub fn auth(&self) -> &str {
+        &self.auth
+    }
+
+    pub fn tx(&self) -> &str {
+        &self.tx
+    }
 }
 
 impl Default for ServiceNames {
@@ -116,11 +165,7 @@ impl RoutedBanking {
     ) -> Result<serde_json::Value, RemoteError> {
         let body = self
             .router
-            .call(&Request {
-                service: service.to_string(),
-                op: op.to_string(),
-                body: Body::Json(payload),
-            })
+            .call(&Request::new(service, op, Body::Json(payload)))
             .map_err(remote_err)?;
         let value = body
             .as_json()
@@ -144,10 +189,10 @@ fn error_message(err: &serde_json::Value) -> String {
 }
 
 fn remote_err(e: RouteError) -> RemoteError {
-    if e.retryable {
-        RemoteError::Unavailable(e.detail)
+    if e.retryable() {
+        RemoteError::Unavailable(e.detail().to_string())
     } else {
-        RemoteError::Rejected(e.detail)
+        RemoteError::Rejected(e.detail().to_string())
     }
 }
 
@@ -161,11 +206,11 @@ impl MenuSource for RoutedBanking {
     fn download_menu(&self) -> Result<Vec<u8>, RemoteError> {
         let body = self
             .router
-            .call(&Request {
-                service: self.services.pack.clone(),
-                op: "download".to_string(),
-                body: Body::Binary(Vec::new()),
-            })
+            .call(&Request::new(
+                &self.services.pack,
+                "download",
+                Body::Binary(Vec::new()),
+            ))
             .map_err(remote_err)?;
         match body {
             Body::Binary(bytes) => Ok(bytes),
@@ -207,11 +252,11 @@ impl TxHost for RoutedBanking {
     fn submit(&self, request: &TxRequest) -> Result<String, HostError> {
         let payload = serde_json::to_value(request)
             .map_err(|e| HostError::Rejected(format!("请求无法序列化：{e}")))?;
-        let result = self.router.call(&Request {
-            service: self.services.tx.clone(),
-            op: "submit_tx".to_string(),
-            body: Body::Json(payload),
-        });
+        let result = self.router.call(&Request::new(
+            &self.services.tx,
+            "submit_tx",
+            Body::Json(payload),
+        ));
 
         match result {
             Ok(body) => {
@@ -227,8 +272,8 @@ impl TxHost for RoutedBanking {
                     _ => Err(HostError::Rejected("主机响应缺少 reference".to_string())),
                 }
             }
-            Err(e) if e.retryable => Err(HostError::Unavailable),
-            Err(e) => Err(HostError::Rejected(e.detail)),
+            Err(e) if e.retryable() => Err(HostError::Unavailable),
+            Err(e) => Err(HostError::Rejected(e.detail().to_string())),
         }
     }
 }
@@ -240,25 +285,22 @@ mod tests {
     use std::sync::Arc;
 
     fn endpoint(service: &str, transport: Arc<dyn Transport>, codec: Arc<dyn Codec>) -> Endpoint {
-        Endpoint {
-            service: service.to_string(),
-            addr: EndpointAddr::Tcp {
+        Endpoint::new(
+            service,
+            EndpointAddr::Tcp {
                 host: "127.0.0.1".into(),
                 port: 1,
             },
             transport,
             codec,
-            priority: 0,
-            timeout_ms: 1000,
-        }
+            0,
+            1000,
+        )
     }
 
     /// 把 JSON 响应包成 WireMessage（模拟后台返回）。
     fn reply(value: serde_json::Value) -> crate::remote::WireMessage {
-        crate::remote::WireMessage {
-            head: Default::default(),
-            body: serde_json::to_vec(&value).unwrap(),
-        }
+        crate::remote::WireMessage::new(Default::default(), serde_json::to_vec(&value).unwrap())
     }
 
     #[test]
@@ -292,7 +334,7 @@ mod tests {
         ]);
         let banking = RoutedBanking::new(router);
 
-        assert_eq!(banking.probe_menu().unwrap().latest, 9);
+        assert_eq!(banking.probe_menu().unwrap().latest(), 9);
         assert_eq!(banking.login("teller", 901).unwrap().teller_no, "T01");
 
         let mut req = TxRequest::new("account.deposit", "k1");

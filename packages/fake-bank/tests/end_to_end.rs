@@ -18,13 +18,15 @@ fn router_for(bank: &FakeBank) -> Router {
         host: bank.host(),
         port: bank.port(),
     };
-    let make = |service: &str, codec: Arc<dyn Codec>, priority: u8| Endpoint {
-        service: service.to_string(),
-        addr: addr.clone(),
-        transport: Arc::new(TcpTransport::default()) as Arc<dyn Transport>,
-        codec,
-        priority,
-        timeout_ms: 3000,
+    let make = |service: &str, codec: Arc<dyn Codec>, priority: u8| {
+        Endpoint::new(
+            service,
+            addr.clone(),
+            Arc::new(TcpTransport::default()) as Arc<dyn Transport>,
+            codec,
+            priority,
+            3000,
+        )
     };
 
     Router::new(vec![
@@ -44,7 +46,7 @@ fn full_chain_reaches_a_real_backend_over_tcp() {
     let banking = RoutedBanking::new(router_for(&bank));
 
     let probe = banking.probe_menu().expect("探测菜单版本");
-    assert_eq!(probe.latest, 11);
+    assert_eq!(probe.latest(), 11);
 
     let snapshot = banking.login("teller", 1101).expect("登录");
     assert_eq!(snapshot.teller_no, "T0231");
@@ -98,30 +100,30 @@ fn backend_down_falls_back_to_secondary_endpoint() {
     };
 
     let router = Router::new(vec![
-        Endpoint {
-            service: "menu.core".into(),
-            addr: dead,
-            transport: Arc::new(TcpTransport::default()),
-            codec: Arc::new(JsonCodec),
-            priority: 0,
-            timeout_ms: 500,
-        },
-        Endpoint {
-            service: "menu.core".into(),
-            addr: alive,
-            transport: Arc::new(TcpTransport::default()),
-            codec: Arc::new(JsonCodec),
-            priority: 1,
-            timeout_ms: 3000,
-        },
+        Endpoint::new(
+            "menu.core",
+            dead,
+            Arc::new(TcpTransport::default()),
+            Arc::new(JsonCodec),
+            0,
+            500,
+        ),
+        Endpoint::new(
+            "menu.core",
+            alive,
+            Arc::new(TcpTransport::default()),
+            Arc::new(JsonCodec),
+            1,
+            3000,
+        ),
     ]);
 
     let probe = router
-        .call(&tellerkit_core::remote::Request {
-            service: "menu.core".into(),
-            op: "probe_menu".into(),
-            body: tellerkit_core::remote::Body::Json(serde_json::json!({})),
-        })
+        .call(&tellerkit_core::remote::Request::new(
+            "menu.core",
+            "probe_menu",
+            tellerkit_core::remote::Body::Json(serde_json::json!({})),
+        ))
         .expect("备用端点应接管");
 
     assert_eq!(

@@ -265,11 +265,11 @@ impl MockHost {
         if self.offline {
             return Err(HostError::Offline);
         }
-        Ok(MenuVersionProbe {
-            latest: self.menu_version,
-            shell_compat_min: SHELL_COMPAT_MIN,
-            shell_compat_max: SHELL_COMPAT_MAX,
-        })
+        Ok(MenuVersionProbe::new(
+            self.menu_version,
+            SHELL_COMPAT_MIN,
+            SHELL_COMPAT_MAX,
+        ))
     }
 
     pub fn download(&self) -> Result<Vec<u8>, HostError> {

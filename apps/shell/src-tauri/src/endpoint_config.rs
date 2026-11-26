@@ -235,14 +235,14 @@ fn build(service: &str, spec: &EndpointSpec) -> Result<Endpoint, String> {
         }
     };
 
-    Ok(Endpoint {
-        service: service.to_string(),
+    Ok(Endpoint::new(
+        service,
         addr,
         transport,
         codec,
-        priority: spec.priority,
-        timeout_ms: spec.timeout_ms,
-    })
+        spec.priority,
+        spec.timeout_ms,
+    ))
 }
 
 #[cfg(test)]
@@ -277,20 +277,20 @@ mod tests {
 
         let acct = router.endpoints_of("acct.core");
         assert_eq!(acct.len(), 2, "同一服务两条端点");
-        assert_eq!(acct[0].priority, 0);
-        assert_eq!(acct[1].priority, 1);
-        assert_eq!(acct[0].transport.name(), "http");
-        assert_eq!(acct[1].transport.name(), "tcp");
+        assert_eq!(acct[0].priority(), 0);
+        assert_eq!(acct[1].priority(), 1);
+        assert_eq!(acct[0].transport().name(), "http");
+        assert_eq!(acct[1].transport().name(), "tcp");
     }
 
     #[test]
     fn different_services_can_use_different_codecs() {
         let router = parse(OK).expect("配置合法");
         assert_eq!(
-            router.endpoints_of("card.auth")[0].codec.name(),
+            router.endpoints_of("card.auth")[0].codec().name(),
             "fixed-width"
         );
-        assert_eq!(router.endpoints_of("menu.core")[0].codec.name(), "json");
+        assert_eq!(router.endpoints_of("menu.core")[0].codec().name(), "json");
     }
 
     #[test]

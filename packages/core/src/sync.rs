@@ -115,13 +115,13 @@ pub fn check_and_update(host: &dyn MenuSource, store: &MenuStore) -> UpdateOutco
         }
     };
 
-    if local == Some(probe.latest) {
+    if local == Some(probe.latest()) {
         return UpdateOutcome {
             checked: true,
             local,
-            latest: Some(probe.latest),
+            latest: Some(probe.latest()),
             updated: false,
-            note: format!("菜单已是最新（v{}）", probe.latest),
+            note: format!("菜单已是最新（v{}）", probe.latest()),
         };
     }
 
@@ -131,7 +131,7 @@ pub fn check_and_update(host: &dyn MenuSource, store: &MenuStore) -> UpdateOutco
             return UpdateOutcome {
                 checked: true,
                 local,
-                latest: Some(probe.latest),
+                latest: Some(probe.latest()),
                 updated: false,
                 note: format!("发现新版本但下载失败（{err}），继续使用本地菜单"),
             }
@@ -142,14 +142,14 @@ pub fn check_and_update(host: &dyn MenuSource, store: &MenuStore) -> UpdateOutco
         Ok(_) => UpdateOutcome {
             checked: true,
             local,
-            latest: Some(probe.latest),
+            latest: Some(probe.latest()),
             updated: true,
-            note: format!("已静默更新到菜单 v{}", probe.latest),
+            note: format!("已静默更新到菜单 v{}", probe.latest()),
         },
         Err(err) => UpdateOutcome {
             checked: true,
             local,
-            latest: Some(probe.latest),
+            latest: Some(probe.latest()),
             updated: false,
             note: format!("新菜单包校验失败，已拒绝安装：{err}"),
         },
