@@ -7,6 +7,7 @@ mod cipher;
 
 use rusqlite::{params, Connection};
 
+use cipher::audit_chain_hash;
 pub use cipher::LedgerCipher;
 use std::path::Path;
 use std::sync::Mutex;
@@ -63,6 +64,23 @@ impl AuditEvent {
 
     pub fn at(&self) -> &str {
         &self.at
+    }
+}
+
+/// 审计链头：序号与最新一行的哈希，启动时对外报告用。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditChainHead {
+    seq: i64,
+    hash: String,
+}
+
+impl AuditChainHead {
+    pub fn seq(&self) -> i64 {
+        self.seq
+    }
+
+    pub fn hash(&self) -> &str {
+        &self.hash
     }
 }
 
@@ -150,6 +168,9 @@ impl SqliteJournal {
             -- 能删的审计等于没有审计（见 docs/security-boundary.md §4）。
             CREATE TABLE IF NOT EXISTS audit_log (
                 id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                seq     INTEGER NOT NULL DEFAULT 0,
+                prev_hash TEXT   NOT NULL DEFAULT '',
+                hash    TEXT    NOT NULL DEFAULT '',
                 actor   TEXT    NOT NULL,
                 action  TEXT    NOT NULL,
                 target  TEXT    NOT NULL,
@@ -157,11 +178,20 @@ impl SqliteJournal {
                 detail  TEXT    NOT NULL,
                 at      TEXT    NOT NULL
             );
+            -- 链头单独存一行：删掉尾部一行也能被发现（末尾不留 seq 空洞）。
+            CREATE TABLE IF NOT EXISTS audit_chain_state (
+                id        INTEGER PRIMARY KEY CHECK (id = 1),
+                last_seq  INTEGER NOT NULL,
+                last_hash TEXT    NOT NULL
+            );
+            INSERT OR IGNORE INTO audit_chain_state (id, last_seq, last_hash)
+            VALUES (1, 0, '');
             "#,
         )
         .map_err(|e| format!("建表失败：{e}"))?;
         let mut conn = conn;
         Self::migrate_cipher_format(&mut conn, &cipher)?;
+        Self::migrate_audit_chain(&mut conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
             cipher,
@@ -233,6 +263,103 @@ impl SqliteJournal {
         tx.commit().map_err(|e| format!("密文迁移提交失败：{e}"))
     }
 
+    /// 旧库补链：给升级前写入的审计行按 id 顺序补上 seq/prev_hash/hash。
+    ///
+    /// 迁移与链头初始化在同一事务里；链头单独存表，删掉尾部行也藏不住。
+    /// 链头丢失但日志仍有入链行时直接拒绝启动，不能"重新编号"把删改洗白。
+    fn migrate_audit_chain(conn: &mut Connection) -> Result<(), String> {
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("审计链迁移事务失败：{e}"))?;
+
+        let columns: Vec<String> = {
+            let mut stmt = tx
+                .prepare("PRAGMA table_info(audit_log)")
+                .map_err(|e| format!("读取审计表结构失败：{e}"))?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(1))
+                .map_err(|e| format!("读取审计表结构失败：{e}"))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("读取审计表结构失败：{e}"))?
+        };
+        for (name, declaration) in [
+            ("seq", "INTEGER NOT NULL DEFAULT 0"),
+            ("prev_hash", "TEXT NOT NULL DEFAULT ''"),
+            ("hash", "TEXT NOT NULL DEFAULT ''"),
+        ] {
+            if !columns.iter().any(|c| c == name) {
+                tx.execute(
+                    &format!("ALTER TABLE audit_log ADD COLUMN {name} {declaration}"),
+                    [],
+                )
+                .map_err(|e| format!("补齐审计链字段（{name}）失败：{e}"))?;
+            }
+        }
+
+        let (mut seq, mut prev_hash): (i64, String) = tx
+            .query_row(
+                "SELECT last_seq, last_hash FROM audit_chain_state WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|e| format!("读取审计链头失败：{e}"))?;
+        let chained: i64 = tx
+            .query_row("SELECT COUNT(*) FROM audit_log WHERE seq > 0", [], |r| {
+                r.get(0)
+            })
+            .map_err(|e| format!("统计已入链审计行失败：{e}"))?;
+        if (seq > 0) != (chained > 0) {
+            return Err(format!(
+                "审计链头与审计日志不一致（链头 seq={seq}，入链行 {chained}）；拒绝启动等待人工核查"
+            ));
+        }
+
+        let legacy: Vec<(i64, String, String, String, String, String, String)> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT id, actor, action, target, result, detail, at
+                     FROM audit_log WHERE seq = 0 ORDER BY id",
+                )
+                .map_err(|e| format!("扫描旧审计行失败：{e}"))?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                })
+                .map_err(|e| format!("扫描旧审计行失败：{e}"))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("扫描旧审计行失败：{e}"))?
+        };
+        for (id, actor, action, target, result, detail, at) in legacy {
+            seq = seq
+                .checked_add(1)
+                .ok_or_else(|| "审计序号溢出，拒绝迁移".to_string())?;
+            let parent = prev_hash.clone();
+            let hash = audit_chain_hash(
+                seq, &parent, &actor, &action, &target, &result, &detail, &at,
+            );
+            tx.execute(
+                "UPDATE audit_log SET seq = ?1, prev_hash = ?2, hash = ?3 WHERE id = ?4",
+                params![seq, parent, hash, id],
+            )
+            .map_err(|e| format!("补链审计行（id={id}）失败：{e}"))?;
+            prev_hash = hash;
+        }
+        tx.execute(
+            "UPDATE audit_chain_state SET last_seq = ?1, last_hash = ?2 WHERE id = 1",
+            params![seq, prev_hash],
+        )
+        .map_err(|e| format!("更新审计链头失败：{e}"))?;
+        tx.commit().map_err(|e| format!("审计链迁移提交失败：{e}"))
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -257,35 +384,154 @@ impl SqliteJournal {
             .map_err(|e| e.to_string())
     }
 
-    /// 追加一条审计事件。`at` 由这里写入，调用方传什么都会被覆盖。
+    /// 追加一条审计事件。链头读取、哈希计算、插入、链头推进在同一事务内完成。
     ///
-    /// 只有追加，没有修改与删除——这是审计日志的意义所在。
+    /// 只有追加，没有修改与删除——审计事件自带序号与前序哈希，
+    /// 中间删改或末尾删除都会被 [`SqliteJournal::verify_chain`] 发现。
     pub fn audit(&self, event: &AuditEvent) -> Result<(), String> {
-        self.lock()
-            .execute(
-                "INSERT INTO audit_log (actor, action, target, result, detail, at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    event.actor(),
-                    event.action(),
-                    event.target(),
-                    event.result(),
-                    event.detail(),
-                    now(),
-                ],
+        let mut conn = self.lock();
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("审计写入事务失败：{e}"))?;
+        let (last_seq, prev_hash): (i64, String) = tx
+            .query_row(
+                "SELECT last_seq, last_hash FROM audit_chain_state WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
-            .map(|_| ())
-            .map_err(|e| format!("追加审计日志失败：{e}"))
+            .map_err(|e| format!("读取审计链头失败：{e}"))?;
+        let seq = last_seq
+            .checked_add(1)
+            .ok_or_else(|| "审计序号溢出，拒绝写入".to_string())?;
+        let at = now();
+        let hash = audit_chain_hash(
+            seq,
+            &prev_hash,
+            event.actor(),
+            event.action(),
+            event.target(),
+            event.result(),
+            event.detail(),
+            &at,
+        );
+        tx.execute(
+            "INSERT INTO audit_log
+             (seq, prev_hash, hash, actor, action, target, result, detail, at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                seq,
+                prev_hash,
+                hash,
+                event.actor(),
+                event.action(),
+                event.target(),
+                event.result(),
+                event.detail(),
+                at,
+            ],
+        )
+        .map_err(|e| format!("追加审计日志失败：{e}"))?;
+        tx.execute(
+            "UPDATE audit_chain_state SET last_seq = ?1, last_hash = ?2 WHERE id = 1",
+            params![seq, hash],
+        )
+        .map_err(|e| format!("推进审计链头失败：{e}"))?;
+        tx.commit().map_err(|e| format!("审计写入提交失败：{e}"))
     }
 
-    /// 按时间倒序取最近 `limit` 条。同一秒内按自增 id 倒序，顺序稳定。
+    /// 全表校验：按 id 顺序逐行核对序号、前序哈希与本行哈希，
+    /// 最后和独立存放的链头对账。篡改、删行、乱序、删尾行都会报错。
+    pub fn verify_chain(&self) -> Result<AuditChainHead, String> {
+        let conn = self.lock();
+        let (head_seq, head_hash): (i64, String) = conn
+            .query_row(
+                "SELECT last_seq, last_hash FROM audit_chain_state WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|e| format!("读取审计链头失败：{e}"))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, seq, prev_hash, hash, actor, action, target, result, detail, at
+                 FROM audit_log ORDER BY id",
+            )
+            .map_err(|e| format!("校验审计链失败：{e}"))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, String>(6)?,
+                    r.get::<_, String>(7)?,
+                    r.get::<_, String>(8)?,
+                    r.get::<_, String>(9)?,
+                ))
+            })
+            .map_err(|e| format!("校验审计链失败：{e}"))?;
+        let mut expected_seq = 0_i64;
+        let mut expected_prev = String::new();
+        for row in rows {
+            let (id, seq, prev_hash, hash, actor, action, target, result, detail, at) =
+                row.map_err(|e| format!("校验审计链失败：{e}"))?;
+            let next = expected_seq
+                .checked_add(1)
+                .ok_or_else(|| "审计序号溢出，无法校验".to_string())?;
+            if seq != next {
+                return Err(format!(
+                    "审计链序号断裂：id={id} seq={seq}，期望 {next}（删行或乱序）"
+                ));
+            }
+            if prev_hash != expected_prev {
+                return Err(format!(
+                    "审计链前序哈希断裂：id={id} seq={seq}（删行或重排）"
+                ));
+            }
+            let recomputed = audit_chain_hash(
+                seq, &prev_hash, &actor, &action, &target, &result, &detail, &at,
+            );
+            if hash != recomputed {
+                return Err(format!("审计链哈希不匹配：id={id} seq={seq}，疑似篡改"));
+            }
+            expected_seq = seq;
+            expected_prev = hash;
+        }
+        if expected_seq != head_seq || expected_prev != head_hash {
+            return Err(format!(
+                "审计链头不一致：表内 seq={expected_seq} hash={}；链头 seq={head_seq} hash={head_hash}（末尾删行或链头被改）",
+                shorten(&expected_prev)
+            ));
+        }
+        Ok(AuditChainHead {
+            seq: head_seq,
+            hash: head_hash,
+        })
+    }
+
+    /// 不扫全表的链头读取，供审计尾部展示与运维核对。
+    pub fn audit_chain_head(&self) -> Result<AuditChainHead, String> {
+        let conn = self.lock();
+        let (seq, hash): (i64, String) = conn
+            .query_row(
+                "SELECT last_seq, last_hash FROM audit_chain_state WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|e| format!("读取审计链头失败：{e}"))?;
+        Ok(AuditChainHead { seq, hash })
+    }
+
+    /// 按链上序号倒序取最近 `limit` 条；时钟回拨也不会漏最新事件。
     pub fn audit_tail(&self, limit: usize) -> Result<Vec<AuditEvent>, String> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let conn = self.lock();
         let mut stmt = conn
             .prepare(
                 "SELECT actor, action, target, result, detail, at
-                 FROM audit_log ORDER BY at DESC, id DESC LIMIT ?1",
+                 FROM audit_log ORDER BY seq DESC, id DESC LIMIT ?1",
             )
             .map_err(|e| format!("读取审计日志失败：{e}"))?;
         let rows = stmt
@@ -810,6 +1056,14 @@ impl TxJournal for SqliteJournal {
 }
 
 /// 时间戳只用于排序与审计，不参与业务判断。
+fn shorten(raw: &str) -> &str {
+    if raw.len() > 16 {
+        &raw[..16]
+    } else {
+        raw
+    }
+}
+
 fn now() -> String {
     // 不引入 chrono：秒级精度够用，格式固定便于按字符串排序
     let secs = std::time::SystemTime::now()
@@ -1115,6 +1369,158 @@ mod tests {
         let json = serde_json::to_string(&stored).unwrap();
         let back: AuditEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(back, stored);
+    }
+
+    #[test]
+    fn audit_chain_detects_tampered_middle_row() {
+        let j = SqliteJournal::in_memory().unwrap();
+        for target in ["m1", "m2", "m3"] {
+            j.audit(&audit_event("menu_access", target)).unwrap();
+        }
+        assert_eq!(j.verify_chain().unwrap().seq(), 3);
+
+        {
+            let conn = j.lock();
+            conn.execute("UPDATE audit_log SET detail = '篡改' WHERE seq = 2", [])
+                .unwrap();
+        }
+        let err = j.verify_chain().unwrap_err();
+        assert!(err.contains("哈希不匹配"), "实际：{err}");
+    }
+
+    #[test]
+    fn audit_chain_detects_deleted_rows_and_tail_deletion() {
+        let j = SqliteJournal::in_memory().unwrap();
+        for target in ["m1", "m2", "m3"] {
+            j.audit(&audit_event("menu_access", target)).unwrap();
+        }
+        {
+            let conn = j.lock();
+            conn.execute("DELETE FROM audit_log WHERE seq = 2", [])
+                .unwrap();
+        }
+        let err = j.verify_chain().unwrap_err();
+        assert!(err.contains("序号断裂"), "实际：{err}");
+
+        // 重开一份干净链，只删最后一条：没有 seq 空洞，靠独立链头发现。
+        let j = SqliteJournal::in_memory().unwrap();
+        for target in ["m1", "m2", "m3"] {
+            j.audit(&audit_event("menu_access", target)).unwrap();
+        }
+        {
+            let conn = j.lock();
+            conn.execute("DELETE FROM audit_log WHERE seq = 3", [])
+                .unwrap();
+        }
+        let err = j.verify_chain().unwrap_err();
+        assert!(err.contains("链头不一致"), "实际：{err}");
+    }
+
+    #[test]
+    fn audit_chain_rejects_reordered_rows() {
+        let j = SqliteJournal::in_memory().unwrap();
+        for target in ["m1", "m2"] {
+            j.audit(&audit_event("menu_access", target)).unwrap();
+        }
+        {
+            let conn = j.lock();
+            conn.execute(
+                "UPDATE audit_log SET seq = CASE seq WHEN 1 THEN 2 WHEN 2 THEN 1 END",
+                [],
+            )
+            .unwrap();
+        }
+        let err = j.verify_chain().unwrap_err();
+        assert!(err.contains("序号断裂"), "实际：{err}");
+    }
+
+    #[test]
+    fn audit_tail_orders_by_seq_not_by_clock() {
+        let j = SqliteJournal::in_memory().unwrap();
+        for target in ["m1", "m2", "m3"] {
+            j.audit(&audit_event("menu_access", target)).unwrap();
+        }
+        {
+            let conn = j.lock();
+            // 模拟时钟回拨：最新事件的时间戳反而最小。
+            conn.execute(
+                "UPDATE audit_log SET at = '00000000000000000001' WHERE seq = 3",
+                [],
+            )
+            .unwrap();
+        }
+        assert_eq!(j.audit_tail(1).unwrap()[0].target, "m3");
+    }
+
+    #[test]
+    fn audit_write_failure_propagates_without_touching_chain() {
+        let j = SqliteJournal::in_memory().unwrap();
+        {
+            let conn = j.lock();
+            conn.execute_batch(
+                "CREATE TRIGGER fail_audit BEFORE INSERT ON audit_log
+                 WHEN NEW.actor = 'blocked'
+                 BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+            )
+            .unwrap();
+        }
+        let mut event = audit_event("login", "T001");
+        event.actor = "blocked".into();
+        let err = j.audit(&event).unwrap_err();
+        assert!(err.contains("追加审计日志失败"), "实际：{err}");
+        assert_eq!(j.audit_count().unwrap(), 0, "失败写入不得留下半条链");
+        assert_eq!(j.verify_chain().unwrap().seq(), 0, "链头不得被推进");
+    }
+
+    #[test]
+    fn legacy_audit_rows_are_chained_on_open_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL,
+                    result TEXT NOT NULL, detail TEXT NOT NULL, at TEXT NOT NULL
+                 );
+                 INSERT INTO audit_log (actor, action, target, result, detail, at)
+                 VALUES ('T001','login','old1','ok','','1'),
+                        ('T001','menu_access','old2','ok','','2');",
+            )
+            .unwrap();
+        }
+        {
+            let j = SqliteJournal::open(&path).unwrap();
+            assert_eq!(j.verify_chain().unwrap().seq(), 2, "旧行按 id 补链");
+            assert_eq!(j.audit_tail(1).unwrap()[0].target, "old2");
+            j.audit(&audit_event("login", "T002")).unwrap();
+            assert_eq!(j.verify_chain().unwrap().seq(), 3);
+        }
+        let j = SqliteJournal::open(&path).unwrap();
+        assert_eq!(j.verify_chain().unwrap().seq(), 3, "重开不得二次补链");
+        // 迁移前的数据被删改也要能被发现。
+        {
+            let conn = j.lock();
+            conn.execute("UPDATE audit_log SET target = 'forged' WHERE seq = 1", [])
+                .unwrap();
+        }
+        assert!(j.verify_chain().is_err());
+    }
+
+    #[test]
+    fn audit_chain_hash_binds_all_fields() {
+        let base = audit_chain_hash(1, "", "a", "b", "c", "ok", "d", "t");
+        assert_ne!(base, audit_chain_hash(2, "", "a", "b", "c", "ok", "d", "t"));
+        assert_ne!(
+            base,
+            audit_chain_hash(1, "", "a", "b", "c", "denied", "d", "t")
+        );
+        assert_ne!(
+            base,
+            audit_chain_hash(1, "", "ab", "", "c", "ok", "d", "t"),
+            "长度前缀必须消除字段拼接歧义"
+        );
     }
 
     #[test]
