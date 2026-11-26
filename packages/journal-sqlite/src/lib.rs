@@ -1122,7 +1122,7 @@ mod tests {
         let j = SqliteJournal::in_memory().unwrap();
         j.enqueue(&req("k-fail")).unwrap();
         {
-            let mut conn = j.lock();
+            let conn = j.lock();
             conn.execute_batch(
                 "CREATE TRIGGER fail_idem BEFORE INSERT ON tx_idempotent
                  WHEN NEW.idempotency_key = 'k-fail'
@@ -1143,7 +1143,7 @@ mod tests {
     fn record_and_enqueue_is_atomic_when_queue_write_fails() {
         let j = SqliteJournal::in_memory().unwrap();
         {
-            let mut conn = j.lock();
+            let conn = j.lock();
             conn.execute_batch(
                 "CREATE TRIGGER fail_queue BEFORE INSERT ON tx_queue
                  WHEN NEW.idempotency_key = 'k-fail2'
@@ -1229,7 +1229,9 @@ mod tests {
             .unwrap();
         }
 
-        let err = SqliteJournal::open(&path).unwrap_err();
+        let err = SqliteJournal::open(&path)
+            .err()
+            .expect("第二次打开应被拒绝");
         assert!(err.contains("降级"), "实际：{err}");
     }
 
