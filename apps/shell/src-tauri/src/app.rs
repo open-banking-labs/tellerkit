@@ -16,7 +16,9 @@ use tellerkit_core::device::{PrintReceipt, Voucher};
 use tellerkit_core::mock::DemoRole;
 use tellerkit_core::pkg;
 use tellerkit_core::pubkey_to_hex;
-use tellerkit_core::reversal::{Authorization, Authorizer, ExceptionKind, ReversalRequest};
+use tellerkit_core::reversal::{
+    Authorization, Authorizer, ExceptionKind, ReversalError, ReversalRequest,
+};
 use tellerkit_core::session::{SessionGuard, SessionPolicy};
 use tellerkit_core::tx::{TxRequest, TxResult, TxStatus};
 use tellerkit_core::MenuTree;
@@ -24,6 +26,7 @@ use tellerkit_core::MenuView;
 use tellerkit_core::{filter_visible, LoadSource};
 use tellerkit_journal_sqlite::AuditEvent;
 
+use crate::bootstrap::StartupFatal;
 use crate::ports::{Clock, RemoteBanking};
 use crate::AppState;
 
@@ -77,6 +80,12 @@ impl PackageCall {
     fn origin(&self) -> String {
         format!("pkg:{}", self.id)
     }
+}
+
+// 只在测试里模拟"审计账本写不进去"，生产代码没有这个开关。
+#[cfg(test)]
+thread_local! {
+    static FAIL_AUDIT_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// 启动结果。命令层据此拼 `BootInfo`。
@@ -362,16 +371,53 @@ impl<'a> ShellApp<'a> {
                     }
                 };
                 let actor = self.actor();
-                self.audit(&actor, action, "", "denied", detail);
-                Err(format!("{reason}：{detail}。请回到锁屏界面解锁后再试"))
+                let denial = format!("{reason}：{detail}。请回到锁屏界面解锁后再试");
+                let audited = self.audit(&actor, action, "", "denied", detail);
+                match audited {
+                    Ok(()) => Err(denial),
+                    // 审计失败不能吞：调用方必须知道"拒绝"这件事没留下证据。
+                    Err(e) => Err(format!("{denial}；审计写入失败：{e}")),
+                }
             }
         }
+    }
+
+    /// 调用主机之前的审计可写性闸门：没有账本或写不进去就绝不触达主机。
+    fn require_auditable(&self, action: &str, target: &str) -> Result<(), String> {
+        if self.state.audit.is_none() {
+            return Err(format!(
+                "审计账本不可用，已拒绝 {action}（未触达主机）：请检查账本文件与磁盘后重启终端"
+            ));
+        }
+        self.audit(
+            &self.actor(),
+            action,
+            target,
+            "intent",
+            "写前留痕：确认审计链可写后才允许调用主机",
+        )
+        .map_err(|e| format!("审计写前留痕失败，已拒绝 {action}（未触达主机）：{e}"))
     }
 
     // ---------- 启动与菜单 ----------
 
     /// 启动：本地包优先，业务包合并，网络只在本地不可用时兜底。
     pub fn boot(&mut self) -> Result<BootSummary, String> {
+        // 启动先查审计链：被删改的账本不能带着"营业正常"的面貌继续用。
+        let verified = match self.state.audit.as_ref() {
+            Some(journal) => journal.verify_chain(),
+            None => Err("审计账本不可用：账本未能打开".to_string()),
+        };
+        let head = match verified {
+            Ok(head) => head,
+            Err(e) => {
+                let reason = format!("审计链校验失败，已拒绝启动：{e}");
+                self.state.startup_fatal = StartupFatal(Some(reason.clone()));
+                return Err(reason);
+            }
+        };
+        let head_prefix = head.hash().get(..16).unwrap_or(head.hash()).to_string();
+
         self.state.store.clean_tmp();
 
         let started = std::time::Instant::now();
@@ -414,6 +460,11 @@ impl<'a> ShellApp<'a> {
         if let Some(w) = &self.state.journal_warning {
             notes.push(w.clone());
         }
+        notes.push(format!(
+            "审计链头部 seq={} hash={}",
+            head.seq(),
+            head_prefix
+        ));
 
         let menu_nodes = tree.node_count();
         self.state.menu = Some(tree);
@@ -433,8 +484,34 @@ impl<'a> ShellApp<'a> {
         })
     }
 
-    /// 登录：取快照 → 本地剪枝 → 建会话。全程无网络往返（mock 除外）。
+    /// 登录：成功与失败都留痕；任何一条审计写不进去都向上报错。
     pub fn login(&mut self, role_id: &str) -> Result<LoginOutcome, String> {
+        match self.login_attempt(role_id) {
+            Ok(outcome) => {
+                let snapshot = outcome.snapshot();
+                let detail = format!("角色 {}", snapshot.role_label());
+                self.audit(
+                    snapshot.teller_no(),
+                    "login",
+                    snapshot.outlet_code(),
+                    "ok",
+                    &detail,
+                )
+                .map_err(|e| format!("审计写入失败：{e}；登录已成功，请立即报告管理员并查账"))?;
+                Ok(outcome)
+            }
+            Err(reason) => {
+                let detail = format!("登录失败（角色 {role_id}）：{reason}");
+                let audited = self.audit("unknown", "login", role_id, "failed", &detail);
+                Err(match audited {
+                    Ok(()) => reason,
+                    Err(e) => format!("{reason}；审计写入失败：{e}"),
+                })
+            }
+        }
+    }
+
+    fn login_attempt(&mut self, role_id: &str) -> Result<LoginOutcome, String> {
         let role = DemoRole::from_id(role_id).ok_or("未知角色")?;
         let role_index = DemoRole::ALL.iter().position(|r| *r == role).unwrap_or(0) as u64;
         let perm_version = self.mock_menu_version() * 100 + role_index;
@@ -458,14 +535,6 @@ impl<'a> ShellApp<'a> {
             SessionPolicy::default(),
             self.clock.now_secs(),
         ));
-        self.audit(
-            snapshot.teller_no(),
-            "login",
-            snapshot.outlet_code(),
-            "ok",
-            &format!("角色 {}", snapshot.role_label()),
-        );
-
         Ok(LoginOutcome {
             snapshot,
             menu,
@@ -475,7 +544,7 @@ impl<'a> ShellApp<'a> {
 
     pub fn logout(&mut self) -> Result<(), String> {
         if let Some(snapshot) = self.state.snapshot.clone() {
-            self.audit(snapshot.teller_no(), "logout", "", "ok", "");
+            self.audit(snapshot.teller_no(), "logout", "", "ok", "")?;
         }
         self.state.session = None;
         self.state.clear_session();
@@ -558,28 +627,58 @@ impl<'a> ShellApp<'a> {
     /// 申请冲正：本地授权 → 主机受理 → 拿到流水号后才算处置完成。
     pub fn request_reversal(&mut self, key: &str, reason: &str) -> Result<String, String> {
         self.require_unlocked("reversal")?;
+        self.require_auditable("reversal", key)?;
         let actor = self.actor();
         let request = ReversalRequest::new(key, &actor, "", 0, reason);
 
         // 1. 授权（当前是演示主管；接 IAM 后换成真实授权端口）
-        self.state
-            .reversal
-            .request(&request, &DemoSupervisor)
-            .map_err(|e| e.to_string())?;
+        if let Err(e) = self.state.reversal.request(&request, &DemoSupervisor) {
+            let result = match &e {
+                ReversalError::NotAuthorized(_) | ReversalError::SelfApproval(_) => "denied",
+                _ => "failed",
+            };
+            let why = e.to_string();
+            let err = self.audit_and_error(
+                &actor,
+                "reversal",
+                key,
+                result,
+                &why,
+                format!("冲正申请未通过：{why}"),
+            );
+            return Err(err);
+        }
 
         // 2. 主机受理。失败时保留"已授权未确认"，柜员可以重试
-        let host_reference = self
-            .remote
-            .reverse(key, reason)
-            .map_err(|e| e.to_string())?;
+        let host_reference = match self.remote.reverse(key, reason) {
+            Ok(reference) => reference,
+            Err(e) => {
+                let why = e.to_string();
+                return Err(self.audit_and_error(
+                    &actor,
+                    "reversal",
+                    key,
+                    "failed",
+                    &format!("主机冲正失败：{why}"),
+                    format!("主机冲正失败：{why}"),
+                ));
+            }
+        };
 
         // 3. 主机回了流水号才算处置完成
-        self.state
-            .reversal
-            .confirm(key, &host_reference)
-            .map_err(|e| e.to_string())?;
+        if let Err(e) = self.state.reversal.confirm(key, &host_reference) {
+            let why = e.to_string();
+            return Err(self.audit_and_error(
+                &actor,
+                "reversal",
+                key,
+                "failed",
+                &format!("主机已受理但本地确认失败：{why}"),
+                format!("主机已受理冲正（{host_reference}）但本地确认失败：{why}；请立即查账"),
+            ));
+        }
 
-        self.audit(&actor, "reversal", key, "ok", &host_reference);
+        self.audit_checked(&actor, "reversal", key, "ok", &host_reference)?;
         Ok(host_reference)
     }
 
@@ -590,21 +689,21 @@ impl<'a> ShellApp<'a> {
         if let Some(call) = &call {
             self.authorize_package_call(call, "submit", &code, None)?;
         }
+        self.require_auditable("submit_tx", request.idempotency_key())?;
         // 契约 lifecycle.md 不变量 7：主机没声明幂等，就不许离线挂起。
         // 挂起意味着"以后一定会重发"，而重发只有服务端按幂等键去重才不会重复入账。
         if request.offline_capable() && !self.remote.supports_idempotency() {
             let actor = self.actor();
             let code = request.tx_code().to_string();
-            self.audit(
+            let err = self.audit_and_error(
                 &actor,
                 "submit_tx",
                 &code,
                 "failed",
                 "主机未声明幂等，拒绝离线挂起",
-            );
-            return Err(
                 "该主机未声明幂等支持，不能离线挂起交易（请联系管理员确认主机契约）".to_string(),
             );
+            return Err(err);
         }
         let amount_cents = request.amount_cents();
         let code = request.tx_code().to_string();
@@ -622,7 +721,7 @@ impl<'a> ShellApp<'a> {
             .as_ref()
             .map(PackageCall::origin)
             .unwrap_or_else(|| code.clone());
-        self.audit(
+        self.audit_checked(
             &actor,
             "submit_tx",
             &target,
@@ -632,12 +731,13 @@ impl<'a> ShellApp<'a> {
                 "failed"
             },
             &detail,
-        );
+        )?;
         Ok(result)
     }
 
     pub fn replay_pending(&mut self) -> Result<String, String> {
         self.require_unlocked("replay")?;
+        self.require_auditable("replay", "tx_queue")?;
         let remote = Arc::clone(&self.remote);
         let now = self.clock.now_secs();
         let run = tellerkit_core::replay::run_once(
@@ -658,14 +758,26 @@ impl<'a> ShellApp<'a> {
         }
 
         let detail = format!(
-            "attempted={} committed={} pending={} gave_up={}",
+            "attempted={} committed={} pending={} gave_up={} keys={}",
             run.attempted(),
             run.committed(),
             run.still_pending(),
-            run.gave_up().len()
+            run.gave_up().len(),
+            run.gave_up().join(",")
         );
         let actor = self.actor();
-        self.audit(&actor, "replay", "tx_queue", "ok", &detail);
+        // 放弃自动重试是异常终态，必须按 failed 留痕，不能混在 ok 里。
+        self.audit_checked(
+            &actor,
+            "replay",
+            "tx_queue",
+            if run.gave_up().is_empty() {
+                "ok"
+            } else {
+                "failed"
+            },
+            &detail,
+        )?;
 
         Ok(format!(
             "重放 {} 笔：成功 {} 笔，仍挂起 {} 笔{}",
@@ -696,6 +808,7 @@ impl<'a> ShellApp<'a> {
         if let Some(call) = &call {
             self.authorize_package_call(call, "print", &tx_code, Some(&template))?;
         }
+        self.require_auditable("print_voucher", voucher.tx_code())?;
         // 白名单先于动作：未登记的型号连纸都不该动
         self.state
             .devices
@@ -713,13 +826,13 @@ impl<'a> ShellApp<'a> {
             .as_ref()
             .map(PackageCall::origin)
             .unwrap_or_else(|| tx_code.clone());
-        self.audit(
+        self.audit_checked(
             &actor,
             "print",
             &target,
             if outcome.is_ok() { "ok" } else { "failed" },
             &detail,
-        );
+        )?;
         outcome
     }
 
@@ -742,7 +855,9 @@ impl<'a> ShellApp<'a> {
             .as_mut()
             .and_then(|guard| guard.evaluate(now));
         if let Some(reason) = locked {
-            self.audit(&actor, "session_lock", "", "ok", reason.label());
+            if let Err(e) = self.audit(&actor, "session_lock", "", "ok", reason.label()) {
+                eprintln!("会话锁定审计写入失败：{e}");
+            }
         }
         self.session_view()
     }
@@ -756,7 +871,9 @@ impl<'a> ShellApp<'a> {
             .as_mut()
             .and_then(|guard| guard.on_blur(now));
         if let Some(reason) = locked {
-            self.audit(&actor, "session_lock", "", "ok", reason.label());
+            if let Err(e) = self.audit(&actor, "session_lock", "", "ok", reason.label()) {
+                eprintln!("会话锁定审计写入失败：{e}");
+            }
         }
         self.session_view()
     }
@@ -782,6 +899,7 @@ impl<'a> ShellApp<'a> {
     /// 前端只按 capabilities 暴露方法，不自行判断业务权限。
     pub fn package_module(&self, route: &str) -> Result<PackageModuleView, String> {
         self.require_unlocked("package_module")?;
+        self.require_auditable("package_module", route)?;
         for package in &self.state.packages {
             if let Some(module) = package.route(route) {
                 let source = package
@@ -804,14 +922,14 @@ impl<'a> ShellApp<'a> {
         code: &str,
     ) -> Result<Option<PackageCall>, String> {
         PackageCall::take(fields).map_err(|err| {
-            self.audit(
+            self.audit_and_error(
                 &self.actor(),
                 "package_capability",
                 "pkg:unknown",
                 "denied",
                 &format!("code={code} {err}"),
-            );
-            err
+                err,
+            )
         })
     }
 
@@ -845,14 +963,14 @@ impl<'a> ShellApp<'a> {
     }
 
     fn deny_package_call(&self, call: &PackageCall, code: &str, reason: &str) -> String {
-        self.audit(
+        self.audit_and_error(
             &self.actor(),
             "package_capability",
             &call.origin(),
             "denied",
             &format!("code={code} {reason}"),
-        );
-        format!("业务包能力校验未通过：{reason}")
+            format!("业务包能力校验未通过：{reason}"),
+        )
     }
 
     // ---------- 审计 ----------
@@ -917,15 +1035,67 @@ impl<'a> ShellApp<'a> {
             .collect())
     }
 
-    /// 记一条审计。写不进去不影响业务，但要暴露出来（审计坏了不能静默）。
-    fn audit(&self, actor: &str, action: &str, target: &str, result: &str, detail: &str) {
-        let Some(journal) = &self.state.audit else {
-            return;
+    /// 记一条审计。账本不可用或写失败都向上返回，绝不静默放行。
+    fn audit(
+        &self,
+        actor: &str,
+        action: &str,
+        target: &str,
+        result: &str,
+        detail: &str,
+    ) -> Result<(), String> {
+        #[cfg(test)]
+        {
+            let remaining = FAIL_AUDIT_CALLS.with(|cell| cell.get());
+            if remaining != usize::MAX {
+                if remaining == 0 {
+                    return Err("模拟审计写入失败".to_string());
+                }
+                FAIL_AUDIT_CALLS.with(|cell| cell.set(remaining - 1));
+            }
+        }
+        let Some(journal) = self.state.audit.as_deref() else {
+            return Err(format!("审计日志不可用：账本未能打开（{action}/{result}）"));
         };
         let event = AuditEvent::new(actor, action, target, result, detail);
-        if let Err(e) = journal.audit(&event) {
-            eprintln!("审计写入失败：{e}");
+        journal
+            .audit(&event)
+            .map_err(|e| format!("追加审计日志失败（{action}/{result}）：{e}"))
+    }
+
+    /// 结论审计：业务已经发生，写不进去必须让用户知道去查账，不能谎报成功。
+    fn audit_checked(
+        &self,
+        actor: &str,
+        action: &str,
+        target: &str,
+        result: &str,
+        detail: &str,
+    ) -> Result<(), String> {
+        self.audit(actor, action, target, result, detail)
+            .map_err(|e| format!("审计结论写入失败：{e}；业务已发生，请立即查账，不要重复提交"))
+    }
+
+    /// 业务本来就被拒绝时，把审计失败一起报出来，不能掩盖"没留痕"这件事。
+    fn audit_and_error(
+        &self,
+        actor: &str,
+        action: &str,
+        target: &str,
+        result: &str,
+        detail: &str,
+        reason: String,
+    ) -> String {
+        match self.audit(actor, action, target, result, detail) {
+            Ok(()) => reason,
+            Err(e) => format!("{reason}；审计写入失败：{e}"),
         }
+    }
+
+    /// 测试注入：前 `successes` 次写入照常，之后全部失败。
+    #[cfg(test)]
+    fn fail_audits_after(successes: usize) {
+        FAIL_AUDIT_CALLS.with(|cell| cell.set(successes));
     }
 
     /// mock 专属观测：接入真实端点后没有"离线开关"这个概念。
@@ -976,6 +1146,7 @@ mod tests {
     }
 
     fn state_with(clock: Arc<FrozenClock>) -> AppState {
+        ShellApp::fail_audits_after(usize::MAX);
         let dir = std::env::temp_dir().join(format!("tk-app-test-{}", std::process::id()));
         let store = tellerkit_core::MenuStore::new(dir, tellerkit_core::mock::demo_verifying_key());
         let mock = Arc::new(crate::ports::MockRemote::default());
@@ -984,7 +1155,9 @@ mod tests {
             "unused".into(),
             TxEngine::new(),
             None,
-            None,
+            Some(Arc::new(
+                tellerkit_journal_sqlite::SqliteJournal::in_memory().unwrap(),
+            )),
             crate::ports::RemoteChoice::new(
                 Arc::clone(&mock) as Arc<dyn RemoteBanking>,
                 Some(mock),
@@ -1220,6 +1393,103 @@ mod tests {
         );
     }
 
+    fn audit_events(state: &AppState) -> Vec<(String, String, String)> {
+        state
+            .audit
+            .as_ref()
+            .unwrap()
+            .audit_tail(100)
+            .unwrap()
+            .into_iter()
+            .map(|e| {
+                (
+                    e.action().to_string(),
+                    e.result().to_string(),
+                    e.detail().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn login_failure_is_audited_as_failed() {
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let mut state = state_with(clock);
+        let err = ShellApp::new(&mut state).login("no-such-role").unwrap_err();
+        assert!(err.contains("未知角色"), "实际：{err}");
+
+        let events = audit_events(&state);
+        assert!(
+            events
+                .iter()
+                .any(|(action, result, detail)| action == "login"
+                    && result == "failed"
+                    && detail.contains("no-such-role")),
+            "登录失败必须留下 failed 审计：{events:?}"
+        );
+    }
+
+    #[test]
+    fn audit_write_failure_blocks_before_host() {
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let mut state = state_with(clock);
+        ShellApp::fail_audits_after(0);
+        let err = ShellApp::new(&mut state)
+            .submit_transaction(TxRequest::new("account.deposit", "k-audit-block"))
+            .unwrap_err();
+        assert!(err.contains("审计写前留痕失败"), "实际：{err}");
+        assert!(err.contains("未触达主机"), "实际：{err}");
+        assert!(
+            audit_events(&state).is_empty(),
+            "写前留痕失败不得留下半条审计"
+        );
+    }
+
+    #[test]
+    fn conclusion_audit_failure_is_reported_after_business_event() {
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let mut state = state_with(clock);
+        ShellApp::fail_audits_after(1);
+        let err = ShellApp::new(&mut state)
+            .submit_transaction(TxRequest::new("account.deposit", "k-audit-conclusion"))
+            .unwrap_err();
+        assert!(err.contains("审计结论写入失败"), "实际：{err}");
+        assert!(err.contains("业务已发生"), "实际：{err}");
+        assert!(err.contains("请立即查账"), "实际：{err}");
+    }
+
+    #[test]
+    fn denied_audit_failure_is_not_swallowed() {
+        let mut state = locked_state();
+        ShellApp::fail_audits_after(0);
+        let err = ShellApp::new(&mut state)
+            .submit_transaction(TxRequest::new("account.deposit", "k-audit-denied"))
+            .unwrap_err();
+        assert!(err.contains("会话已锁定"), "实际：{err}");
+        assert!(err.contains("审计写入失败"), "实际：{err}");
+    }
+
+    #[test]
+    fn reversal_host_failure_is_audited_as_failed() {
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let mut state = state_with(clock);
+        state
+            .reversal
+            .mark("k-rev-fail", ExceptionKind::MarkedForReversal);
+        state.remote = Arc::new(tellerkit_core::banking::RoutedBanking::new(
+            tellerkit_core::remote::Router::new(vec![]),
+        ));
+        let err = ShellApp::new(&mut state)
+            .request_reversal("k-rev-fail", "冲正")
+            .unwrap_err();
+        assert!(
+            audit_events(&state)
+                .iter()
+                .any(|(action, result, _)| action == "reversal" && result == "failed"),
+            "冲正失败必须留痕：{err}"
+        );
+    }
+
     #[test]
     fn package_call_with_undeclared_tx_code_is_denied_and_audited() {
         let mut state = state_with_package(vec!["demo.receipt".to_string()]);
@@ -1272,5 +1542,19 @@ mod tests {
             .submit_transaction(request)
             .unwrap_err();
         assert!(err.contains("未加载或验签未通过"), "实际：{err}");
+    }
+    #[test]
+    fn boot_verifies_chain_and_reports_its_head() {
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let mut state = state_with(clock);
+        let summary = ShellApp::new(&mut state).boot().unwrap();
+        assert!(
+            summary
+                .notes()
+                .iter()
+                .any(|n| n.contains("审计链头部 seq=") && n.contains("hash=")),
+            "启动摘要应报告链头：{:?}",
+            summary.notes()
+        );
     }
 }

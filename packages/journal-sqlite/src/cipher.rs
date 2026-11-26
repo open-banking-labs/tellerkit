@@ -22,9 +22,47 @@
 use std::path::{Path, PathBuf};
 
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
+use ring::digest::{digest, SHA256};
 use ring::rand::{SecureRandom, SystemRandom};
 
 const PREFIX: &str = "v1:";
+
+/// 审计链的域分隔常量：同样的内容放到别的协议里不能撞出同一个哈希。
+const CHAIN_DOMAIN: &[u8] = b"tellerkit-audit-chain-v1\0";
+
+/// 审计行的哈希：SHA-256(domain || prev_hash || 全部字段)。
+///
+/// 每个字段都带 8 字节大端长度前缀，避免 `("ab","c")` 与 `("a","bc")` 拼出同一串。
+/// 这里刻意不加密：链的作用是发现改写，密钥只负责交易要素的机密性。
+// 审计行就是 8 个字段；拆成结构体只为让 clippy 闭嘴会把调用点改得很绕。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn audit_chain_hash(
+    seq: i64,
+    prev_hash: &str,
+    actor: &str,
+    action: &str,
+    target: &str,
+    result: &str,
+    detail: &str,
+    at: &str,
+) -> String {
+    let mut buf = Vec::from(CHAIN_DOMAIN);
+    let seq_bytes = seq.to_be_bytes();
+    for field in [
+        &seq_bytes[..],
+        prev_hash.as_bytes(),
+        actor.as_bytes(),
+        action.as_bytes(),
+        target.as_bytes(),
+        result.as_bytes(),
+        detail.as_bytes(),
+        at.as_bytes(),
+    ] {
+        buf.extend_from_slice(&(field.len() as u64).to_be_bytes());
+        buf.extend_from_slice(field);
+    }
+    hex::encode(digest(&SHA256, &buf).as_ref())
+}
 
 /// 账本加密器。密钥来自 `<appdata>/ledger.key`（首次启动生成）。
 pub struct LedgerCipher {
