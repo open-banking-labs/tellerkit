@@ -484,7 +484,7 @@ impl TxEngine {
         // 此刻我们并不知道主机是否已处理。若把"拒绝"永久缓存，柜员就再也无法安全重试；
         // 而换个新键重试又可能重复入账。正确做法是保留原键，让重试打到主机，
         // 由主机的幂等键去重收口。
-        let (mut result, cacheable) = match host.submit(&request) {
+        let (result, cacheable) = match host.submit(&request) {
             Ok(reference) => (TxResult::committed(reference), true),
             Err(HostError::Rejected(reason)) => {
                 (TxResult::rejected(&format!("主机拒绝：{reason}")), true)
