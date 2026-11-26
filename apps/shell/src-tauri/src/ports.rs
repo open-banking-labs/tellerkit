@@ -155,11 +155,7 @@ impl MockRemote {
     }
 
     fn mock_host(&self, state: &MockRemoteState) -> MockHost {
-        MockHost {
-            menu_version: state.menu_version,
-            offline: state.offline,
-            serve_tampered: state.tampered,
-        }
+        MockHost::new(state.menu_version, state.offline, state.tampered)
     }
 }
 

@@ -343,8 +343,8 @@ pub fn print_voucher(
 ) -> Result<PrintReceipt, String> {
     let mut guard = lock(&state)?;
     let mut voucher = Voucher::new(&template, &tx_code);
-    voucher.reference = reference;
-    voucher.fields = fields;
+    voucher.set_reference(reference);
+    voucher.set_fields(fields);
     ShellApp::new(&mut guard).print_voucher(voucher)
 }
 

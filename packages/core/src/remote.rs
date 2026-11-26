@@ -436,10 +436,10 @@ impl Codec for JsonCodec {
 /// 定长报文字段定义（ASCII，不足补空格/前导零）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FieldSpec {
-    pub name: String,
-    pub width: usize,
+    name: String,
+    width: usize,
     /// true = 右对齐补零（金额、序号）；false = 左对齐补空格（名称）
-    pub numeric: bool,
+    numeric: bool,
 }
 
 impl FieldSpec {
@@ -466,7 +466,7 @@ impl FieldSpec {
 /// 这是很多行内老系统的实际形态（不 XML、不 JSON），所以必须能进这套抽象。
 #[derive(Debug, Clone)]
 pub struct FixedWidthCodec {
-    pub layout: Vec<FieldSpec>,
+    layout: Vec<FieldSpec>,
 }
 
 impl FixedWidthCodec {

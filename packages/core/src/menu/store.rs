@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn install_then_load_roundtrip() {
         let (_d, store) = store();
-        let host = MockHost::new(7);
+        let host = MockHost::new(7, false, false);
         let bytes = host.download().unwrap();
         let installed = store.install(&bytes).unwrap();
         assert_eq!(installed, demo_tree(7));
@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn tampered_file_on_disk_is_rejected() {
         let (_d, store) = store();
-        let bytes = MockHost::new(7).download().unwrap();
+        let bytes = MockHost::new(7, false, false).download().unwrap();
         store.install(&bytes).unwrap();
 
         // 模拟被十六进制编辑器改过
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn install_rejects_tampered_bytes_without_writing() {
         let (_d, store) = store();
-        let mut bytes = MockHost::new(7).download().unwrap();
+        let mut bytes = MockHost::new(7, false, false).download().unwrap();
         let idx = bytes.len() / 2;
         bytes[idx] ^= 0xFF;
         assert!(store.install(&bytes).is_err());
@@ -288,7 +288,7 @@ mod tests {
     fn prune_keeps_only_latest_two() {
         let (_d, store) = store();
         for v in [5u64, 6, 7, 8] {
-            let bytes = MockHost::new(v).download().unwrap();
+            let bytes = MockHost::new(v, false, false).download().unwrap();
             store.install(&bytes).unwrap();
         }
         assert_eq!(store.list_versions(), vec![8, 7]);
@@ -299,10 +299,10 @@ mod tests {
     fn rollback_to_previous_version_is_possible() {
         let (_d, store) = store();
         store
-            .install(&MockHost::new(7).download().unwrap())
+            .install(&MockHost::new(7, false, false).download().unwrap())
             .unwrap();
         store
-            .install(&MockHost::new(8).download().unwrap())
+            .install(&MockHost::new(8, false, false).download().unwrap())
             .unwrap();
 
         let old = store.load_version(7).unwrap();
@@ -327,7 +327,7 @@ mod tests {
         use rand::rngs::OsRng;
         let other = ed25519_dalek::SigningKey::generate(&mut OsRng);
         let store = MenuStore::new(dir.path().join("menu"), other.verifying_key());
-        let bytes = MockHost::new(7).download().unwrap();
+        let bytes = MockHost::new(7, false, false).download().unwrap();
         assert!(matches!(
             store.install(&bytes),
             Err(StoreError::Pack(PackError::SignatureInvalid))

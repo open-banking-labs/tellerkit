@@ -61,11 +61,11 @@ pub fn policy(
     require_signed: Option<bool>,
     require_tls: Option<bool>,
 ) -> LoadPolicy {
-    LoadPolicy {
-        pubkey: crate::config_sig::config_pubkey(),
-        require_signed: release || require_signed.unwrap_or(false),
-        require_tls: release || require_tls.unwrap_or(false),
-    }
+    LoadPolicy::new(
+        crate::config_sig::config_pubkey(),
+        release || require_signed.unwrap_or(false),
+        release || require_tls.unwrap_or(false),
+    )
 }
 
 /// 从环境变量组装策略。非法取值直接报错，不静默取默认。
@@ -79,7 +79,7 @@ pub fn policy_from_env(release: bool) -> Result<LoadPolicy, String> {
         std::env::var("TK_REQUIRE_TLS").ok().as_deref(),
     )?;
     let policy = policy(release, signed, tls);
-    if release && policy.require_signed && policy.pubkey.is_none() {
+    if release && policy.require_signed() && policy.pubkey().is_none() {
         return Err("release 构建必须设置 TK_CONFIG_PUBKEY：拒绝加载未验签的端点".into());
     }
     Ok(policy)
@@ -108,15 +108,16 @@ pub fn resolve_remote(
     match endpoint_config::load_router_with(path, policy) {
         Ok(loaded) => Ok(RemoteSetup {
             choice: RemoteChoice {
-                remote: Arc::new(
-                    RoutedBanking::new(loaded.router).with_idempotency(loaded.idempotent_tx),
-                ),
+                remote: Arc::new({
+                    let (router, idempotent_tx) = loaded.into_parts();
+                    RoutedBanking::new(router).with_idempotency(idempotent_tx)
+                }),
                 mock: None,
             },
             note: Some(format!(
                 "已按 {} 接入真实端点{}",
                 path.display(),
-                if policy.require_tls {
+                if policy.require_tls() {
                     ""
                 } else {
                     "（未强制 TLS：仅调试构建允许）"
@@ -165,31 +166,27 @@ mod tests {
 
     /// 构造测试策略：pubkey 为真给一把占位公钥，否则 None。
     fn lp(pubkey: bool, signed: bool, tls: bool) -> LoadPolicy {
-        LoadPolicy {
-            pubkey: pubkey.then(|| "00".repeat(32)),
-            require_signed: signed,
-            require_tls: tls,
-        }
+        LoadPolicy::new(pubkey.then(|| "00".repeat(32)), signed, tls)
     }
 
     #[test]
     fn release_forces_signed_and_tls_even_if_asked_not_to() {
         let p = policy(true, Some(false), Some(false));
-        assert!(p.require_signed, "release 不允许关掉配置验签");
-        assert!(p.require_tls, "release 不允许关掉 TLS");
+        assert!(p.require_signed(), "release 不允许关掉配置验签");
+        assert!(p.require_tls(), "release 不允许关掉 TLS");
     }
 
     #[test]
     fn debug_defaults_to_loose_but_can_be_tightened() {
         let loose = policy(false, None, None);
         assert!(
-            !loose.require_signed && !loose.require_tls,
+            !loose.require_signed() && !loose.require_tls(),
             "调试构建不强制"
         );
 
         let tight = policy(false, Some(true), Some(true));
         assert!(
-            tight.require_signed && tight.require_tls,
+            tight.require_signed() && tight.require_tls(),
             "调试构建可显式收紧"
         );
     }

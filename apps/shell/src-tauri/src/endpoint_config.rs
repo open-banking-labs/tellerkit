@@ -22,19 +22,26 @@ use tellerkit_transport_net::{HttpTransport, TcpTransport};
 /// 配置文件的根结构。
 #[derive(Debug, Deserialize)]
 pub struct EndpointConfig {
-    pub services: BTreeMap<String, Vec<EndpointSpec>>,
+    services: BTreeMap<String, Vec<EndpointSpec>>,
     /// 交易服务是否按幂等键去重（`changes/001`）。
     ///
     /// **默认 false**：没写就是没有。写错这一位会让离线挂起变成重复扣账。
     #[serde(default)]
-    pub idempotent_tx: bool,
+    idempotent_tx: bool,
 }
 
 /// 加载结果：路由 + 交易服务是否声明幂等。
 #[derive(Debug)]
 pub struct LoadedEndpoints {
-    pub router: Router,
-    pub idempotent_tx: bool,
+    router: Router,
+    idempotent_tx: bool,
+}
+
+impl LoadedEndpoints {
+    /// 交给装配层：一次性取出路由与幂等声明，不对内部分段暴露。
+    pub fn into_parts(self) -> (Router, bool) {
+        (self.router, self.idempotent_tx)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,14 +139,34 @@ pub fn load_router(path: &Path) -> Result<LoadedEndpoints, String> {
 #[derive(Debug, Clone, Default)]
 pub struct LoadPolicy {
     /// 配置公钥（hex）。`None` 表示未配置。
-    pub pubkey: Option<String>,
+    pubkey: Option<String>,
     /// 是否强制要求签名。
-    pub require_signed: bool,
+    require_signed: bool,
     /// 是否禁止明文端点（生产应为 true）。
-    pub require_tls: bool,
+    require_tls: bool,
 }
 
 impl LoadPolicy {
+    pub fn new(pubkey: Option<String>, require_signed: bool, require_tls: bool) -> Self {
+        Self {
+            pubkey,
+            require_signed,
+            require_tls,
+        }
+    }
+
+    pub fn pubkey(&self) -> Option<&str> {
+        self.pubkey.as_deref()
+    }
+
+    pub fn require_signed(&self) -> bool {
+        self.require_signed
+    }
+
+    pub fn require_tls(&self) -> bool {
+        self.require_tls
+    }
+
     pub fn from_env() -> Self {
         Self {
             pubkey: crate::config_sig::config_pubkey(),

@@ -24,7 +24,7 @@ pub use device::{
 pub use menu::{
     boot_load, check_and_update, filter_visible, open, pubkey_from_hex, pubkey_to_hex, reload,
     BootError, BootOutcome, LoadSource, LoadedMenu, MenuNode, MenuPack, MenuStore, MenuTree,
-    MenuView, NodeStatus, NodeType, PackError, StoreError, UpdateOutcome, SIGNATURE_LEN,
+    MenuView, NodeStatus, NodeType, PackError, StoreError, TreeError, UpdateOutcome, SIGNATURE_LEN,
 };
 pub use perm::PermSnapshot;
 pub use pkg::{BizManifest, BizPackage, LoadPlan, PackageDecision, PkgError, ShellRange, Version};

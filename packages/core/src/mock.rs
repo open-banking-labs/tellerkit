@@ -236,10 +236,10 @@ pub enum HostError {
 /// mock 服务端。`offline` 用来验证"断网启动仍可用本地菜单包"。
 #[derive(Debug, Clone)]
 pub struct MockHost {
-    pub menu_version: u64,
-    pub offline: bool,
+    menu_version: u64,
+    offline: bool,
     /// 每次"下载"都在这里切换成被篡改的包，用于演示验签失败回退。
-    pub serve_tampered: bool,
+    serve_tampered: bool,
 }
 
 impl Default for MockHost {
@@ -253,10 +253,11 @@ impl Default for MockHost {
 }
 
 impl MockHost {
-    pub fn new(menu_version: u64) -> Self {
+    pub fn new(menu_version: u64, offline: bool, serve_tampered: bool) -> Self {
         Self {
             menu_version,
-            ..Default::default()
+            offline,
+            serve_tampered,
         }
     }
 
@@ -368,7 +369,7 @@ mod tests {
 
     #[test]
     fn downloaded_pack_verifies_and_matches_tree() {
-        let host = MockHost::new(9);
+        let host = MockHost::new(9, false, false);
         let bytes = host.download().unwrap();
         let tree = pack::open(&bytes, &demo_verifying_key()).unwrap();
         assert_eq!(tree, demo_tree(9));
@@ -379,7 +380,7 @@ mod tests {
     fn tampered_download_is_rejected() {
         let host = MockHost {
             serve_tampered: true,
-            ..MockHost::new(9)
+            ..MockHost::new(9, false, false)
         };
         let bytes = host.download().unwrap();
         assert!(pack::open(&bytes, &demo_verifying_key()).is_err());
@@ -389,7 +390,7 @@ mod tests {
     fn offline_host_errors() {
         let host = MockHost {
             offline: true,
-            ..MockHost::new(9)
+            ..MockHost::new(9, false, false)
         };
         assert_eq!(host.probe().unwrap_err(), HostError::Offline);
         assert_eq!(host.download().unwrap_err(), HostError::Offline);

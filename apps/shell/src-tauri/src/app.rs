@@ -628,12 +628,12 @@ impl<'a> ShellApp<'a> {
             .devices
             .ensure_allowed(&self.state.policy)
             .map_err(|e| e.to_string())?;
-        let tx_code = voucher.tx_code.clone();
-        let template = voucher.template.clone();
+        let tx_code = voucher.tx_code().to_string();
+        let template = voucher.template().to_string();
         let outcome = self
             .state
             .devices
-            .printer
+            .printer()
             .print(&voucher)
             .map_err(|e| e.to_string());
         let actor = self.actor();
