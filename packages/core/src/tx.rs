@@ -283,8 +283,6 @@ pub struct TxEngine {
     pending: Vec<TxRequest>,
     /// 持久化端口；None 表示纯内存模式（测试与浏览器预览）。
     journal: Option<Box<dyn TxJournal>>,
-    /// 最近一次记账失败。不改变交易结论，但必须能被上层看见。
-    journal_error: Option<String>,
 }
 
 impl std::fmt::Debug for TxEngine {
@@ -308,15 +306,12 @@ impl TxEngine {
     pub fn with_journal(mut self, journal: Box<dyn TxJournal>) -> Self {
         match journal.pending() {
             Ok(list) => self.pending = list,
-            Err(e) => self.journal_error = Some(format!("读取待重放队列失败：{e}")),
+            // 这里还没有 TxResult 可以挂提示，只能写诊断日志：
+            // 读不回挂起队列不能静默当作空队列。
+            Err(e) => eprintln!("读取待重放队列失败：{e}"),
         }
         self.journal = Some(journal);
         self
-    }
-
-    /// 取走最近一次记账错误（取走后清空，避免重复上报）。
-    pub fn take_journal_error(&mut self) -> Option<String> {
-        self.journal_error.take()
     }
 
     /// 提交一笔交易。
@@ -344,7 +339,7 @@ impl TxEngine {
         // 此刻我们并不知道主机是否已处理。若把"拒绝"永久缓存，柜员就再也无法安全重试；
         // 而换个新键重试又可能重复入账。正确做法是保留原键，让重试打到主机，
         // 由主机的幂等键去重收口。
-        let (result, cacheable) = match host.submit(&request) {
+        let (mut result, cacheable) = match host.submit(&request) {
             Ok(reference) => (TxResult::committed(reference), true),
             Err(HostError::Rejected(reason)) => {
                 (TxResult::rejected(&format!("主机拒绝：{reason}")), true)
@@ -370,32 +365,36 @@ impl TxEngine {
             ),
         };
 
+        // 记账失败不改变结论：交易已经发生，日志没写成是运维问题，不是业务问题。
+        // 提示直接并入本次结果，缓存的也是带提示的版本。
+        if let Some(journal) = self.journal.as_deref() {
+            if let Err(e) = journal.record(&request, &result) {
+                result.message.push_str(&format!("（记账失败：{e}）"));
+            }
+            if result.status() == TxStatus::Pending {
+                if let Err(e) = journal.enqueue(&request) {
+                    result.message.push_str(&format!("（记账失败：{e}）"));
+                }
+            }
+        }
+
         if cacheable {
             self.idempotent
                 .insert(request.idempotency_key.clone(), (signature, result.clone()));
         }
-
-        // 记账失败不改变结论：交易已经发生，日志没写成是运维问题，不是业务问题。
-        let mut journal_err = None;
-        if let Some(journal) = self.journal.as_deref() {
-            if let Err(e) = journal.record(&request, &result) {
-                journal_err = Some(e);
-            }
-            if result.status() == TxStatus::Pending {
-                if let Err(e) = journal.enqueue(&request) {
-                    journal_err = Some(e);
-                }
-            }
-        }
-        if journal_err.is_some() {
-            self.journal_error = journal_err;
-        }
         result
     }
 
-    /// 待重放的请求（按提交顺序）。
-    pub fn pending_requests(&self) -> &[TxRequest] {
-        &self.pending
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// 待重放的幂等键，按队列顺序。
+    pub fn pending_keys(&self) -> Vec<String> {
+        self.pending
+            .iter()
+            .map(|r| r.idempotency_key.clone())
+            .collect()
     }
 
     /// 重放**单笔**挂起交易，供调度器按退避节奏逐笔调用。
@@ -414,7 +413,7 @@ impl TxEngine {
         let key = request.idempotency_key.clone();
         let signature = request_signature(&request);
 
-        let result = match host.submit(&request) {
+        let mut result = match host.submit(&request) {
             Ok(reference) => TxResult::committed(reference),
             Err(HostError::Rejected(reason)) => TxResult::rejected(&format!("主机拒绝：{reason}")),
             Err(HostError::Timeout) | Err(HostError::Unavailable) => {
@@ -424,23 +423,19 @@ impl TxEngine {
             }
         };
 
-        self.idempotent
-            .insert(key.clone(), (signature, result.clone()));
-
-        let mut journal_err = None;
         if let Some(journal) = self.journal.as_deref() {
             if let Err(e) = journal.record(&request, &result) {
-                journal_err = Some(e);
+                result.message.push_str(&format!("（记账失败：{e}）"));
             }
             if result.status() == TxStatus::Committed {
                 if let Err(e) = journal.dequeue(&key) {
-                    journal_err = Some(e);
+                    result.message.push_str(&format!("（记账失败：{e}）"));
                 }
             }
         }
-        if journal_err.is_some() {
-            self.journal_error = journal_err;
-        }
+
+        self.idempotent
+            .insert(key.clone(), (signature, result.clone()));
         Some((key, result))
     }
 
@@ -597,10 +592,7 @@ mod tests {
         assert!(!result.replayable());
         assert!(result.message().contains("状态不明"));
         assert!(result.message().contains("待冲正"));
-        assert!(
-            engine.pending_requests().is_empty(),
-            "不允许离线的交易不得入队"
-        );
+        assert!(engine.pending_count() == 0, "不允许离线的交易不得入队");
     }
 
     // S-04
@@ -612,8 +604,8 @@ mod tests {
 
         assert_eq!(result.status(), TxStatus::Pending);
         assert!(result.replayable());
-        assert_eq!(engine.pending_requests().len(), 1);
-        assert_eq!(engine.pending_requests()[0].idempotency_key(), "k-pend");
+        assert_eq!(engine.pending_count(), 1);
+        assert_eq!(engine.pending_keys()[0], "k-pend");
     }
 
     // S-05
@@ -626,7 +618,7 @@ mod tests {
         assert_eq!(result.status(), TxStatus::Rejected);
         assert!(!result.replayable());
         assert!(result.message().contains("余额不足"));
-        assert!(engine.pending_requests().is_empty());
+        assert!(engine.pending_count() == 0);
     }
 
     #[test]
@@ -634,12 +626,12 @@ mod tests {
         let host = ScriptedHost::new(vec![Err(HostError::Unavailable), Ok("TX-REPLAY-1".into())]);
         let mut engine = TxEngine::new();
         engine.submit(&host, req("k-r").offline(true));
-        assert_eq!(engine.pending_requests().len(), 1);
+        assert_eq!(engine.pending_count(), 1);
 
         let outcomes = engine.replay_pending(&host);
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0].1.status(), TxStatus::Committed);
-        assert!(engine.pending_requests().is_empty());
+        assert!(engine.pending_count() == 0);
         assert_eq!(host.calls(), 2);
     }
 
@@ -651,7 +643,7 @@ mod tests {
 
         let outcomes = engine.replay_pending(&host);
         assert_eq!(outcomes[0].1.status(), TxStatus::Pending);
-        assert_eq!(engine.pending_requests().len(), 1, "不可达时不得丢单");
+        assert_eq!(engine.pending_count(), 1, "不可达时不得丢单");
     }
 
     #[test]
@@ -708,10 +700,7 @@ mod tests {
             "重复读取不得污染缓存：前缀不能每次叠加"
         );
         assert_eq!(host.calls(), 1, "主机只被调用一次");
-        assert!(
-            engine.pending_requests().is_empty(),
-            "成功交易不得进入待处理队列"
-        );
+        assert!(engine.pending_count() == 0, "成功交易不得进入待处理队列");
     }
 
     // S-02 对抗：首次是业务拒绝。幂等索引里存的是"拒绝"，再次提交不得变成
@@ -738,10 +727,7 @@ mod tests {
             "重复提交应带回首次拒绝原因"
         );
         assert_eq!(host.calls(), 1, "业务拒绝的幂等键不得再次打主机");
-        assert!(
-            engine.pending_requests().is_empty(),
-            "业务拒绝不得进入待处理队列"
-        );
+        assert!(engine.pending_count() == 0, "业务拒绝不得进入待处理队列");
     }
 
     // S-02 对抗：首次是断网挂起。重复提交不得再次入队——否则重放时同一笔
@@ -762,11 +748,11 @@ mod tests {
         }
         assert_eq!(host.calls(), 1, "挂起后的重复提交不得再打主机");
         assert_eq!(
-            engine.pending_requests().len(),
+            engine.pending_count(),
             1,
             "重复提交不得重复入队（否则重放会重复入账）"
         );
-        assert_eq!(engine.pending_requests()[0].idempotency_key(), "k-dup-pend");
+        assert_eq!(engine.pending_keys()[0], "k-dup-pend");
     }
 
     // S-02 对抗：先挂起、再重放成功，之后用同一键重复提交，必须返回"已入账"。
@@ -788,7 +774,7 @@ mod tests {
         assert_eq!(duplicate.reference(), Some("TX-REPLAY-A"));
         assert!(!duplicate.replayable());
         assert_eq!(host.calls(), 2, "重放成功后的重复提交不得再打主机");
-        assert!(engine.pending_requests().is_empty(), "重放成功后队列应为空");
+        assert!(engine.pending_count() == 0, "重放成功后队列应为空");
     }
 
     // S-02 对抗：挂起 → 重放失败（仍在队列）→ 再次重复提交 → 再重放成功。
@@ -810,18 +796,14 @@ mod tests {
         let first_replay = engine.replay_pending(&host);
         assert_eq!(first_replay[0].1.status(), TxStatus::Pending);
         assert_eq!(host.calls(), 2, "提交一次 + 重放失败一次");
-        assert_eq!(
-            engine.pending_requests().len(),
-            1,
-            "重放失败必须保留在队列中"
-        );
+        assert_eq!(engine.pending_count(), 1, "重放失败必须保留在队列中");
 
         let duplicate = engine.submit(&host, req("k-dup-retry").offline(true));
         assert_eq!(duplicate.status(), TxStatus::Pending);
         assert!(duplicate.replayable());
         assert!(duplicate.message().contains("重复提交"));
         assert_eq!(host.calls(), 2, "重复提交不得再打主机");
-        assert_eq!(engine.pending_requests().len(), 1, "重复提交不得二次入队");
+        assert_eq!(engine.pending_count(), 1, "重复提交不得二次入队");
 
         let second_replay = engine.replay_pending(&host);
         assert_eq!(second_replay[0].1.status(), TxStatus::Committed);
@@ -831,7 +813,7 @@ mod tests {
             3,
             "重放把同一个 key 再次发给主机：依赖主机侧按 key 去重"
         );
-        assert!(engine.pending_requests().is_empty());
+        assert!(engine.pending_count() == 0);
 
         let after = engine.submit(&host, req("k-dup-retry").offline(true));
         assert_eq!(after.status(), TxStatus::Committed);
@@ -900,7 +882,7 @@ mod tests {
         assert!(second.message().contains("幂等键已用于另一笔交易"));
         assert!(second.reference().is_none(), "不得把第一笔的流水号给出去");
         assert_eq!(host.calls(), 1, "载荷冲突在本地就能判，不必打主机");
-        assert!(engine.pending_requests().is_empty());
+        assert!(engine.pending_count() == 0);
     }
 
     // S-02 边界：去重必须按 key 隔离。不同幂等键不得互相吞掉，
@@ -916,11 +898,8 @@ mod tests {
         assert_eq!(a.status(), TxStatus::Pending);
         assert_eq!(b.status(), TxStatus::Pending);
         assert_eq!(host.calls(), 2, "不同幂等键各打一次主机");
-        let keys: Vec<&str> = engine
-            .pending_requests()
-            .iter()
-            .map(|request| request.idempotency_key())
-            .collect();
+        let queued = engine.pending_keys();
+        let keys: Vec<&str> = queued.iter().map(String::as_str).collect();
         assert_eq!(keys, vec!["k-a", "k-b"], "两笔都应入队，顺序为提交顺序");
     }
 }

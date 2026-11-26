@@ -314,28 +314,49 @@ impl BizPackage {
         }
     }
 
-    pub fn manifest(&self) -> &BizManifest {
-        &self.manifest
+    pub fn id(&self) -> String {
+        self.manifest.id.clone()
     }
 
-    pub fn menus(&self) -> &[MenuNode] {
-        &self.menus
+    pub fn version(&self) -> String {
+        self.manifest.version.clone()
     }
 
-    pub fn permissions(&self) -> &Permissions {
-        &self.permissions
+    pub fn menu_count(&self) -> usize {
+        self.menus.len()
     }
 
-    pub fn routes(&self) -> &BTreeMap<String, String> {
-        &self.routes
+    pub fn route_count(&self) -> usize {
+        self.routes.len()
     }
 
-    pub fn transactions(&self) -> &[TxMeta] {
-        &self.transactions
+    pub fn transaction_count(&self) -> usize {
+        self.transactions.len()
     }
 
-    pub fn assets(&self) -> &BTreeMap<String, String> {
-        &self.assets
+    /// 查路由对应的模块名，不暴露整张路由表。
+    pub fn route(&self, route: &str) -> Option<String> {
+        self.routes.get(route).cloned()
+    }
+
+    /// 取模块源码副本，不暴露资源表。
+    pub fn asset(&self, name: &str) -> Option<String> {
+        self.assets.get(name).cloned()
+    }
+
+    /// 兼容的主壳版本下限（副本，不暴露 manifest）。
+    pub fn min_shell(&self) -> String {
+        self.manifest.min_shell.clone()
+    }
+
+    /// 兼容的主壳版本上限（副本）。
+    pub fn max_shell(&self) -> String {
+        self.manifest.max_shell.clone()
+    }
+
+    /// 依赖包 ID 列表（副本）。
+    pub fn deps(&self) -> Vec<String> {
+        self.manifest.deps.clone()
     }
 
     /// 打包成带签名的 `.bizpkg` 字节流。
@@ -500,9 +521,8 @@ pub fn plan_load(packages: Vec<BizPackage>, shell: Version) -> LoadPlan {
     let mut candidates: BTreeMap<String, BizPackage> = BTreeMap::new();
 
     for package in packages {
-        let id = package.manifest.id.clone();
-        let range =
-            match ShellRange::parse(&package.manifest.min_shell, &package.manifest.max_shell) {
+        let id = package.id();
+        let range = match ShellRange::parse(&package.min_shell(), &package.max_shell()) {
                 Ok(r) => r,
                 Err(e) => {
                     plan.skipped.push(PackageDecision {
@@ -532,8 +552,8 @@ pub fn plan_load(packages: Vec<BizPackage>, shell: Version) -> LoadPlan {
     loop {
         let mut dropped = Vec::new();
         for (id, package) in &candidates {
-            for dep in &package.manifest.deps {
-                if !available.contains(dep) || !candidates.contains_key(dep) {
+            for dep in package.deps() {
+                if !available.contains(&dep) || !candidates.contains_key(&dep) {
                     dropped.push((id.clone(), dep.clone()));
                     break;
                 }
@@ -562,7 +582,7 @@ pub fn plan_load(packages: Vec<BizPackage>, shell: Version) -> LoadPlan {
         let mut progressed = false;
         for id in remaining.clone() {
             let package = &candidates[&id];
-            if package.manifest.deps.iter().all(|d| done.contains(d)) {
+            if package.deps().iter().all(|d| done.contains(d)) {
                 done.insert(id.clone());
                 remaining.retain(|x| x != &id);
                 ordered.push(package.clone());
@@ -676,13 +696,12 @@ pub fn dependency_depth(packages: &[BizPackage]) -> HashMap<String, usize> {
     let mut depth = HashMap::new();
     for package in packages {
         let d = package
-            .manifest
-            .deps
+            .deps()
             .iter()
             .map(|dep| depth.get(dep).copied().unwrap_or(0) + 1)
             .max()
             .unwrap_or(0);
-        depth.insert(package.manifest.id.clone(), d);
+        depth.insert(package.id(), d);
     }
     depth
 }

@@ -638,12 +638,15 @@ mod tests {
         // 模拟进程重启：重新打开账本并重建引擎
         let journal = SqliteJournal::open(&path).unwrap();
         let mut engine = tellerkit_core::tx::TxEngine::new().with_journal(Box::new(journal));
-        assert_eq!(engine.pending_requests().len(), 1, "重启后应读回挂起请求");
+        assert_eq!(engine.pending_count(), 1, "重启后应读回挂起请求");
 
         let outcomes = engine.replay_pending(&Online);
         assert_eq!(outcomes[0].1.status(), TxStatus::Committed);
-        assert!(engine.pending_requests().is_empty());
-        assert!(engine.take_journal_error().is_none(), "记账不应报错");
+        assert!(
+            !outcomes[0].1.message().contains("记账失败"),
+            "记账不应报错"
+        );
+        assert_eq!(engine.pending_count(), 0);
     }
 
     fn audit_event(action: &str, target: &str) -> AuditEvent {

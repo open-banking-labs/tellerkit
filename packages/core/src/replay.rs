@@ -404,11 +404,7 @@ pub fn run_once(
     now_secs: u64,
 ) -> ReplayRun {
     // 1. 接管引擎里尚未登记的挂起交易
-    let pending_keys: Vec<String> = engine
-        .pending_requests()
-        .iter()
-        .map(|r| r.idempotency_key().to_string())
-        .collect();
+    let pending_keys = engine.pending_keys();
     for key in &pending_keys {
         scheduler.track(key, now_secs);
     }
@@ -439,7 +435,7 @@ pub fn run_once(
     ReplayRun {
         attempted: due.len(),
         committed,
-        still_pending: engine.pending_requests().len(),
+        still_pending: engine.pending_count(),
         gave_up,
     }
 }
@@ -542,7 +538,7 @@ mod coordinator_tests {
         assert!(first.gave_up().is_empty());
         let second = run_once(&mut engine, &mut scheduler, &host, 110);
         assert_eq!(second.gave_up(), &["k1".to_string()][..]);
-        assert_eq!(engine.pending_requests().len(), 1, "放弃不等于丢弃");
+        assert_eq!(engine.pending_count(), 1, "放弃不等于丢弃");
 
         let third = run_once(&mut engine, &mut scheduler, &host, 999);
         assert_eq!(third.attempted(), 0, "放弃后不再自动重试");
@@ -560,7 +556,7 @@ mod coordinator_tests {
 
         // 手动重放掉这笔（模拟用户点了按钮）
         assert!(engine.replay_pending(&online).len() == 1);
-        assert_eq!(engine.pending_requests().len(), 0);
+        assert_eq!(engine.pending_count(), 0);
 
         // 自动重放接管时发现队列已空，应释放调度名额
         let run = run_once(&mut engine, &mut scheduler, &online, 200);

@@ -348,8 +348,8 @@ impl<'a> ShellApp<'a> {
         for package in &self.state.packages {
             notes.push(format!(
                 "已加载业务包 {} v{}",
-                package.manifest().id(),
-                package.manifest().version()
+                package.id(),
+                package.version()
             ));
         }
         for failure in &failures {
@@ -581,12 +581,7 @@ impl<'a> ShellApp<'a> {
             remote.as_ref(),
             now,
         );
-        let journal_error = self.state.tx.take_journal_error();
-        let actor = self.actor();
 
-        if let Some(err) = journal_error {
-            self.audit(&actor, "replay", "tx_queue", "failed", &err);
-        }
         if run.attempted() == 0 && run.still_pending() == 0 {
             return Ok("没有待重放的交易".to_string());
         }
@@ -604,6 +599,7 @@ impl<'a> ShellApp<'a> {
             run.still_pending(),
             run.gave_up().len()
         );
+        let actor = self.actor();
         self.audit(&actor, "replay", "tx_queue", "ok", &detail);
 
         Ok(format!(
@@ -620,7 +616,7 @@ impl<'a> ShellApp<'a> {
     }
 
     pub fn tx_pending_count(&self) -> usize {
-        self.state.tx.pending_requests().len()
+        self.state.tx.pending_count()
     }
 
     // ---------- 设备 ----------
@@ -709,10 +705,10 @@ impl<'a> ShellApp<'a> {
     pub fn package_module(&self, route: &str) -> Result<String, String> {
         self.require_unlocked("package_module")?;
         for package in &self.state.packages {
-            if let Some(module) = package.routes().get(route) {
-                return package.assets().get(module).cloned().ok_or_else(|| {
-                    format!("包 {} 的模块 {module} 未随包提供", package.manifest().id())
-                });
+            if let Some(module) = package.route(route) {
+                return package
+                    .asset(&module)
+                    .ok_or_else(|| format!("包 {} 的模块 {module} 未随包提供", package.id()));
             }
         }
         Err("该路由不是业务包提供的".to_string())

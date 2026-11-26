@@ -417,9 +417,9 @@ fn pkg_build(rest: &[String]) -> Result<(), String> {
     std::fs::write(out, &bytes).map_err(|e| format!("写入 {out} 失败: {e}"))?;
     println!(
         "已生成 {out}：{} v{} · {} 个菜单 · {} 字节",
-        package.manifest().id(),
-        package.manifest().version(),
-        package.menus().len(),
+        package.id(),
+        package.version(),
+        package.menu_count(),
         bytes.len()
     );
     Ok(())
@@ -434,11 +434,11 @@ fn pkg_verify(rest: &[String]) -> Result<(), String> {
         .map_err(|e| format!("验签失败: {e}"))?;
     println!(
         "验签通过: {} v{} · 菜单 {} · 路由 {} · 交易 {}",
-        package.manifest().id(),
-        package.manifest().version(),
-        package.menus().len(),
-        package.routes().len(),
-        package.transactions().len()
+        package.id(),
+        package.version(),
+        package.menu_count(),
+        package.route_count(),
+        package.transaction_count()
     );
     let shell = Version::parse(env!("CARGO_PKG_VERSION")).map_err(|e| e.to_string())?;
     let plan = tellerkit_core::pkg::plan_load(vec![package], shell);
