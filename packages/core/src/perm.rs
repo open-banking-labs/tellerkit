@@ -14,27 +14,82 @@ use ts_rs::TS;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct PermSnapshot {
-    pub user_id: String,
+    user_id: String,
     /// 柜员号，用于水印与审计。
-    pub teller_no: String,
+    teller_no: String,
     /// 网点号，用于水印与审计。
-    pub outlet_code: String,
+    outlet_code: String,
     /// 权限版本号。服务端权限变更时递增，客户端比对后决定是否重拉。
     #[ts(type = "number")]
-    pub perm_version: u64,
+    perm_version: u64,
     /// 可见的菜单节点 code（通常只放叶子/可导航节点）。
-    pub menu_codes: Vec<String>,
+    menu_codes: Vec<String>,
     /// 可见的按钮级权限码。
-    pub action_codes: Vec<String>,
+    action_codes: Vec<String>,
     /// 该用户的自定义快捷键：menuCode -> 组合键。
     #[serde(default)]
-    pub shortcuts: BTreeMap<String, String>,
+    shortcuts: BTreeMap<String, String>,
     /// 展示用角色名（审计与演示需要）。
     #[serde(default)]
-    pub role_label: String,
+    role_label: String,
 }
 
 impl PermSnapshot {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        user_id: &str,
+        teller_no: &str,
+        outlet_code: &str,
+        perm_version: u64,
+        menu_codes: Vec<String>,
+        action_codes: Vec<String>,
+        shortcuts: BTreeMap<String, String>,
+        role_label: &str,
+    ) -> Self {
+        Self {
+            user_id: user_id.to_string(),
+            teller_no: teller_no.to_string(),
+            outlet_code: outlet_code.to_string(),
+            perm_version,
+            menu_codes,
+            action_codes,
+            shortcuts,
+            role_label: role_label.to_string(),
+        }
+    }
+
+    pub fn user_id(&self) -> &str {
+        &self.user_id
+    }
+
+    pub fn teller_no(&self) -> &str {
+        &self.teller_no
+    }
+
+    pub fn outlet_code(&self) -> &str {
+        &self.outlet_code
+    }
+
+    pub fn perm_version(&self) -> u64 {
+        self.perm_version
+    }
+
+    pub fn menu_codes(&self) -> &[String] {
+        &self.menu_codes
+    }
+
+    pub fn action_codes(&self) -> &[String] {
+        &self.action_codes
+    }
+
+    pub fn shortcuts(&self) -> &BTreeMap<String, String> {
+        &self.shortcuts
+    }
+
+    pub fn role_label(&self) -> &str {
+        &self.role_label
+    }
+
     /// 判断菜单节点是否被授予。
     pub fn allows_menu(&self, code: &str) -> bool {
         self.menu_codes.iter().any(|c| c == code)
@@ -61,16 +116,16 @@ mod tests {
     use super::*;
 
     fn sample() -> PermSnapshot {
-        PermSnapshot {
-            user_id: "u1".into(),
-            teller_no: "T0231".into(),
-            outlet_code: "01023".into(),
-            perm_version: 7,
-            menu_codes: vec!["a".into(), "a.b".into()],
-            action_codes: vec!["action.print".into()],
-            shortcuts: BTreeMap::new(),
-            role_label: "柜员".into(),
-        }
+        PermSnapshot::new(
+            "u1",
+            "T0231",
+            "01023",
+            7,
+            vec!["a".into(), "a.b".into()],
+            vec!["action.print".into()],
+            BTreeMap::new(),
+            "柜员",
+        )
     }
 
     #[test]

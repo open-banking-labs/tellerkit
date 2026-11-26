@@ -17,16 +17,16 @@
 6. 命令层不得 `unwrap()`；错误必须翻译成人能看懂的文案。
 7. 权限快照不落盘；菜单隐藏 ≠ 安全。
 8. 端侧 AI 只预留契约位置，不写实现。
+9. 提交前跑 `node tools/check-bank-names.mjs`；不得出现具体银行名称/缩写。
+10. 不得跨模块直接读写对方结构体字段；不得把内部模块全部 `pub`（宪法第 11 条、`tools/check-module-depth.mjs`）。
 
 ## 编译纪律
 
-**不在本机跑 cargo。** 编译一律走 `scripts/remote-build.sh`（经 Tailscale 到首尔构建机），
-Windows / Ubuntu / macOS 产物都在那台机器上验证。本地只跑 `npm run gate` 的 node 部分。
+**不在本机跑 cargo。** 编译一律走 `scripts/remote-build.sh`（经 Tailscale 到首尔构建机），Windows / Ubuntu / macOS 产物都在那台机器上验证；本地只跑 `npm run gate` 的 node 部分。
 
 ## 分支纪律
 
-`main` 受保护：**改动必须走 PR，且 `gate` 检查通过才能合并**。禁止直推、禁止 force push。
-分支命名：`feat/…`、`fix/…`、`chore/…`、`docs/…`。
+`main` 受保护：**改动必须走 PR，且 `gate` 检查通过才能合并**；禁止直推/force push。分支：`feat/` `fix/` `chore/` `docs/`。
 
 ## 入口导航
 
@@ -39,7 +39,7 @@ Windows / Ubuntu / macOS 产物都在那台机器上验证。本地只跑 `npm r
 | 界面（只渲染） | `apps/shell/src/` |
 | 业务包 | `packages/biz-*/` |
 | Agent 预设 | `.agents/presets/` |
-| 门禁与路径发现 | `tools/` |
+| 门禁 / 模块化 / 路径发现 | `tools/` · `docs/architecture.md` §2.1 |
 | Rust 写法 | `docs/rust-style.md`（Google Rust Style Guide 落地版） |
 | 边界 / 上生产 | `docs/desktop-scope.md` · `docs/production-readiness.md` |
 

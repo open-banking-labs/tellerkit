@@ -51,11 +51,15 @@ TellerKit 把菜单树做成**本地签名的二进制包**，启动路径上没
 npm install
 npm run dev                # 浏览器预览，静态数据；改界面用这个
 npm run tauri:dev          # 真实窗口；验签/会话/设备必须在这里验
-npm run gate               # 全部门禁，唯一裁决入口
+npm run gate               # 本地静态预检（见下方说明）
 ```
 
-`gate` = 五道检查（层级边界 / 契约一致 / 任务结构 / AI 规则 / 轨迹留痕）+ `cargo fmt`。
-人和 AI 都由它裁决，"我觉得跑通了"不算。
+`gate` = 七道检查（层级边界 / 契约一致 / 任务结构 / AI 规则 / 轨迹留痕 / 银行名称 / 版本一致）+ `cargo fmt`。
+提交前另有 `.githooks/pre-commit` 只跑银行名称这一道；安装：`git config core.hooksPath .githooks`。
+
+**裁决口径**：`npm run gate` 只做静态预检，exit 0 不代表编译或测试通过。
+合并以分支保护要求的 CI checks 为准（test / clippy / bindings / build / gate 全绿）；
+本机按编译纪律不跑 cargo，完整结论看 CI。理由见 [changes/015-gate-adjudication.md](changes/015-gate-adjudication.md)。
 
 首次启动会用 mock 服务端拉一个菜单包，之后断网可启动：
 
@@ -89,13 +93,19 @@ L4 领域   packages/core           纯 Rust，无 GUI / DB / 网络依赖
 | [docs/desktop-scope.md](docs/desktop-scope.md) | 不确定某段逻辑该在端上还是远端 |
 | [docs/security-boundary.md](docs/security-boundary.md) | 对外讲安全，或评审边界 |
 | [docs/production-readiness.md](docs/production-readiness.md) | 上线前逐条核对 |
+| [docs/reviews/scale-readiness-review-2026-11-25.md](docs/reviews/scale-readiness-review-2026-11-25.md) | 按大型银行生产规模推演整改，排期与验收用 |
+| [docs/project-backlog.md](docs/project-backlog.md) | 项目级整改总台账：先去重，再按信任/资金/交付排序 |
+| [docs/reviews/architecture-review-backlog.md](docs/reviews/architecture-review-backlog.md) | 架构评审的 29 条细项与验收标准 |
+| [docs/ui-ux-backlog.md](docs/ui-ux-backlog.md) | 主壳产品化细项（19 条 + 7 个阻塞） |
+| [docs/ai-leverage-backlog.md](docs/ai-leverage-backlog.md) | AI 杠杆与证据链细项 |
 | [docs/PLAN.md](docs/PLAN.md) | 想看最初诉求与路线 |
+| [CHANGELOG.md](CHANGELOG.md) | 版本变更记录（版本唯一来源见 `Cargo.toml`） |
 
 规模数字不手抄：`npm run stats`。
 
 ## 贡献
 
-**AI 从 [AGENTS.md](AGENTS.md) 开始，不要从本文件开始。** 那里有只读区、8 条禁令和
+**AI 从 [AGENTS.md](AGENTS.md) 开始，不要从本文件开始。** 那里有只读区、9 条禁令和
 逐级下发的阅读顺序：根 `AGENTS.md` → `docs/constitution.md` → 目标目录最近的 `AGENTS.md`
 → 该目录 `README.md`。规则只写一处，本文件不重复。
 

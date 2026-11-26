@@ -6,8 +6,8 @@
 //! 只存在于服务端构建环节，客户端只内置公钥。
 
 use crate::banking::{MenuSource, MenuVersionProbe, RemoteError};
-use crate::model::{MenuNode, MenuTree, NodeStatus};
-use crate::pack::MenuPack;
+use crate::menu::model::{MenuNode, MenuTree, NodeStatus};
+use crate::menu::pack::MenuPack;
 use crate::perm::PermSnapshot;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use std::collections::BTreeMap;
@@ -31,14 +31,14 @@ pub fn demo_verifying_key() -> VerifyingKey {
 }
 
 pub fn demo_pubkey_hex() -> String {
-    crate::pack::pubkey_to_hex(&demo_verifying_key())
+    crate::menu::pack::pubkey_to_hex(&demo_verifying_key())
 }
 
 /// 演示菜单树：覆盖典型柜面分组、叶子与按钮级权限。
 pub fn demo_tree(menu_version: u64) -> MenuTree {
     fn page(code: &str, parent: &str, title: &str, sort: i32, actions: &[&str]) -> MenuNode {
         let mut node = MenuNode::page(code, Some(parent), title, sort);
-        node.actions = actions.iter().map(|s| s.to_string()).collect();
+        node.set_actions(actions.iter().map(|s| s.to_string()).collect());
         node
     }
 
@@ -108,8 +108,8 @@ pub fn demo_tree(menu_version: u64) -> MenuTree {
     ];
 
     // 演示 `status=hidden` 的效果：节点被授予但状态为 hidden 时不出现。
-    if let Some(n) = nodes.iter_mut().find(|n| n.code == "system.cache") {
-        n.status = NodeStatus::Hidden;
+    if let Some(n) = nodes.iter_mut().find(|n| n.code() == "system.cache") {
+        n.set_status(NodeStatus::Hidden);
     }
 
     MenuTree::new(menu_version, nodes)
@@ -208,21 +208,20 @@ impl DemoRole {
     }
 
     pub fn snapshot(self, perm_version: u64) -> PermSnapshot {
-        PermSnapshot {
-            user_id: format!("u-{}", self.id()),
-            teller_no: match self {
+        PermSnapshot::new(
+            &format!("u-{}", self.id()),
+            match self {
                 DemoRole::Teller => "T0231",
                 DemoRole::Supervisor => "T0101",
                 DemoRole::Lobby => "T0450",
-            }
-            .to_string(),
-            outlet_code: "01023".to_string(),
+            },
+            "01023",
             perm_version,
-            menu_codes: self.menu_codes().into_iter().map(String::from).collect(),
-            action_codes: self.action_codes().into_iter().map(String::from).collect(),
-            shortcuts: self.shortcuts(),
-            role_label: self.label().to_string(),
-        }
+            self.menu_codes().into_iter().map(String::from).collect(),
+            self.action_codes().into_iter().map(String::from).collect(),
+            self.shortcuts(),
+            self.label(),
+        )
     }
 }
 
@@ -237,10 +236,10 @@ pub enum HostError {
 /// mock 服务端。`offline` 用来验证"断网启动仍可用本地菜单包"。
 #[derive(Debug, Clone)]
 pub struct MockHost {
-    pub menu_version: u64,
-    pub offline: bool,
+    menu_version: u64,
+    offline: bool,
     /// 每次"下载"都在这里切换成被篡改的包，用于演示验签失败回退。
-    pub serve_tampered: bool,
+    serve_tampered: bool,
 }
 
 impl Default for MockHost {
@@ -254,10 +253,11 @@ impl Default for MockHost {
 }
 
 impl MockHost {
-    pub fn new(menu_version: u64) -> Self {
+    pub fn new(menu_version: u64, offline: bool, serve_tampered: bool) -> Self {
         Self {
             menu_version,
-            ..Default::default()
+            offline,
+            serve_tampered,
         }
     }
 
@@ -265,11 +265,11 @@ impl MockHost {
         if self.offline {
             return Err(HostError::Offline);
         }
-        Ok(MenuVersionProbe {
-            latest: self.menu_version,
-            shell_compat_min: SHELL_COMPAT_MIN,
-            shell_compat_max: SHELL_COMPAT_MAX,
-        })
+        Ok(MenuVersionProbe::new(
+            self.menu_version,
+            SHELL_COMPAT_MIN,
+            SHELL_COMPAT_MAX,
+        ))
     }
 
     pub fn download(&self) -> Result<Vec<u8>, HostError> {
@@ -284,9 +284,9 @@ impl MockHost {
             &demo_signing_key(),
         )
         .map_err(|e| HostError::Pack(e.to_string()))?;
-        if self.serve_tampered && bytes.len() > crate::pack::HEADER_LEN + 3 {
+        if self.serve_tampered && bytes.len() > crate::menu::pack::HEADER_LEN + 3 {
             // 故意改坏一个 payload 字节：客户端必须拒绝并回退。
-            let idx = crate::pack::HEADER_LEN + 3;
+            let idx = crate::menu::pack::HEADER_LEN + 3;
             bytes[idx] ^= 0xFF;
         }
         Ok(bytes)
@@ -316,8 +316,8 @@ impl MenuSource for MockHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filter::filter_visible;
-    use crate::pack;
+    use crate::menu::filter::filter_visible;
+    use crate::menu::pack;
 
     #[test]
     fn demo_tree_is_valid() {
@@ -369,7 +369,7 @@ mod tests {
 
     #[test]
     fn downloaded_pack_verifies_and_matches_tree() {
-        let host = MockHost::new(9);
+        let host = MockHost::new(9, false, false);
         let bytes = host.download().unwrap();
         let tree = pack::open(&bytes, &demo_verifying_key()).unwrap();
         assert_eq!(tree, demo_tree(9));
@@ -380,7 +380,7 @@ mod tests {
     fn tampered_download_is_rejected() {
         let host = MockHost {
             serve_tampered: true,
-            ..MockHost::new(9)
+            ..MockHost::new(9, false, false)
         };
         let bytes = host.download().unwrap();
         assert!(pack::open(&bytes, &demo_verifying_key()).is_err());
@@ -390,7 +390,7 @@ mod tests {
     fn offline_host_errors() {
         let host = MockHost {
             offline: true,
-            ..MockHost::new(9)
+            ..MockHost::new(9, false, false)
         };
         assert_eq!(host.probe().unwrap_err(), HostError::Offline);
         assert_eq!(host.download().unwrap_err(), HostError::Offline);

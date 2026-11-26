@@ -9,7 +9,7 @@
 //!
 //! 整个函数是纯内存递归，2000 节点量级 < 1ms。
 
-use crate::model::{MenuNode, MenuTree, NodeStatus, NodeType};
+use crate::menu::model::{MenuNode, MenuTree, NodeStatus, NodeType};
 use crate::perm::PermSnapshot;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -19,27 +19,27 @@ use ts_rs::TS;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct MenuView {
-    pub code: String,
-    pub title: String,
+    code: String,
+    title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub title_key: Option<String>,
+    title_key: Option<String>,
     #[serde(rename = "type")]
-    pub node_type: NodeType,
+    node_type: NodeType,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub route: Option<String>,
+    route: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub icon: Option<String>,
-    pub sort: i32,
+    icon: Option<String>,
+    sort: i32,
     /// `shell` 或 `pkg:<id>`。前端据此决定用主壳页面还是加载业务包模块。
-    pub source: String,
+    source: String,
     /// 自身是否被授予权限。`false` 表示它只是"容器"（因为子孙有权才留下），
     /// 前端应渲染为不可点击的分组标题。
-    pub direct: bool,
+    direct: bool,
     /// 过滤后的按钮级权限码。
     #[serde(default)]
-    pub actions: Vec<String>,
+    actions: Vec<String>,
     #[serde(default)]
-    pub children: Vec<MenuView>,
+    children: Vec<MenuView>,
 }
 
 impl MenuView {
@@ -62,11 +62,11 @@ pub fn filter_visible(tree: &MenuTree, snapshot: &PermSnapshot) -> Vec<MenuView>
 
     let mut children: HashMap<&str, Vec<&MenuNode>> = HashMap::new();
     let mut roots: Vec<&MenuNode> = Vec::new();
-    for node in &tree.nodes {
-        if !node.node_type.is_navigable() {
+    for node in tree.nodes() {
+        if !node.node_type().is_navigable() {
             continue; // Action 不进导航树
         }
-        match node.parent_code.as_deref() {
+        match node.parent_code() {
             Some(parent) => children.entry(parent).or_default().push(node),
             None => roots.push(node),
         }
@@ -74,7 +74,7 @@ pub fn filter_visible(tree: &MenuTree, snapshot: &PermSnapshot) -> Vec<MenuView>
     for list in children.values_mut() {
         sort_nodes(list);
     }
-    roots.sort_by(|a, b| a.sort.cmp(&b.sort).then_with(|| a.code.cmp(&b.code)));
+    roots.sort_by(|a, b| a.sort().cmp(&b.sort()).then_with(|| a.code().cmp(b.code())));
 
     let mut visited = Vec::new();
     roots
@@ -84,7 +84,7 @@ pub fn filter_visible(tree: &MenuTree, snapshot: &PermSnapshot) -> Vec<MenuView>
 }
 
 fn sort_nodes(list: &mut [&MenuNode]) {
-    list.sort_by(|a, b| a.sort.cmp(&b.sort).then_with(|| a.code.cmp(&b.code)));
+    list.sort_by(|a, b| a.sort().cmp(&b.sort()).then_with(|| a.code().cmp(b.code())));
 }
 
 fn build(
@@ -94,17 +94,17 @@ fn build(
     action_set: &std::collections::HashSet<&str>,
     visited: &mut Vec<String>,
 ) -> Option<MenuView> {
-    if node.status == NodeStatus::Hidden {
+    if node.status() == NodeStatus::Hidden {
         return None;
     }
     // 防御：环或重复访问直接剪掉，保证不死循环。
-    if visited.iter().any(|c| c == &node.code) {
+    if visited.iter().any(|c| c.as_str() == node.code()) {
         return None;
     }
-    visited.push(node.code.clone());
+    visited.push(node.code().to_string());
 
     let mut kids = Vec::new();
-    if let Some(list) = children.get(node.code.as_str()) {
+    if let Some(list) = children.get(node.code()) {
         for child in list {
             if let Some(view) = build(child, children, menu_set, action_set, visited) {
                 kids.push(view);
@@ -112,28 +112,28 @@ fn build(
         }
     }
 
-    let direct = menu_set.contains(node.code.as_str());
+    let direct = menu_set.contains(node.code());
     // 自身无权且没有任何可见子孙 → 整棵子树剪掉。
     if !direct && kids.is_empty() {
         return None;
     }
 
     let actions = node
-        .actions
+        .actions()
         .iter()
         .filter(|a| action_set.contains(a.as_str()))
         .cloned()
         .collect();
 
     Some(MenuView {
-        code: node.code.clone(),
-        title: node.title.clone(),
-        title_key: node.title_key.clone(),
-        node_type: node.node_type,
-        route: node.route.clone(),
-        icon: node.icon.clone(),
-        sort: node.sort,
-        source: node.source.clone(),
+        code: node.code().to_string(),
+        title: node.title().to_string(),
+        title_key: node.title_key().map(|s| s.to_string()),
+        node_type: node.node_type(),
+        route: node.route().map(|s| s.to_string()),
+        icon: node.icon().map(|s| s.to_string()),
+        sort: node.sort(),
+        source: node.source().to_string(),
         direct,
         actions,
         children: kids,
@@ -143,21 +143,21 @@ fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::MenuNode;
+    use crate::menu::model::MenuNode;
     use crate::perm::PermSnapshot;
     use std::collections::BTreeMap;
 
     fn snapshot(menus: &[&str], actions: &[&str]) -> PermSnapshot {
-        PermSnapshot {
-            user_id: "u".into(),
-            teller_no: "T1".into(),
-            outlet_code: "O1".into(),
-            perm_version: 1,
-            menu_codes: menus.iter().map(|s| s.to_string()).collect(),
-            action_codes: actions.iter().map(|s| s.to_string()).collect(),
-            shortcuts: BTreeMap::new(),
-            role_label: "test".into(),
-        }
+        PermSnapshot::new(
+            "u",
+            "T1",
+            "O1",
+            1,
+            menus.iter().map(|s| s.to_string()).collect(),
+            actions.iter().map(|s| s.to_string()).collect(),
+            BTreeMap::new(),
+            "test",
+        )
     }
 
     fn sample_tree() -> MenuTree {
@@ -180,10 +180,7 @@ mod tests {
 
     /// 便捷构造：Action 节点。只承载按钮权限码，不是导航入口。
     fn action_node(code: &str, parent: Option<&str>) -> MenuNode {
-        let mut node = MenuNode::page(code, parent, code, 1);
-        node.node_type = NodeType::Action;
-        node.route = None;
-        node
+        MenuNode::new(code, parent, code, NodeType::Action, 1)
     }
 
     #[test]
@@ -298,8 +295,12 @@ mod tests {
     #[test]
     fn hidden_node_is_pruned_even_when_granted() {
         let mut tree = sample_tree();
-        if let Some(n) = tree.nodes.iter_mut().find(|n| n.code == "deposit.time") {
-            n.status = NodeStatus::Hidden;
+        if let Some(n) = tree
+            .nodes_mut()
+            .iter_mut()
+            .find(|n| n.code() == "deposit.time")
+        {
+            n.set_status(NodeStatus::Hidden);
         }
         let perm = snapshot(&["deposit.demand", "deposit.time"], &[]);
         let view = filter_visible(&tree, &perm);
@@ -317,8 +318,12 @@ mod tests {
     #[test]
     fn actions_are_filtered_by_action_codes() {
         let mut tree = sample_tree();
-        if let Some(n) = tree.nodes.iter_mut().find(|n| n.code == "deposit.demand") {
-            n.actions = vec!["action.print".into(), "action.reversal".into()];
+        if let Some(n) = tree
+            .nodes_mut()
+            .iter_mut()
+            .find(|n| n.code() == "deposit.demand")
+        {
+            n.set_actions(vec!["action.print".into(), "action.reversal".into()]);
         }
         let perm = snapshot(&["deposit.demand"], &["action.print"]);
         let view = filter_visible(&tree, &perm);

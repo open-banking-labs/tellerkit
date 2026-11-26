@@ -18,12 +18,50 @@ use tellerkit_core::tx::{TxJournal, TxRequest, TxResult, TxStatus};
 /// 即便传了值也会被实现覆盖，防止业务层伪造时间线。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AuditEvent {
-    pub actor: String,
-    pub action: String,
-    pub target: String,
-    pub result: String,
-    pub detail: String,
-    pub at: String,
+    actor: String,
+    action: String,
+    target: String,
+    result: String,
+    detail: String,
+    at: String,
+}
+
+impl AuditEvent {
+    /// `at` 由账本写入时覆盖，调用方不需要（也不应该）传时间。
+    pub fn new(actor: &str, action: &str, target: &str, result: &str, detail: &str) -> Self {
+        Self {
+            actor: actor.to_string(),
+            action: action.to_string(),
+            target: target.to_string(),
+            result: result.to_string(),
+            detail: detail.to_string(),
+            at: String::new(),
+        }
+    }
+
+    pub fn actor(&self) -> &str {
+        &self.actor
+    }
+
+    pub fn action(&self) -> &str {
+        &self.action
+    }
+
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
+    pub fn result(&self) -> &str {
+        &self.result
+    }
+
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+
+    pub fn at(&self) -> &str {
+        &self.at
+    }
 }
 
 /// 本地账本。一个进程一个连接，用 Mutex 串行化（柜面终端是单柜员场景）。
@@ -127,11 +165,11 @@ impl SqliteJournal {
                 "INSERT INTO audit_log (actor, action, target, result, detail, at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
-                    event.actor,
-                    event.action,
-                    event.target,
-                    event.result,
-                    event.detail,
+                    event.actor(),
+                    event.action(),
+                    event.target(),
+                    event.result(),
+                    event.detail(),
                     now(),
                 ],
             )
@@ -186,9 +224,23 @@ fn status_str(status: TxStatus) -> &'static str {
 /// 一条按状态聚合的对账行。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusSummary {
-    pub status: String,
-    pub count: i64,
-    pub amount_cents: i64,
+    status: String,
+    count: i64,
+    amount_cents: i64,
+}
+
+impl StatusSummary {
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+
+    pub fn count(&self) -> i64 {
+        self.count
+    }
+
+    pub fn amount_cents(&self) -> i64 {
+        self.amount_cents
+    }
 }
 
 impl SqliteJournal {
@@ -256,12 +308,38 @@ impl SqliteJournal {
 /// 一笔交易的简报（对账明细）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecentTx {
-    pub idempotency_key: String,
-    pub tx_code: String,
-    pub amount_cents: i64,
-    pub status: String,
-    pub reference: Option<String>,
-    pub at: String,
+    idempotency_key: String,
+    tx_code: String,
+    amount_cents: i64,
+    status: String,
+    reference: Option<String>,
+    at: String,
+}
+
+impl RecentTx {
+    pub fn idempotency_key(&self) -> &str {
+        &self.idempotency_key
+    }
+
+    pub fn tx_code(&self) -> &str {
+        &self.tx_code
+    }
+
+    pub fn amount_cents(&self) -> i64 {
+        self.amount_cents
+    }
+
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+
+    pub fn reference(&self) -> &Option<String> {
+        &self.reference
+    }
+
+    pub fn at(&self) -> &str {
+        &self.at
+    }
 }
 
 impl TxJournal for SqliteJournal {
@@ -272,12 +350,12 @@ impl TxJournal for SqliteJournal {
                  (idempotency_key, tx_code, amount_cents, status, reference, message, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
-                    request.idempotency_key,
-                    request.tx_code,
-                    request.amount_cents,
-                    status_str(result.status),
-                    result.reference,
-                    result.message,
+                    request.idempotency_key(),
+                    request.tx_code(),
+                    request.amount_cents(),
+                    status_str(result.status()),
+                    result.reference(),
+                    result.message(),
                     now(),
                 ],
             )
@@ -287,7 +365,7 @@ impl TxJournal for SqliteJournal {
 
     fn enqueue(&self, request: &TxRequest) -> Result<(), String> {
         let elements = self.cipher.seal(
-            &serde_json::to_string(&request.elements)
+            &serde_json::to_string(request.elements())
                 .map_err(|e| format!("序列化交易要素失败：{e}"))?,
         )?;
         self.lock()
@@ -296,11 +374,11 @@ impl TxJournal for SqliteJournal {
                  (idempotency_key, tx_code, amount_cents, elements, offline_capable, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
-                    request.idempotency_key,
-                    request.tx_code,
-                    request.amount_cents,
+                    request.idempotency_key(),
+                    request.tx_code(),
+                    request.amount_cents(),
                     elements,
-                    request.offline_capable as i32,
+                    request.offline_capable() as i32,
                     now(),
                 ],
             )
@@ -346,13 +424,12 @@ impl TxJournal for SqliteJournal {
             let plain = self.cipher.open(&stored)?;
             let elements = serde_json::from_str(&plain)
                 .map_err(|e| format!("交易要素解析失败（{key}）：{e}"))?;
-            out.push(TxRequest {
-                idempotency_key: key,
-                tx_code,
-                amount_cents,
-                elements,
-                offline_capable: offline != 0,
-            });
+            out.push(
+                TxRequest::new(&tx_code, &key)
+                    .amount(amount_cents)
+                    .with_elements(elements)
+                    .offline(offline != 0),
+            );
         }
         Ok(out)
     }
@@ -378,21 +455,11 @@ mod tests {
     }
 
     fn committed() -> TxResult {
-        TxResult {
-            status: TxStatus::Committed,
-            reference: Some("TX-1".into()),
-            message: "交易成功".into(),
-            replayable: false,
-        }
+        TxResult::committed("TX-1".into())
     }
 
     fn pending() -> TxResult {
-        TxResult {
-            status: TxStatus::Pending,
-            reference: None,
-            message: "已挂起".into(),
-            replayable: true,
-        }
+        TxResult::pending("已挂起")
     }
 
     #[test]
@@ -407,14 +474,14 @@ mod tests {
     fn enqueue_and_pending_roundtrip() {
         let j = SqliteJournal::in_memory().unwrap();
         let mut r = req("k2").offline(true);
-        r.elements.insert("to".into(), "A".into());
+        r.elements_mut().insert("to".into(), "A".into());
         j.enqueue(&r).unwrap();
 
         let list = j.pending().unwrap();
         assert_eq!(list.len(), 1);
-        assert_eq!(list[0].idempotency_key, "k2");
-        assert_eq!(list[0].elements.get("to").map(String::as_str), Some("A"));
-        assert!(list[0].offline_capable);
+        assert_eq!(list[0].idempotency_key(), "k2");
+        assert_eq!(list[0].elements().get("to").map(String::as_str), Some("A"));
+        assert!(list[0].offline_capable());
     }
 
     #[test]
@@ -427,7 +494,7 @@ mod tests {
             .pending()
             .unwrap()
             .into_iter()
-            .map(|r| r.idempotency_key)
+            .map(|r| r.idempotency_key().to_string())
             .collect();
         assert_eq!(keys, vec!["b".to_string()]);
     }
@@ -439,21 +506,13 @@ mod tests {
 
         j.record(&req("a"), &committed()).unwrap();
         j.record(&req("b"), &committed()).unwrap();
-        j.record(
-            &req("c"),
-            &TxResult {
-                status: TxStatus::Rejected,
-                reference: None,
-                message: "余额不足".into(),
-                replayable: false,
-            },
-        )
-        .unwrap();
+        j.record(&req("c"), &TxResult::rejected("余额不足"))
+            .unwrap();
 
         let rows = j.summary("").unwrap();
         let committed = rows.iter().find(|r| r.status == "committed").unwrap();
         assert_eq!(committed.count, 2);
-        assert_eq!(committed.amount_cents, 2 * req("a").amount_cents);
+        assert_eq!(committed.amount_cents, 2 * req("a").amount_cents());
 
         let rejected = rows.iter().find(|r| r.status == "rejected").unwrap();
         assert_eq!(rejected.count, 1);
@@ -484,7 +543,7 @@ mod tests {
         {
             let j = SqliteJournal::open(&path).unwrap();
             let mut r = req("k-enc").offline(true);
-            r.elements.insert("account".into(), account.into());
+            r.elements_mut().insert("account".into(), account.into());
             j.enqueue(&r).unwrap();
         }
 
@@ -502,7 +561,7 @@ mod tests {
 
         // 但重新打开必须能解出来（加密不能变成丢数据）
         let j = SqliteJournal::open(&path).unwrap();
-        assert_eq!(j.pending().unwrap()[0].elements["account"], account);
+        assert_eq!(j.pending().unwrap()[0].elements()["account"], account);
     }
 
     #[test]
@@ -512,7 +571,7 @@ mod tests {
         {
             let j = SqliteJournal::open(&path).unwrap();
             let mut r = req("k-bad").offline(true);
-            r.elements.insert("account".into(), "6222".into());
+            r.elements_mut().insert("account".into(), "6222".into());
             j.enqueue(&r).unwrap();
         }
         // 把密文改成不合法的格式
@@ -573,18 +632,21 @@ mod tests {
             let journal = SqliteJournal::open(&path).unwrap();
             let mut engine = tellerkit_core::tx::TxEngine::new().with_journal(Box::new(journal));
             let result = engine.submit(&Offline, req("persist-1").offline(true));
-            assert_eq!(result.status, TxStatus::Pending);
+            assert_eq!(result.status(), TxStatus::Pending);
         }
 
         // 模拟进程重启：重新打开账本并重建引擎
         let journal = SqliteJournal::open(&path).unwrap();
         let mut engine = tellerkit_core::tx::TxEngine::new().with_journal(Box::new(journal));
-        assert_eq!(engine.pending_requests().len(), 1, "重启后应读回挂起请求");
+        assert_eq!(engine.pending_count(), 1, "重启后应读回挂起请求");
 
         let outcomes = engine.replay_pending(&Online);
-        assert_eq!(outcomes[0].1.status, TxStatus::Committed);
-        assert!(engine.pending_requests().is_empty());
-        assert!(engine.take_journal_error().is_none(), "记账不应报错");
+        assert_eq!(outcomes[0].1.status(), TxStatus::Committed);
+        assert!(
+            !outcomes[0].1.message().contains("记账失败"),
+            "记账不应报错"
+        );
+        assert_eq!(engine.pending_count(), 0);
     }
 
     fn audit_event(action: &str, target: &str) -> AuditEvent {

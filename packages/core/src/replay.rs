@@ -14,29 +14,61 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayPolicy {
     /// 单笔的**总失败预算**（含第一次尝试）。达到后不再自动重放，交给人工。
-    pub max_attempts: u32,
+    max_attempts: u32,
     /// 首次退避秒数，之后指数增长。
-    pub base_backoff_secs: u64,
+    base_backoff_secs: u64,
     /// 退避上限，避免退到天荒地老。
-    pub max_backoff_secs: u64,
+    max_backoff_secs: u64,
+}
+
+impl ReplayPolicy {
+    pub fn new(max_attempts: u32, base_backoff_secs: u64, max_backoff_secs: u64) -> Self {
+        Self {
+            max_attempts,
+            base_backoff_secs,
+            max_backoff_secs,
+        }
+    }
+
+    pub fn max_attempts(&self) -> u32 {
+        self.max_attempts
+    }
+
+    pub fn base_backoff_secs(&self) -> u64 {
+        self.base_backoff_secs
+    }
+
+    pub fn max_backoff_secs(&self) -> u64 {
+        self.max_backoff_secs
+    }
 }
 
 impl Default for ReplayPolicy {
     fn default() -> Self {
-        Self {
-            max_attempts: 5,
-            base_backoff_secs: 30,
-            max_backoff_secs: 600,
-        }
+        Self::new(5, 30, 600)
     }
 }
 
 /// 单笔交易的重放进度。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayAttempt {
-    pub key: String,
-    pub attempts: u32,
-    pub next_at_secs: u64,
+    key: String,
+    attempts: u32,
+    next_at_secs: u64,
+}
+
+impl ReplayAttempt {
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    pub fn attempts(&self) -> u32 {
+        self.attempts
+    }
+
+    pub fn next_at_secs(&self) -> u64 {
+        self.next_at_secs
+    }
 }
 
 /// 重放调度器。纯逻辑：时间由调用方传入。
@@ -164,11 +196,7 @@ mod tests {
     use super::*;
 
     fn scheduler(max_attempts: u32) -> ReplayScheduler {
-        ReplayScheduler::new(ReplayPolicy {
-            max_attempts,
-            base_backoff_secs: 30,
-            max_backoff_secs: 600,
-        })
+        ReplayScheduler::new(ReplayPolicy::new(max_attempts, 30, 600))
     }
 
     fn keys(keys: &[&str]) -> Vec<String> {
@@ -325,11 +353,7 @@ mod tests {
 
     #[test]
     fn policy_is_kept_by_constructor() {
-        let policy = ReplayPolicy {
-            max_attempts: 7,
-            base_backoff_secs: 5,
-            max_backoff_secs: 40,
-        };
+        let policy = ReplayPolicy::new(7, 5, 40);
         let s = ReplayScheduler::new(policy.clone());
         assert_eq!(s.policy(), &policy);
     }
@@ -339,13 +363,31 @@ mod tests {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayRun {
     /// 本轮尝试的笔数。
-    pub attempted: usize,
+    attempted: usize,
     /// 成功提交的笔数。
-    pub committed: usize,
+    committed: usize,
     /// 队列里仍挂着的笔数（含本轮失败与未到期的）。
-    pub still_pending: usize,
+    still_pending: usize,
     /// 本轮达到重试上限、交给人工的幂等键。
-    pub gave_up: Vec<String>,
+    gave_up: Vec<String>,
+}
+
+impl ReplayRun {
+    pub fn attempted(&self) -> usize {
+        self.attempted
+    }
+
+    pub fn committed(&self) -> usize {
+        self.committed
+    }
+
+    pub fn still_pending(&self) -> usize {
+        self.still_pending
+    }
+
+    pub fn gave_up(&self) -> &[String] {
+        &self.gave_up
+    }
 }
 
 /// 跑一轮自动重放。
@@ -362,11 +404,7 @@ pub fn run_once(
     now_secs: u64,
 ) -> ReplayRun {
     // 1. 接管引擎里尚未登记的挂起交易
-    let pending_keys: Vec<String> = engine
-        .pending_requests()
-        .iter()
-        .map(|r| r.idempotency_key.clone())
-        .collect();
+    let pending_keys = engine.pending_keys();
     for key in &pending_keys {
         scheduler.track(key, now_secs);
     }
@@ -379,7 +417,7 @@ pub fn run_once(
     for key in &due {
         match engine.replay_one(host, key) {
             Some((_, result)) => {
-                if result.status == TxStatus::Committed {
+                if result.status() == TxStatus::Committed {
                     committed += 1;
                     scheduler.record_success(key);
                 } else {
@@ -397,7 +435,7 @@ pub fn run_once(
     ReplayRun {
         attempted: due.len(),
         committed,
-        still_pending: engine.pending_requests().len(),
+        still_pending: engine.pending_count(),
         gave_up,
     }
 }
@@ -449,7 +487,7 @@ mod coordinator_tests {
         let mut engine = TxEngine::new();
         for key in keys {
             let result = engine.submit(&offline, req(key));
-            assert_eq!(result.status, TxStatus::Pending);
+            assert_eq!(result.status(), TxStatus::Pending);
         }
         engine
     }
@@ -461,10 +499,10 @@ mod coordinator_tests {
         let host = ScriptedHost::new(vec![Ok("TX-1".into()), Ok("TX-2".into())]);
 
         let run = run_once(&mut engine, &mut scheduler, &host, 100);
-        assert_eq!(run.attempted, 2);
-        assert_eq!(run.committed, 2);
-        assert_eq!(run.still_pending, 0);
-        assert!(run.gave_up.is_empty());
+        assert_eq!(run.attempted(), 2);
+        assert_eq!(run.committed(), 2);
+        assert_eq!(run.still_pending(), 0);
+        assert!(run.gave_up().is_empty());
         assert_eq!(host.calls(), 2);
         assert_eq!(scheduler.tracked(), 0, "成功后应移出调度");
     }
@@ -476,24 +514,20 @@ mod coordinator_tests {
         let host = ScriptedHost::new(vec![Err(HostError::Unavailable)]);
 
         let run = run_once(&mut engine, &mut scheduler, &host, 100);
-        assert_eq!(run.attempted, 1);
-        assert_eq!(run.committed, 0);
-        assert_eq!(run.still_pending, 1, "不可达不得丢单");
+        assert_eq!(run.attempted(), 1);
+        assert_eq!(run.committed(), 0);
+        assert_eq!(run.still_pending(), 1, "不可达不得丢单");
 
         // 退避期内不再重试
         let run2 = run_once(&mut engine, &mut scheduler, &host, 110);
-        assert_eq!(run2.attempted, 0, "未到期不应重试");
+        assert_eq!(run2.attempted(), 0, "未到期不应重试");
         assert_eq!(host.calls(), 1);
     }
 
     #[test]
     fn gives_up_after_max_attempts_and_stops_retrying() {
         let mut engine = engine_with_pending(&["k1"]);
-        let policy = ReplayPolicy {
-            max_attempts: 2,
-            base_backoff_secs: 10,
-            max_backoff_secs: 10,
-        };
+        let policy = ReplayPolicy::new(2, 10, 10);
         let mut scheduler = ReplayScheduler::new(policy);
         let host = ScriptedHost::new(vec![
             Err(HostError::Unavailable),
@@ -501,13 +535,13 @@ mod coordinator_tests {
         ]);
 
         let first = run_once(&mut engine, &mut scheduler, &host, 100);
-        assert!(first.gave_up.is_empty());
+        assert!(first.gave_up().is_empty());
         let second = run_once(&mut engine, &mut scheduler, &host, 110);
-        assert_eq!(second.gave_up, vec!["k1".to_string()]);
-        assert_eq!(engine.pending_requests().len(), 1, "放弃不等于丢弃");
+        assert_eq!(second.gave_up(), &["k1".to_string()][..]);
+        assert_eq!(engine.pending_count(), 1, "放弃不等于丢弃");
 
         let third = run_once(&mut engine, &mut scheduler, &host, 999);
-        assert_eq!(third.attempted, 0, "放弃后不再自动重试");
+        assert_eq!(third.attempted(), 0, "放弃后不再自动重试");
         assert_eq!(host.calls(), 2);
     }
 
@@ -522,12 +556,12 @@ mod coordinator_tests {
 
         // 手动重放掉这笔（模拟用户点了按钮）
         assert!(engine.replay_pending(&online).len() == 1);
-        assert_eq!(engine.pending_requests().len(), 0);
+        assert_eq!(engine.pending_count(), 0);
 
         // 自动重放接管时发现队列已空，应释放调度名额
         let run = run_once(&mut engine, &mut scheduler, &online, 200);
-        assert_eq!(run.attempted, 1);
-        assert_eq!(run.committed, 0);
+        assert_eq!(run.attempted(), 1);
+        assert_eq!(run.committed(), 0);
         assert_eq!(scheduler.tracked(), 0);
     }
 }

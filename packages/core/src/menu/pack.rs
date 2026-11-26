@@ -16,7 +16,7 @@
 //! 安全边界（必须写进任何对外表述）：签名只能"检测篡改"和"阻止非授权方下发
 //! 菜单包"，**不能**防住本机管理员。真正的权限边界永远在服务端接口。
 
-use crate::model::{MenuTree, TreeError};
+use crate::menu::model::{MenuTree, TreeError};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 
@@ -51,14 +51,34 @@ pub enum PackError {
 /// 已验签通过的菜单包。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MenuPack {
-    pub format_version: u16,
-    pub menu_version: u64,
-    pub shell_compat_min: u16,
-    pub shell_compat_max: u16,
-    pub payload: Vec<u8>,
+    format_version: u16,
+    menu_version: u64,
+    shell_compat_min: u16,
+    shell_compat_max: u16,
+    payload: Vec<u8>,
 }
 
 impl MenuPack {
+    pub fn format_version(&self) -> u16 {
+        self.format_version
+    }
+
+    pub fn menu_version(&self) -> u64 {
+        self.menu_version
+    }
+
+    pub fn shell_compat_min(&self) -> u16 {
+        self.shell_compat_min
+    }
+
+    pub fn shell_compat_max(&self) -> u16 {
+        self.shell_compat_max
+    }
+
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
     /// 把菜单树打包成带签名的 `.mtree` 字节流。
     ///
     /// 打包前先 `validate()`：结构非法的包绝不允许落到客户端。
@@ -82,7 +102,7 @@ impl MenuPack {
         header.extend_from_slice(MAGIC);
         header.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
         header.extend_from_slice(&payload_len.to_le_bytes());
-        header.extend_from_slice(&tree.menu_version.to_le_bytes());
+        header.extend_from_slice(&tree.menu_version().to_le_bytes());
         header.extend_from_slice(&shell_compat_min.to_le_bytes());
         header.extend_from_slice(&shell_compat_max.to_le_bytes());
         debug_assert_eq!(header.len(), HEADER_LEN);
@@ -172,7 +192,7 @@ pub fn open(bytes: &[u8], verifying_key: &VerifyingKey) -> Result<MenuTree, Pack
 
 /// 不验签地读出菜单版本号，供"文件列表/回滚选择"使用。
 pub fn peek_version(bytes: &[u8]) -> Option<u64> {
-    MenuPack::parse(bytes).ok().map(|p| p.menu_version)
+    MenuPack::parse(bytes).ok().map(|p| p.menu_version())
 }
 
 /// 公钥 hex 编解码。
@@ -193,7 +213,7 @@ pub fn pubkey_from_hex(s: &str) -> Result<VerifyingKey, PackError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::MenuNode;
+    use crate::menu::model::MenuNode;
     use rand::rngs::OsRng;
 
     fn tree() -> MenuTree {

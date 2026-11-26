@@ -18,13 +18,15 @@ fn router_for(bank: &FakeBank) -> Router {
         host: bank.host(),
         port: bank.port(),
     };
-    let make = |service: &str, codec: Arc<dyn Codec>, priority: u8| Endpoint {
-        service: service.to_string(),
-        addr: addr.clone(),
-        transport: Arc::new(TcpTransport::default()) as Arc<dyn Transport>,
-        codec,
-        priority,
-        timeout_ms: 3000,
+    let make = |service: &str, codec: Arc<dyn Codec>, priority: u8| {
+        Endpoint::new(
+            service,
+            addr.clone(),
+            Arc::new(TcpTransport::default()) as Arc<dyn Transport>,
+            codec,
+            priority,
+            3000,
+        )
     };
 
     Router::new(vec![
@@ -37,21 +39,18 @@ fn router_for(bank: &FakeBank) -> Router {
 
 #[test]
 fn full_chain_reaches_a_real_backend_over_tcp() {
-    let bank = FakeBank::start(FakeBankConfig {
-        menu_version: 11,
-        ..Default::default()
-    });
+    let bank = FakeBank::start(FakeBankConfig::default().with_menu_version(11));
     let banking = RoutedBanking::new(router_for(&bank));
 
     let probe = banking.probe_menu().expect("探测菜单版本");
-    assert_eq!(probe.latest, 11);
+    assert_eq!(probe.latest(), 11);
 
     let snapshot = banking.login("teller", 1101).expect("登录");
-    assert_eq!(snapshot.teller_no, "T0231");
-    assert_eq!(snapshot.perm_version, 1101);
+    assert_eq!(snapshot.teller_no(), "T0231");
+    assert_eq!(snapshot.perm_version(), 1101);
 
     let mut req = TxRequest::new("account.deposit", "key-001");
-    req.amount_cents = 100_000;
+    req.set_amount_cents(100_000);
     assert_eq!(banking.submit(&req).expect("提交"), "FAKE-key-001");
 
     // 二进制下载走的是另一个服务与另一个编解码
@@ -68,14 +67,11 @@ fn full_chain_reaches_a_real_backend_over_tcp() {
 
 #[test]
 fn business_rejection_surfaces_as_rejected_not_unavailable() {
-    let bank = FakeBank::start(FakeBankConfig {
-        reject_reason: Some("余额不足".into()),
-        ..Default::default()
-    });
+    let bank = FakeBank::start(FakeBankConfig::default().with_reject_reason("余额不足"));
     let banking = RoutedBanking::new(router_for(&bank));
 
     let mut req = TxRequest::new("account.deposit", "key-002");
-    req.amount_cents = 1;
+    req.set_amount_cents(1);
     let err = banking.submit(&req).unwrap_err();
     let text = err.to_string();
     assert!(text.contains("余额不足"), "实际：{text}");
@@ -98,30 +94,30 @@ fn backend_down_falls_back_to_secondary_endpoint() {
     };
 
     let router = Router::new(vec![
-        Endpoint {
-            service: "menu.core".into(),
-            addr: dead,
-            transport: Arc::new(TcpTransport::default()),
-            codec: Arc::new(JsonCodec),
-            priority: 0,
-            timeout_ms: 500,
-        },
-        Endpoint {
-            service: "menu.core".into(),
-            addr: alive,
-            transport: Arc::new(TcpTransport::default()),
-            codec: Arc::new(JsonCodec),
-            priority: 1,
-            timeout_ms: 3000,
-        },
+        Endpoint::new(
+            "menu.core",
+            dead,
+            Arc::new(TcpTransport::default()),
+            Arc::new(JsonCodec),
+            0,
+            500,
+        ),
+        Endpoint::new(
+            "menu.core",
+            alive,
+            Arc::new(TcpTransport::default()),
+            Arc::new(JsonCodec),
+            1,
+            3000,
+        ),
     ]);
 
     let probe = router
-        .call(&tellerkit_core::remote::Request {
-            service: "menu.core".into(),
-            op: "probe_menu".into(),
-            body: tellerkit_core::remote::Body::Json(serde_json::json!({})),
-        })
+        .call(&tellerkit_core::remote::Request::new(
+            "menu.core",
+            "probe_menu",
+            tellerkit_core::remote::Body::Json(serde_json::json!({})),
+        ))
         .expect("备用端点应接管");
 
     assert_eq!(
@@ -158,7 +154,7 @@ fn same_idempotency_key_is_charged_once() {
     let banking = RoutedBanking::new(router_for(&bank)).with_idempotency(true);
 
     let mut req = TxRequest::new("account.deposit", "dup-key-1");
-    req.amount_cents = 50_000;
+    req.set_amount_cents(50_000);
 
     let first = banking.submit(&req).expect("首次提交");
     let second = banking.submit(&req).expect("重试");
@@ -166,7 +162,7 @@ fn same_idempotency_key_is_charged_once() {
 
     assert_eq!(first, second, "重试必须返回同一流水号");
     assert_eq!(second, third);
-    assert_eq!(*bank.config().charged.lock().unwrap(), 1, "只应入账一次");
+    assert_eq!(*bank.config().charged().lock().unwrap(), 1, "只应入账一次");
     assert_eq!(
         bank.ops().iter().filter(|op| *op == "submit_tx").count(),
         3,
@@ -180,10 +176,7 @@ fn same_idempotency_key_is_charged_once() {
 /// 不拦的话，断网期间的交易在恢复后重放就会重复扣账。
 #[test]
 fn non_idempotent_backend_charges_every_attempt() {
-    let bank = FakeBank::start(FakeBankConfig {
-        idempotent: false,
-        ..Default::default()
-    });
+    let bank = FakeBank::start(FakeBankConfig::default().with_idempotent(false));
     let banking = RoutedBanking::new(router_for(&bank));
 
     assert!(!banking.supports_idempotency());
@@ -192,7 +185,7 @@ fn non_idempotent_backend_charges_every_attempt() {
     let _ = banking.submit(&req);
 
     assert_eq!(
-        *bank.config().charged.lock().unwrap(),
+        *bank.config().charged().lock().unwrap(),
         2,
         "主机不去重时，两次提交就是两次扣账"
     );

@@ -27,20 +27,80 @@ pub enum ExceptionKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReversalRequest {
     /// 原交易的幂等键。
-    pub idempotency_key: String,
+    idempotency_key: String,
     /// 发起冲正的柜员号。
-    pub initiator: String,
-    pub tx_code: String,
-    pub amount_cents: i64,
-    pub reason: String,
+    initiator: String,
+    tx_code: String,
+    amount_cents: i64,
+    reason: String,
+}
+
+impl ReversalRequest {
+    pub fn new(
+        idempotency_key: &str,
+        initiator: &str,
+        tx_code: &str,
+        amount_cents: i64,
+        reason: &str,
+    ) -> Self {
+        Self {
+            idempotency_key: idempotency_key.to_string(),
+            initiator: initiator.to_string(),
+            tx_code: tx_code.to_string(),
+            amount_cents,
+            reason: reason.to_string(),
+        }
+    }
+
+    pub fn idempotency_key(&self) -> &str {
+        &self.idempotency_key
+    }
+
+    pub fn initiator(&self) -> &str {
+        &self.initiator
+    }
+
+    pub fn tx_code(&self) -> &str {
+        &self.tx_code
+    }
+
+    pub fn amount_cents(&self) -> i64 {
+        self.amount_cents
+    }
+
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
 }
 
 /// 授权结论。`approver` 必须与发起人不同。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Authorization {
-    pub approver: String,
-    pub granted: bool,
-    pub reason: String,
+    approver: String,
+    granted: bool,
+    reason: String,
+}
+
+impl Authorization {
+    pub fn new(approver: &str, granted: bool, reason: &str) -> Self {
+        Self {
+            approver: approver.to_string(),
+            granted,
+            reason: reason.to_string(),
+        }
+    }
+
+    pub fn approver(&self) -> &str {
+        &self.approver
+    }
+
+    pub fn granted(&self) -> bool {
+        self.granted
+    }
+
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
 }
 
 /// 授权端口。真实实现走主管密码/指纹，测试实现可以精确控制结论。
@@ -55,12 +115,50 @@ pub trait Authorizer {
 /// 客户端先标"已冲正"、主机却没受理，就会出现"柜员以为冲了、账上没冲"。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReversalRecord {
-    pub idempotency_key: String,
-    pub initiator: String,
-    pub approver: String,
-    pub reason: String,
+    idempotency_key: String,
+    initiator: String,
+    approver: String,
+    reason: String,
     /// 主机回执的流水号。`None` = 已授权但未确认。
-    pub host_reference: Option<String>,
+    host_reference: Option<String>,
+}
+
+impl ReversalRecord {
+    pub fn new(
+        idempotency_key: &str,
+        initiator: &str,
+        approver: &str,
+        reason: &str,
+        host_reference: Option<String>,
+    ) -> Self {
+        Self {
+            idempotency_key: idempotency_key.to_string(),
+            initiator: initiator.to_string(),
+            approver: approver.to_string(),
+            reason: reason.to_string(),
+            host_reference,
+        }
+    }
+
+    pub fn idempotency_key(&self) -> &str {
+        &self.idempotency_key
+    }
+
+    pub fn initiator(&self) -> &str {
+        &self.initiator
+    }
+
+    pub fn approver(&self) -> &str {
+        &self.approver
+    }
+
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+
+    pub fn host_reference(&self) -> Option<&str> {
+        self.host_reference.as_deref()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -260,22 +358,18 @@ mod tests {
     impl Authorizer for StubAuthorizer {
         fn authorize(&self, _request: &ReversalRequest) -> Authorization {
             self.calls.set(self.calls.get() + 1);
-            Authorization {
-                approver: self.approver.to_string(),
-                granted: self.granted,
-                reason: self.reason.to_string(),
-            }
+            Authorization::new(self.approver, self.granted, self.reason)
         }
     }
 
     fn request(initiator: &str) -> ReversalRequest {
-        ReversalRequest {
-            idempotency_key: "TX-001".to_string(),
-            initiator: initiator.to_string(),
-            tx_code: "1001".to_string(),
-            amount_cents: 25_000,
-            reason: "主机超时，查账确认未入账".to_string(),
-        }
+        ReversalRequest::new(
+            "TX-001",
+            initiator,
+            "1001",
+            25_000,
+            "主机超时，查账确认未入账",
+        )
     }
 
     // S-01 异常交易进入待处置，而不是失败。
@@ -392,11 +486,7 @@ mod tests {
         struct Grant;
         impl Authorizer for Grant {
             fn authorize(&self, _r: &ReversalRequest) -> Authorization {
-                Authorization {
-                    approver: "T999".into(),
-                    granted: true,
-                    reason: String::new(),
-                }
+                Authorization::new("T999", true, "")
             }
         }
         let mut book = ReversalBook::new();
@@ -428,10 +518,7 @@ mod tests {
             "同一笔不能确认两次——第二次的流水号会覆盖真实回执"
         );
         assert_eq!(
-            book.reversal_of("TX-001")
-                .unwrap()
-                .host_reference
-                .as_deref(),
+            book.reversal_of("TX-001").unwrap().host_reference(),
             Some("HOST-1")
         );
     }

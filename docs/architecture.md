@@ -53,6 +53,21 @@
   apps/shell/src-tauri/adapters/remote_http.rs  → RemoteBanking（目标，骨架已留）
 ```
 
+### 2.1 深模块：crate 内部怎么收口
+
+四层回答「谁依赖谁」；这一节回答「模块内部藏什么」。按宪法第 11 条，每个 crate 只对外
+`pub` 能力域门面，内部实现用 `pub(crate)`。`packages/core` 收敛为四个门面：
+
+| 门面 | 吸收 | 对外接口（目标） |
+|---|---|---|
+| `MenuCatalog` | model / filter / pack / store / sync（菜单部分） | load / visible / install / sync |
+| `TxService` | tx / replay / reversal | submit / replay_pending / reverse / exceptions |
+| `RemoteGateway` | remote / banking | router.call + 端口 trait |
+| `PackageLoader` | pkg / update | load_all / decide_update |
+
+`session` / `device` 保持独立（本就是深模块样板）。判定用 deslop-please 四类反模式；
+本机观测入口 `npm run depth`，构建机跑 `deslop-please`。
+
 ### 依赖规则（单向，可检查）
 
 | 层 | 允许依赖 | 禁止 |

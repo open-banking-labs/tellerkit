@@ -35,7 +35,7 @@ tasks.md ──dispatch──▶ 提示词（含预设 + 场景 + 白名单 + �
 ## 合并流程（main 受保护）
 
 ```
-分支 → 提交 → 推送 → 开 PR → gate 绿 → squash merge → 删除分支
+分支 → 提交 → 推送 → 开 PR → CI required checks 全绿 → squash merge → 删除分支
 ```
 
 - `main` 禁止直推、禁止 force push（规则集 `main protection`）
@@ -58,7 +58,7 @@ tasks.md ──dispatch──▶ 提示词（含预设 + 场景 + 白名单 + �
 | Engine Agent | `.rs` / `.ts` | `check-boundaries` + `cargo test` |
 | Test Agent | 测试文件 | 覆盖率 + 人工抽查用例是否引用场景 |
 | Review Agent | 评审摘要 | 人 |
-| 全部 | — | `npm run gate`（唯一裁决入口） |
+| 全部 | — | `npm run gate`（本地静态预检，exit 0 不代表测试通过；合并以 CI required checks 为准，见 changes/015） |
 
 ## AI 主力意味着什么
 

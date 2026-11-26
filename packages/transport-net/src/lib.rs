@@ -58,7 +58,7 @@ fn io_err(context: &str, e: std::io::Error) -> TransportError {
 /// 长连接要处理心跳/重连/半开，收益不抵复杂度。
 #[derive(Debug, Clone)]
 pub struct TcpTransport {
-    pub timeout: Duration,
+    timeout: Duration,
 }
 
 impl Default for TcpTransport {
@@ -95,11 +95,11 @@ impl Transport for TcpTransport {
             .set_write_timeout(Some(timeout))
             .map_err(|e| io_err("设置写超时失败", e))?;
 
-        let len = u32::try_from(request.body.len())
+        let len = u32::try_from(request.body().len())
             .map_err(|_| TransportError::Protocol("请求体超过 4GB".into()))?;
         stream
             .write_all(&len.to_be_bytes())
-            .and_then(|_| stream.write_all(&request.body))
+            .and_then(|_| stream.write_all(request.body()))
             .and_then(|_| stream.flush())
             .map_err(|e| io_err("发送失败", e))?;
 
@@ -116,10 +116,7 @@ impl Transport for TcpTransport {
             .read_exact(&mut body)
             .map_err(|e| io_err("读响应体失败", e))?;
 
-        Ok(WireMessage {
-            head: Default::default(),
-            body,
-        })
+        Ok(WireMessage::new(Default::default(), body))
     }
 }
 
@@ -132,7 +129,7 @@ impl Transport for TcpTransport {
 /// 不处理：重定向、分块编码、连接复用、客户端证书。这些在接入真实后台前按需补。
 #[derive(Clone)]
 pub struct HttpTransport {
-    pub timeout: Duration,
+    timeout: Duration,
     client: Arc<ClientConfig>,
 }
 
@@ -228,9 +225,9 @@ fn build_request_head(target: &Target, request: &WireMessage) -> String {
     let mut head = format!(
         "POST {} HTTP/1.1\r\nHost: {host_header}\r\nContent-Length: {}\r\nConnection: close\r\n",
         target.path,
-        request.body.len()
+        request.body().len()
     );
-    for (k, v) in &request.head {
+    for (k, v) in request.head() {
         if k == "x-op" {
             continue;
         }
@@ -274,7 +271,7 @@ impl Transport for HttpTransport {
                 "HttpTransport 只能处理 Http 地址".into(),
             ));
         };
-        let op = request.head.get("x-op").cloned().unwrap_or_default();
+        let op = request.head().get("x-op").cloned().unwrap_or_default();
         let mut target = split_host_port(base_url)?;
         target.path = format!("{}/{}", target.path.trim_end_matches('/'), op);
 
@@ -290,10 +287,10 @@ impl Transport for HttpTransport {
             let conn = ClientConnection::new(Arc::clone(&self.client), server_name)
                 .map_err(|e| TransportError::Protocol(format!("TLS 初始化失败：{e}")))?;
             let mut stream = StreamOwned::new(conn, tcp);
-            write_and_read(&mut stream, &head, &request.body)?
+            write_and_read(&mut stream, &head, request.body())?
         } else {
             let mut stream = tcp;
-            write_and_read(&mut stream, &head, &request.body)?
+            write_and_read(&mut stream, &head, request.body())?
         };
 
         parse_http_response(&raw)
@@ -336,10 +333,7 @@ fn parse_http_response(raw: &[u8]) -> Result<WireMessage, TransportError> {
         }
     }
 
-    Ok(WireMessage {
-        head,
-        body: body.to_vec(),
-    })
+    Ok(WireMessage::new(head, body.to_vec()))
 }
 
 #[cfg(test)]
@@ -421,14 +415,11 @@ mod tests {
         let out = transport
             .exchange(
                 &tcp_addr(port),
-                &WireMessage {
-                    head: Default::default(),
-                    body: b"HELLO".to_vec(),
-                },
+                &WireMessage::new(Default::default(), b"HELLO".to_vec()),
                 Duration::from_secs(5),
             )
             .unwrap();
-        assert_eq!(out.body, b"ACK:HELLO");
+        assert_eq!(out.body(), b"ACK:HELLO");
         handle.join().unwrap();
     }
 
@@ -445,10 +436,7 @@ mod tests {
         let err = transport
             .exchange(
                 &tcp_addr(port),
-                &WireMessage {
-                    head: Default::default(),
-                    body: vec![],
-                },
+                &WireMessage::new(Default::default(), vec![]),
                 Duration::from_secs(5),
             )
             .unwrap_err();
@@ -468,10 +456,7 @@ mod tests {
         let err = TcpTransport::default()
             .exchange(
                 &tcp_addr(port),
-                &WireMessage {
-                    head: Default::default(),
-                    body: vec![],
-                },
+                &WireMessage::new(Default::default(), vec![]),
                 Duration::from_millis(60),
             )
             .unwrap_err();
@@ -531,16 +516,13 @@ mod tests {
                 &EndpointAddr::Http {
                     base_url: format!("http://127.0.0.1:{port}/v1"),
                 },
-                &WireMessage {
-                    head,
-                    body: b"{}".to_vec(),
-                },
+                &WireMessage::new(head, b"{}".to_vec()),
                 Duration::from_secs(5),
             )
             .unwrap();
-        assert_eq!(out.body, b"{\"payload\":{\"ok\":true}}");
+        assert_eq!(out.body(), b"{\"payload\":{\"ok\":true}}");
         assert_eq!(
-            out.head.get("content-type").map(String::as_str),
+            out.head().get("content-type").map(String::as_str),
             Some("application/json")
         );
         handle.join().unwrap();
@@ -564,10 +546,7 @@ mod tests {
                 &EndpointAddr::Http {
                     base_url: format!("http://127.0.0.1:{port}"),
                 },
-                &WireMessage {
-                    head: Default::default(),
-                    body: b"{}".to_vec(),
-                },
+                &WireMessage::new(Default::default(), b"{}".to_vec()),
                 Duration::from_secs(5),
             )
             .unwrap_err();
@@ -652,14 +631,11 @@ mod tests {
                 &EndpointAddr::Http {
                     base_url: format!("https://localhost:{port}/v1"),
                 },
-                &WireMessage {
-                    head,
-                    body: b"{}".to_vec(),
-                },
+                &WireMessage::new(head, b"{}".to_vec()),
                 Duration::from_secs(5),
             )
             .expect("TLS 握手与请求应成功");
-        assert_eq!(out.body, b"{\"payload\":{\"ok\":true}}");
+        assert_eq!(out.body(), b"{\"payload\":{\"ok\":true}}");
         handle.join().unwrap();
     }
 
@@ -676,10 +652,7 @@ mod tests {
                 &EndpointAddr::Http {
                     base_url: format!("https://localhost:{port}"),
                 },
-                &WireMessage {
-                    head: Default::default(),
-                    body: b"{}".to_vec(),
-                },
+                &WireMessage::new(Default::default(), b"{}".to_vec()),
                 Duration::from_secs(5),
             )
             .unwrap_err();

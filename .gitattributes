@@ -1,0 +1,17 @@
+# 统一换行：仓库内文本一律 LF，避免 Windows 检出 CRLF 导致
+# 提示词指纹、契约校验、快照哈希跨平台不可复算。
+* text=auto eol=lf
+
+# 二进制文件不做换行转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.pdf binary
+*.wasm binary

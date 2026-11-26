@@ -57,24 +57,31 @@ for (const file of frontendFiles) {
 
 // 规则 1.8：边界 ② —— 命令层只做映射，不得直接调领域编排（docs/architecture.md §2）
 const COMMAND_FILE = "apps/shell/src-tauri/src/commands.rs";
+// 匹配调用而不是 import：类型导入是允许的（MenuView 本身就是 DTO 字段）。
+// 用正则匹配任意模块路径形式，避免 `use ... as s; s::boot_load(` 绕过纯字符串匹配（D-02）。
 const FORBIDDEN_IN_COMMANDS = [
-  // 只匹配**调用**，不匹配 import：类型导入是允许的（MenuView 本身就是 DTO 字段）
-  ["sync::boot_load(", "用例编排应放在 app.rs"],
-  ["sync::check_and_update(", "用例编排应放在 app.rs"],
-  ["sync::reload(", "用例编排应放在 app.rs"],
-  ["filter::filter_visible(", "菜单剪枝应放在 app.rs"],
-  ["pkg::scan_dir(", "业务包加载应放在 app.rs"],
-  ["pkg::merge_packages(", "业务包合并应放在 app.rs"],
-  ["replay::run_once(", "重放编排应放在 app.rs"],
-  [".ensure_allowed(", "设备白名单校验应放在 app.rs"],
-];
+  ["boot_load", "用例编排应放在 app.rs"],
+  ["check_and_update", "用例编排应放在 app.rs"],
+  ["reload", "用例编排应放在 app.rs"],
+  ["filter_visible", "菜单剪枝应放在 app.rs"],
+  ["scan_dir", "业务包加载应放在 app.rs"],
+  ["merge_packages", "业务包合并应放在 app.rs"],
+  ["run_once", "重放编排应放在 app.rs"],
+  ["ensure_allowed", "设备白名单校验应放在 app.rs"],
+].map(([name, why]) => [
+  name === "ensure_allowed"
+    ? new RegExp(`\\.${name}\\s*\\(`)
+    : new RegExp(`(?:^|[^A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*::)+${name}\\s*\\(`),
+  name,
+  why,
+]);
 {
   const target = join(ROOT, COMMAND_FILE);
   if (existsSync(target)) {
     const text = read(target);
-    for (const [needle, why] of FORBIDDEN_IN_COMMANDS) {
-      if (text.includes(needle)) {
-        errors.push(`${COMMAND_FILE} 出现了 ${needle}：${why}（命令层只做加锁 → 用例 → DTO 映射）`);
+    for (const [re, name, why] of FORBIDDEN_IN_COMMANDS) {
+      if (re.test(text)) {
+        errors.push(`${COMMAND_FILE} 出现了 ${name}() 调用：${why}（命令层只做加锁 → 用例 → DTO 映射）`);
       }
     }
   }

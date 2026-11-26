@@ -72,11 +72,11 @@ pub enum DeviceError {
 /// 打印凭证。模板名与要素分离：套打格式随网点配置变，要素由交易产生。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Voucher {
-    pub template: String,
-    pub tx_code: String,
+    template: String,
+    tx_code: String,
     #[serde(default)]
-    pub reference: Option<String>,
-    pub fields: BTreeMap<String, String>,
+    reference: Option<String>,
+    fields: BTreeMap<String, String>,
 }
 
 impl Voucher {
@@ -89,6 +89,22 @@ impl Voucher {
         }
     }
 
+    pub fn template(&self) -> &str {
+        &self.template
+    }
+
+    pub fn tx_code(&self) -> &str {
+        &self.tx_code
+    }
+
+    pub fn set_reference(&mut self, reference: Option<String>) {
+        self.reference = reference;
+    }
+
+    pub fn set_fields(&mut self, fields: BTreeMap<String, String>) {
+        self.fields = fields;
+    }
+
     pub fn field(mut self, k: &str, v: &str) -> Self {
         self.fields.insert(k.to_string(), v.to_string());
         self
@@ -98,16 +114,16 @@ impl Voucher {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export)]
 pub struct PrintReceipt {
-    pub job_id: String,
-    pub pages: u32,
+    job_id: String,
+    pages: u32,
 }
 
 /// 卡数据。**只存掩码**：完整 PAN 不允许出现在这个结构体里，
 /// 因为结构体一旦被 Debug/序列化，完整卡号就跟着泄露。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardData {
-    pub pan_masked: String,
-    pub has_track2: bool,
+    pan_masked: String,
+    has_track2: bool,
 }
 
 impl CardData {
@@ -163,8 +179,8 @@ impl fmt::Debug for PinBlock {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapturedImage {
-    pub path: String,
-    pub mime: String,
+    path: String,
+    mime: String,
 }
 
 pub trait Printer: Send + Sync {
@@ -247,13 +263,18 @@ impl DevicePolicy {
 /// 用四个具名字段而不是 `HashMap<DeviceKind, Box<dyn Any>>`：
 /// 类型安全，且编译期就能看出"少接了一类设备"。
 pub struct Devices {
-    pub printer: Box<dyn Printer>,
-    pub card_reader: Box<dyn CardReader>,
-    pub pinpad: Box<dyn PinPad>,
-    pub scanner: Box<dyn Scanner>,
+    printer: Box<dyn Printer>,
+    card_reader: Box<dyn CardReader>,
+    pinpad: Box<dyn PinPad>,
+    scanner: Box<dyn Scanner>,
 }
 
 impl Devices {
+    /// 打印机入口。只暴露 trait 视图，调用方拿不到 Box 也无法替换设备。
+    pub fn printer(&self) -> &dyn Printer {
+        self.printer.as_ref()
+    }
+
     /// 交易开始前的就绪校验。
     ///
     /// 必须在任何副作用之前调用：宁可拒绝一笔交易，
@@ -313,7 +334,7 @@ impl Devices {
 
 #[derive(Default)]
 pub struct MockPrinter {
-    pub state: Option<DeviceStatus>,
+    state: Option<DeviceStatus>,
     printed: std::sync::Mutex<Vec<Voucher>>,
     next_job: std::sync::atomic::AtomicU32,
 }
@@ -379,8 +400,8 @@ impl Printer for MockPrinter {
 }
 
 pub struct MockCardReader {
-    pub state: DeviceStatus,
-    pub pan: String,
+    state: DeviceStatus,
+    pan: String,
 }
 
 impl MockCardReader {
@@ -413,7 +434,7 @@ impl CardReader for MockCardReader {
 }
 
 pub struct MockPinPad {
-    pub state: DeviceStatus,
+    state: DeviceStatus,
 }
 
 impl MockPinPad {
@@ -457,7 +478,7 @@ impl PinPad for MockPinPad {
 }
 
 pub struct MockScanner {
-    pub state: DeviceStatus,
+    state: DeviceStatus,
 }
 
 impl MockScanner {

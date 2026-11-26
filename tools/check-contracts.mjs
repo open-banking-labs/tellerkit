@@ -92,7 +92,8 @@ for (const file of rustFiles) {
         continue;
       }
       if (line.startsWith("#[") || line.startsWith("//")) continue;
-      const f = /^pub\s+(\w+)\s*:/.exec(line);
+      // 字段可见性按宪法第 11 条改为默认私有：同时接受 `pub x:` 与 `x:`。
+      const f = /^(?:pub(?:\([^)]*\))?\s+)?(\w+)\s*:/.exec(line);
       if (f) {
         if (!skip) fields.push(rename ?? f[1]);
         rename = null;

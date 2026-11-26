@@ -159,7 +159,8 @@ ${task.command}
 /** 文件内容哈希；读不到返回 null（记录仍可写，只是不可复算）。 */
 function sha256Of(path) {
   try {
-    return createHash("sha256").update(readFileSync(path)).digest("hex");
+    const text = readFileSync(path, "utf8").replace(/\r\n/g, "\n");
+    return createHash("sha256").update(text).digest("hex");
   } catch {
     return null;
   }
@@ -214,7 +215,7 @@ const prompt = composePrompt({
   scenarios,
   tasksRel,
   specRel,
-});
+}).replace(/\r\n/g, "\n");
 
 const record = {
   task_id: task.id,

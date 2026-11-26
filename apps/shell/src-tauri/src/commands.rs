@@ -11,106 +11,110 @@ use tauri::State;
 use ts_rs::TS;
 
 use tellerkit_core::device::{PrintReceipt, Voucher};
-use tellerkit_core::filter::MenuView;
 use tellerkit_core::tx::{TxRequest, TxResult};
+use tellerkit_core::MenuView;
 use tellerkit_core::PermSnapshot;
 
-use crate::app::{LoginOutcome, ShellApp};
+use crate::app::ShellApp;
 use crate::AppState;
 
 fn lock<'a>(
     state: &'a State<'_, Mutex<AppState>>,
 ) -> Result<std::sync::MutexGuard<'a, AppState>, String> {
-    state
+    let guard = state
         .lock()
-        .map_err(|_| "应用状态已损坏，请重启客户端".to_string())
+        .map_err(|_| "应用状态已损坏，请重启客户端".to_string())?;
+    // 启动被拒绝时连 boot 在内一律失败：界面只能停在错误页，
+    // 不能让"降级成功的演示远端"被当成真实通道用。
+    guard.startup_fatal.check()?;
+    Ok(guard)
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct LoadReport {
     #[ts(type = "number")]
-    pub menu_version: u64,
+    menu_version: u64,
     /// `local` = 本地文件命中；`network` = 回退服务端拉取。
-    pub source: String,
-    pub menu_nodes: usize,
-    pub pack_bytes: usize,
+    source: String,
+    menu_nodes: usize,
+    pack_bytes: usize,
     /// 读文件 + 验签 + 反序列化耗时（毫秒）。
-    pub load_ms: f64,
+    load_ms: f64,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct BootInfo {
-    pub shell_version: String,
-    pub pubkey_hex: String,
-    pub appdata_dir: String,
-    pub offline: bool,
+    shell_version: String,
+    pubkey_hex: String,
+    appdata_dir: String,
+    offline: bool,
     #[ts(type = "Array<number>")]
-    pub local_versions: Vec<u64>,
-    pub load: LoadReport,
-    pub notes: Vec<String>,
+    local_versions: Vec<u64>,
+    load: LoadReport,
+    notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct LoginResult {
-    pub snapshot: PermSnapshot,
-    pub menu: Vec<MenuView>,
-    pub filter_ms: f64,
+    snapshot: PermSnapshot,
+    menu: Vec<MenuView>,
+    filter_ms: f64,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct UpdateReport {
-    pub checked: bool,
+    checked: bool,
     #[ts(type = "number")]
-    pub local: u64,
+    local: u64,
     #[ts(type = "number")]
-    pub latest: u64,
-    pub updated: bool,
-    pub note: String,
+    latest: u64,
+    updated: bool,
+    note: String,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct ReloadReport {
     #[ts(type = "number")]
-    pub menu_version: u64,
-    pub source: String,
-    pub recovered: bool,
-    pub verify_failed: bool,
-    pub note: String,
-    pub menu: Option<Vec<MenuView>>,
+    menu_version: u64,
+    source: String,
+    recovered: bool,
+    verify_failed: bool,
+    note: String,
+    menu: Option<Vec<MenuView>>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct DevState {
-    pub offline: bool,
-    pub tampered: bool,
+    offline: bool,
+    tampered: bool,
     #[ts(type = "number")]
-    pub server_version: u64,
+    server_version: u64,
     #[ts(type = "Array<number>")]
-    pub local_versions: Vec<u64>,
+    local_versions: Vec<u64>,
 }
 
 /// 会话状态。锁屏是授权状态的一部分，只能由 Rust 持有。
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct SessionState {
-    pub locked: bool,
-    pub reason: Option<String>,
+    locked: bool,
+    reason: Option<String>,
     #[ts(type = "number")]
-    pub idle_secs: u64,
+    idle_secs: u64,
 }
 
 impl From<crate::app::SessionView> for SessionState {
     fn from(v: crate::app::SessionView) -> Self {
         Self {
-            locked: v.locked,
-            reason: v.reason,
-            idle_secs: v.idle_secs,
+            locked: v.locked(),
+            reason: v.reason().clone(),
+            idle_secs: v.idle_secs(),
         }
     }
 }
@@ -119,9 +123,9 @@ impl From<crate::app::SessionView> for SessionState {
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct TxException {
-    pub key: String,
+    key: String,
     /// `marked_for_reversal` | `marked_for_roll_forward`
-    pub kind: String,
+    kind: String,
 }
 
 #[tauri::command]
@@ -131,8 +135,8 @@ pub fn tx_exceptions(state: State<'_, Mutex<AppState>>) -> Result<Vec<TxExceptio
         .tx_exceptions()
         .into_iter()
         .map(|v| TxException {
-            key: v.key,
-            kind: v.kind,
+            key: v.key().to_string(),
+            kind: v.kind().to_string(),
         })
         .collect())
 }
@@ -152,31 +156,31 @@ pub fn request_reversal(
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct StatusRow {
-    pub status: String,
+    status: String,
     #[ts(type = "number")]
-    pub count: i64,
+    count: i64,
     #[ts(type = "number")]
-    pub amount_cents: i64,
+    amount_cents: i64,
 }
 
 /// 最近一笔交易（对账明细）。
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct RecentTx {
-    pub key: String,
-    pub tx_code: String,
+    key: String,
+    tx_code: String,
     #[ts(type = "number")]
-    pub amount_cents: i64,
-    pub status: String,
-    pub reference: Option<String>,
+    amount_cents: i64,
+    status: String,
+    reference: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct Reconciliation {
-    pub since: String,
-    pub summary: Vec<StatusRow>,
-    pub recent: Vec<RecentTx>,
+    since: String,
+    summary: Vec<StatusRow>,
+    recent: Vec<RecentTx>,
 }
 
 /// 日终对账：只读本地账本，不打主机。
@@ -185,25 +189,25 @@ pub fn tx_reconciliation(state: State<'_, Mutex<AppState>>) -> Result<Reconcilia
     let mut guard = lock(&state)?;
     let view = ShellApp::new(&mut guard).reconciliation()?;
     Ok(Reconciliation {
-        since: view.since,
+        since: view.since().to_string(),
         summary: view
-            .summary
-            .into_iter()
+            .summary()
+            .iter()
             .map(|r| StatusRow {
-                status: r.status,
-                count: r.count,
-                amount_cents: r.amount_cents,
+                status: r.status().to_string(),
+                count: r.count(),
+                amount_cents: r.amount_cents(),
             })
             .collect(),
         recent: view
-            .recent
-            .into_iter()
+            .recent()
+            .iter()
             .map(|r| RecentTx {
-                key: r.key,
-                tx_code: r.tx_code,
-                amount_cents: r.amount_cents,
-                status: r.status,
-                reference: r.reference,
+                key: r.key().to_string(),
+                tx_code: r.tx_code().to_string(),
+                amount_cents: r.amount_cents(),
+                status: r.status().to_string(),
+                reference: r.reference().clone(),
             })
             .collect(),
     })
@@ -243,34 +247,30 @@ pub fn boot(state: State<'_, Mutex<AppState>>) -> Result<BootInfo, String> {
     let mut guard = lock(&state)?;
     let summary = ShellApp::new(&mut guard).boot()?;
     Ok(BootInfo {
-        shell_version: summary.shell_version,
-        pubkey_hex: summary.pubkey_hex,
-        appdata_dir: summary.appdata_dir,
-        offline: summary.offline,
-        local_versions: summary.local_versions,
+        shell_version: summary.shell_version().to_string(),
+        pubkey_hex: summary.pubkey_hex().to_string(),
+        appdata_dir: summary.appdata_dir().to_string(),
+        offline: summary.offline(),
+        local_versions: summary.local_versions().to_vec(),
         load: LoadReport {
-            menu_version: summary.menu_version,
-            source: summary.source,
-            menu_nodes: summary.menu_nodes,
-            pack_bytes: summary.pack_bytes,
-            load_ms: summary.load_ms,
+            menu_version: summary.menu_version(),
+            source: summary.source().to_string(),
+            menu_nodes: summary.menu_nodes(),
+            pack_bytes: summary.pack_bytes(),
+            load_ms: summary.load_ms(),
         },
-        notes: summary.notes,
+        notes: summary.notes().to_vec(),
     })
 }
 
 #[tauri::command]
 pub fn login(role_id: String, state: State<'_, Mutex<AppState>>) -> Result<LoginResult, String> {
     let mut guard = lock(&state)?;
-    let LoginOutcome {
-        snapshot,
-        menu,
-        filter_ms,
-    } = ShellApp::new(&mut guard).login(&role_id)?;
+    let outcome = ShellApp::new(&mut guard).login(&role_id)?;
     Ok(LoginResult {
-        snapshot,
-        menu,
-        filter_ms,
+        snapshot: outcome.snapshot().clone(),
+        menu: outcome.menu().to_vec(),
+        filter_ms: outcome.filter_ms(),
     })
 }
 
@@ -291,11 +291,11 @@ pub fn check_update(state: State<'_, Mutex<AppState>>) -> Result<UpdateReport, S
     let mut guard = lock(&state)?;
     let outcome = ShellApp::new(&mut guard).check_update()?;
     Ok(UpdateReport {
-        checked: outcome.checked,
-        local: outcome.local.unwrap_or(0),
-        latest: outcome.latest.unwrap_or(0),
-        updated: outcome.updated,
-        note: outcome.note,
+        checked: outcome.checked(),
+        local: outcome.local().unwrap_or(0),
+        latest: outcome.latest().unwrap_or(0),
+        updated: outcome.updated(),
+        note: outcome.note().to_string(),
     })
 }
 
@@ -304,12 +304,12 @@ pub fn reload_from_disk(state: State<'_, Mutex<AppState>>) -> Result<ReloadRepor
     let mut guard = lock(&state)?;
     let outcome = ShellApp::new(&mut guard).reload_from_disk()?;
     Ok(ReloadReport {
-        menu_version: outcome.menu_version,
-        source: outcome.source,
-        recovered: outcome.verify_failed,
-        verify_failed: outcome.verify_failed,
-        note: outcome.note,
-        menu: outcome.menu,
+        menu_version: outcome.menu_version(),
+        source: outcome.source().to_string(),
+        recovered: outcome.verify_failed(),
+        verify_failed: outcome.verify_failed(),
+        note: outcome.note().to_string(),
+        menu: outcome.menu().clone(),
     })
 }
 
@@ -325,13 +325,12 @@ pub fn submit_transaction(
     state: State<'_, Mutex<AppState>>,
 ) -> Result<TxResult, String> {
     let mut guard = lock(&state)?;
-    ShellApp::new(&mut guard).submit_transaction(TxRequest {
-        tx_code,
-        idempotency_key,
-        amount_cents,
-        elements,
-        offline_capable,
-    })
+    ShellApp::new(&mut guard).submit_transaction(
+        TxRequest::new(&tx_code, &idempotency_key)
+            .amount(amount_cents)
+            .with_elements(elements)
+            .offline(offline_capable),
+    )
 }
 
 #[tauri::command]
@@ -344,8 +343,8 @@ pub fn print_voucher(
 ) -> Result<PrintReceipt, String> {
     let mut guard = lock(&state)?;
     let mut voucher = Voucher::new(&template, &tx_code);
-    voucher.reference = reference;
-    voucher.fields = fields;
+    voucher.set_reference(reference);
+    voucher.set_fields(fields);
     ShellApp::new(&mut guard).print_voucher(voucher)
 }
 

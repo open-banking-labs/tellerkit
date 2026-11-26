@@ -46,15 +46,16 @@
 
 **判定**：这属于官方允许的"替代结构复杂到不合理"的例外。新增 `Arc` 时必须在此表登记理由。
 
-### 3.3 Tauri DTO 不加 `#[non_exhaustive]`（偏离：Apply #[non_exhaustive] to public structs with public fields）
+### 3.3 结构体字段默认私有；Tauri DTO 不加 `#[non_exhaustive]`（偏离：Apply #[non_exhaustive] to public structs with public fields）
 
-官方要求公开字段结构体加 `#[non_exhaustive]`，防止加字段造成破坏性变更。
-本项目**不加**，理由：
+官方要求公开字段结构体加 `#[non_exhaustive]`，防止加字段造成破坏性变更。本项目对
+**序列化 DTO** 仍不加，但字段可见性按宪法第 11 条改为默认私有：
 
-- 这些 DTO 的跨语言契约由 `ts-rs` 生成并进门禁（`check-contracts` 三方比对），
-  字段变更本来就必须同步契约，不需要编译器再拦一次；
-- 加了之后 `#[non_exhaustive]` 会禁止跨 crate 的结构体字面量构造，
-  而 `commands.rs` 恰恰要构造 `AuditEvent` 等类型，得再加一堆构造函数。
+- 所有结构体字段默认私有，跨模块一律走构造函数/访问器；DTO 也私有。`serde` 与 `ts-rs`
+  派生在定义模块内展开，跨语言形状不变，由 `check-contracts` 三方比对继续兜底。
+- `#[non_exhaustive]` 仍不加：构造由 `new()` 承担，不再依赖结构体字面量；加它会禁止
+  跨 crate 构造，反而逼出更多样板。
+- 字段变更仍必须同步契约（`contracts/`，走 `changes/` 提案）。
 
 **例外**：`tellerkit-core` 的错误枚举（`PackError`、`StoreError`、`DeviceError`、
 `ReversalError`、`BootError`）视为库 API，**应当**加 `#[non_exhaustive]`——

@@ -38,12 +38,29 @@ impl LockReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionPolicy {
     /// 无操作多少秒后锁定。0 表示不按超时锁。
-    pub idle_timeout_secs: u64,
+    idle_timeout_secs: u64,
     /// 窗口失焦是否立即锁。
     ///
     /// 默认 true：柜面终端不应在柜员看不到的时候保持解锁。
     /// 但演示/调试时可以关掉，否则每次切窗口都要重新登录。
-    pub lock_on_blur: bool,
+    lock_on_blur: bool,
+}
+
+impl SessionPolicy {
+    pub fn new(idle_timeout_secs: u64, lock_on_blur: bool) -> Self {
+        Self {
+            idle_timeout_secs,
+            lock_on_blur,
+        }
+    }
+
+    pub fn idle_timeout_secs(&self) -> u64 {
+        self.idle_timeout_secs
+    }
+
+    pub fn lock_on_blur(&self) -> bool {
+        self.lock_on_blur
+    }
 }
 
 impl Default for SessionPolicy {
@@ -168,10 +185,7 @@ mod tests {
     use super::*;
 
     fn policy(idle_timeout_secs: u64, lock_on_blur: bool) -> SessionPolicy {
-        SessionPolicy {
-            idle_timeout_secs,
-            lock_on_blur,
-        }
+        SessionPolicy::new(idle_timeout_secs, lock_on_blur)
     }
 
     // S-01：无操作超时锁定。t=179 不锁，t=180 锁，原因是 IdleTimeout。
@@ -313,8 +327,8 @@ mod tests {
         assert_eq!(guard.reason(), None);
         assert_eq!(guard.idle_secs(500), 0);
         assert_eq!(guard.idle_secs(501), 1);
-        assert_eq!(guard.policy().idle_timeout_secs, 180);
-        assert!(guard.policy().lock_on_blur);
+        assert_eq!(guard.policy().idle_timeout_secs(), 180);
+        assert!(guard.policy().lock_on_blur());
     }
 
     // 未锁定时 unlock 也应把计时重置到 now（上层可能无条件调用）。

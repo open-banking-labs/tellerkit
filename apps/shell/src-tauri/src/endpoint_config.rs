@@ -1,9 +1,11 @@
 //! 端点配置：把网点下发的 `endpoints.json` 变成 [`Router`]。
 //!
-//! 契约见 `changes/008-endpoint-config.md`。要点：
+//! 契约见 `changes/008-endpoint-config.md`，启动时的 fail-closed 行为见
+//! `changes/016-fail-closed-startup.md` 与 `bootstrap.rs`。要点：
 //! - 一个服务可有多条端点，按 `priority` 升序主备；
 //! - 不同服务可以用不同传输与编解码；
-//! - 配置缺失/非法 → 回退 mock，并在启动 notes 里写明原因（柜面宁可降级也不白屏）。
+//! - 本模块只负责"解析得对不对"；**配置不成立时是拒绝启动还是回退演示，
+//!   由 `bootstrap::resolve_remote` 按构建类型决定**，不在这里偷偷降级。
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -20,50 +22,105 @@ use tellerkit_transport_net::{HttpTransport, TcpTransport};
 /// 配置文件的根结构。
 #[derive(Debug, Deserialize)]
 pub struct EndpointConfig {
-    pub services: BTreeMap<String, Vec<EndpointSpec>>,
+    services: BTreeMap<String, Vec<EndpointSpec>>,
     /// 交易服务是否按幂等键去重（`changes/001`）。
     ///
     /// **默认 false**：没写就是没有。写错这一位会让离线挂起变成重复扣账。
     #[serde(default)]
-    pub idempotent_tx: bool,
+    idempotent_tx: bool,
 }
 
 /// 加载结果：路由 + 交易服务是否声明幂等。
 #[derive(Debug)]
 pub struct LoadedEndpoints {
-    pub router: Router,
-    pub idempotent_tx: bool,
+    router: Router,
+    idempotent_tx: bool,
+}
+
+impl LoadedEndpoints {
+    /// 交给装配层：一次性取出路由与幂等声明，不对内部分段暴露。
+    pub fn into_parts(self) -> (Router, bool) {
+        (self.router, self.idempotent_tx)
+    }
 }
 
 #[derive(Debug, Deserialize)]
 pub struct EndpointSpec {
     /// `http` | `tcp`
-    pub transport: String,
+    transport: String,
     /// `json` | `raw` | `fixed-width`
-    pub codec: String,
+    codec: String,
     /// HTTP 用
     #[serde(default)]
-    pub url: Option<String>,
+    url: Option<String>,
     /// TCP 用
     #[serde(default)]
-    pub host: Option<String>,
+    host: Option<String>,
     #[serde(default)]
-    pub port: Option<u16>,
+    port: Option<u16>,
     #[serde(default)]
-    pub priority: u8,
+    priority: u8,
     #[serde(default = "default_timeout")]
-    pub timeout_ms: u64,
+    timeout_ms: u64,
     /// 定长报文的字段布局（仅 codec = fixed-width 时必填）
     #[serde(default)]
-    pub layout: Option<Vec<FieldLayoutSpec>>,
+    layout: Option<Vec<FieldLayoutSpec>>,
+}
+
+impl EndpointSpec {
+    pub fn transport(&self) -> &str {
+        &self.transport
+    }
+
+    pub fn codec(&self) -> &str {
+        &self.codec
+    }
+
+    pub fn url(&self) -> Option<&String> {
+        self.url.as_ref()
+    }
+
+    pub fn host(&self) -> Option<&String> {
+        self.host.as_ref()
+    }
+
+    pub fn port(&self) -> Option<u16> {
+        self.port
+    }
+
+    pub fn priority(&self) -> u8 {
+        self.priority
+    }
+
+    pub fn timeout_ms(&self) -> u64 {
+        self.timeout_ms
+    }
+
+    pub fn layout(&self) -> Option<&[FieldLayoutSpec]> {
+        self.layout.as_deref()
+    }
 }
 
 #[derive(Debug, Deserialize)]
 pub struct FieldLayoutSpec {
-    pub name: String,
-    pub width: usize,
+    name: String,
+    width: usize,
     #[serde(default)]
-    pub numeric: bool,
+    numeric: bool,
+}
+
+impl FieldLayoutSpec {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    pub fn numeric(&self) -> bool {
+        self.numeric
+    }
 }
 
 fn default_timeout() -> u64 {
@@ -82,14 +139,34 @@ pub fn load_router(path: &Path) -> Result<LoadedEndpoints, String> {
 #[derive(Debug, Clone, Default)]
 pub struct LoadPolicy {
     /// 配置公钥（hex）。`None` 表示未配置。
-    pub pubkey: Option<String>,
+    pubkey: Option<String>,
     /// 是否强制要求签名。
-    pub require_signed: bool,
+    require_signed: bool,
     /// 是否禁止明文端点（生产应为 true）。
-    pub require_tls: bool,
+    require_tls: bool,
 }
 
 impl LoadPolicy {
+    pub fn new(pubkey: Option<String>, require_signed: bool, require_tls: bool) -> Self {
+        Self {
+            pubkey,
+            require_signed,
+            require_tls,
+        }
+    }
+
+    pub fn pubkey(&self) -> Option<&str> {
+        self.pubkey.as_deref()
+    }
+
+    pub fn require_signed(&self) -> bool {
+        self.require_signed
+    }
+
+    pub fn require_tls(&self) -> bool {
+        self.require_tls
+    }
+
     pub fn from_env() -> Self {
         Self {
             pubkey: crate::config_sig::config_pubkey(),
@@ -132,7 +209,7 @@ pub fn parse(raw: &str) -> Result<Router, String> {
     parse_full(raw, false).map(|loaded| loaded.router)
 }
 
-/// `require_tls` 为真时拒绝一切 `http://` 端点（生产环境应打开）。
+/// `require_tls` 为真时拒绝一切 `http://` 端点（release 构建强制为真）。
 pub fn parse_with(raw: &str, require_tls: bool) -> Result<Router, String> {
     parse_full(raw, require_tls).map(|loaded| loaded.router)
 }
@@ -152,7 +229,7 @@ pub fn parse_full(raw: &str, require_tls: bool) -> Result<LoadedEndpoints, Strin
         }
         for spec in specs {
             if require_tls {
-                if let Some(url) = &spec.url {
+                if let Some(url) = spec.url() {
                     if url.starts_with("http://") {
                         return Err(format!(
                             "{service}: 已要求 TLS（TK_REQUIRE_TLS=1），拒绝明文端点 {url}"
@@ -170,11 +247,11 @@ pub fn parse_full(raw: &str, require_tls: bool) -> Result<LoadedEndpoints, Strin
 }
 
 fn build(service: &str, spec: &EndpointSpec) -> Result<Endpoint, String> {
-    let addr = match spec.transport.as_str() {
+    let addr = match spec.transport() {
         "http" => {
             let url = spec
-                .url
-                .clone()
+                .url()
+                .cloned()
                 .ok_or_else(|| format!("{service}: http 端点必须提供 url"))?;
             if !url.starts_with("http://") && !url.starts_with("https://") {
                 return Err(format!("{service}: url 必须以 http:// 或 https:// 开头"));
@@ -183,11 +260,11 @@ fn build(service: &str, spec: &EndpointSpec) -> Result<Endpoint, String> {
         }
         "tcp" => EndpointAddr::Tcp {
             host: spec
-                .host
-                .clone()
+                .host()
+                .cloned()
                 .ok_or_else(|| format!("{service}: tcp 端点必须提供 host"))?,
             port: spec
-                .port
+                .port()
                 .ok_or_else(|| format!("{service}: tcp 端点必须提供 port"))?,
         },
         other => {
@@ -197,18 +274,17 @@ fn build(service: &str, spec: &EndpointSpec) -> Result<Endpoint, String> {
         }
     };
 
-    let transport: Arc<dyn Transport> = match spec.transport.as_str() {
+    let transport: Arc<dyn Transport> = match spec.transport() {
         "http" => Arc::new(HttpTransport::default()),
         _ => Arc::new(TcpTransport::default()),
     };
 
-    let codec: Arc<dyn Codec> = match spec.codec.as_str() {
+    let codec: Arc<dyn Codec> = match spec.codec() {
         "json" => Arc::new(JsonCodec),
         "raw" => Arc::new(RawCodec),
         "fixed-width" => {
             let layout = spec
-                .layout
-                .as_ref()
+                .layout()
                 .ok_or_else(|| format!("{service}: fixed-width 端点必须提供 layout"))?;
             if layout.is_empty() {
                 return Err(format!("{service}: fixed-width 的 layout 不能为空"));
@@ -217,10 +293,10 @@ fn build(service: &str, spec: &EndpointSpec) -> Result<Endpoint, String> {
                 layout
                     .iter()
                     .map(|f| {
-                        if f.numeric {
-                            FieldSpec::numeric(&f.name, f.width)
+                        if f.numeric() {
+                            FieldSpec::numeric(f.name(), f.width())
                         } else {
-                            FieldSpec::text(&f.name, f.width)
+                            FieldSpec::text(f.name(), f.width())
                         }
                     })
                     .collect(),
@@ -233,14 +309,14 @@ fn build(service: &str, spec: &EndpointSpec) -> Result<Endpoint, String> {
         }
     };
 
-    Ok(Endpoint {
-        service: service.to_string(),
+    Ok(Endpoint::new(
+        service,
         addr,
         transport,
         codec,
-        priority: spec.priority,
-        timeout_ms: spec.timeout_ms,
-    })
+        spec.priority(),
+        spec.timeout_ms(),
+    ))
 }
 
 #[cfg(test)]
@@ -275,20 +351,20 @@ mod tests {
 
         let acct = router.endpoints_of("acct.core");
         assert_eq!(acct.len(), 2, "同一服务两条端点");
-        assert_eq!(acct[0].priority, 0);
-        assert_eq!(acct[1].priority, 1);
-        assert_eq!(acct[0].transport.name(), "http");
-        assert_eq!(acct[1].transport.name(), "tcp");
+        assert_eq!(acct[0].priority(), 0);
+        assert_eq!(acct[1].priority(), 1);
+        assert_eq!(acct[0].transport().name(), "http");
+        assert_eq!(acct[1].transport().name(), "tcp");
     }
 
     #[test]
     fn different_services_can_use_different_codecs() {
         let router = parse(OK).expect("配置合法");
         assert_eq!(
-            router.endpoints_of("card.auth")[0].codec.name(),
+            router.endpoints_of("card.auth")[0].codec().name(),
             "fixed-width"
         );
-        assert_eq!(router.endpoints_of("menu.core")[0].codec.name(), "json");
+        assert_eq!(router.endpoints_of("menu.core")[0].codec().name(), "json");
     }
 
     #[test]
@@ -343,7 +419,7 @@ mod tests {
         std::fs::write(&path, payload).unwrap();
 
         let key = SigningKey::generate(&mut OsRng);
-        let pubkey = tellerkit_core::pack::pubkey_to_hex(&key.verifying_key());
+        let pubkey = tellerkit_core::pubkey_to_hex(&key.verifying_key());
         let sig_path = dir.path().join("endpoints.json.sig");
         std::fs::write(&sig_path, hex::encode(key.sign(payload).to_bytes())).unwrap();
 

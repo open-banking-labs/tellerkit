@@ -10,16 +10,17 @@
 
 use std::sync::Arc;
 
+use tellerkit_core as sync;
 use tellerkit_core::device::{PrintReceipt, Voucher};
-use tellerkit_core::filter::MenuView;
 use tellerkit_core::mock::DemoRole;
-use tellerkit_core::model::MenuTree;
 use tellerkit_core::pkg;
+use tellerkit_core::pubkey_to_hex;
 use tellerkit_core::reversal::{Authorization, Authorizer, ExceptionKind, ReversalRequest};
 use tellerkit_core::session::{SessionGuard, SessionPolicy};
-use tellerkit_core::sync;
 use tellerkit_core::tx::{TxRequest, TxResult, TxStatus};
-use tellerkit_core::{filter, LoadSource};
+use tellerkit_core::MenuTree;
+use tellerkit_core::MenuView;
+use tellerkit_core::{filter_visible, LoadSource};
 use tellerkit_journal_sqlite::AuditEvent;
 
 use crate::ports::{Clock, RemoteBanking};
@@ -28,66 +29,212 @@ use crate::AppState;
 /// 启动结果。命令层据此拼 `BootInfo`。
 #[derive(Debug, Clone)]
 pub struct BootSummary {
-    pub shell_version: String,
-    pub pubkey_hex: String,
-    pub appdata_dir: String,
-    pub offline: bool,
-    pub local_versions: Vec<u64>,
-    pub menu_version: u64,
-    pub source: String,
-    pub menu_nodes: usize,
-    pub pack_bytes: usize,
-    pub load_ms: f64,
-    pub notes: Vec<String>,
+    shell_version: String,
+    pubkey_hex: String,
+    appdata_dir: String,
+    offline: bool,
+    local_versions: Vec<u64>,
+    menu_version: u64,
+    source: String,
+    menu_nodes: usize,
+    pack_bytes: usize,
+    load_ms: f64,
+    notes: Vec<String>,
+}
+
+impl BootSummary {
+    pub fn shell_version(&self) -> &str {
+        &self.shell_version
+    }
+
+    pub fn pubkey_hex(&self) -> &str {
+        &self.pubkey_hex
+    }
+
+    pub fn appdata_dir(&self) -> &str {
+        &self.appdata_dir
+    }
+
+    pub fn offline(&self) -> bool {
+        self.offline
+    }
+
+    pub fn local_versions(&self) -> &[u64] {
+        &self.local_versions
+    }
+
+    pub fn menu_version(&self) -> u64 {
+        self.menu_version
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub fn menu_nodes(&self) -> usize {
+        self.menu_nodes
+    }
+
+    pub fn pack_bytes(&self) -> usize {
+        self.pack_bytes
+    }
+
+    pub fn load_ms(&self) -> f64 {
+        self.load_ms
+    }
+
+    pub fn notes(&self) -> &[String] {
+        &self.notes
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct LoginOutcome {
-    pub snapshot: tellerkit_core::PermSnapshot,
-    pub menu: Vec<MenuView>,
-    pub filter_ms: f64,
+    snapshot: tellerkit_core::PermSnapshot,
+    menu: Vec<MenuView>,
+    filter_ms: f64,
+}
+
+impl LoginOutcome {
+    pub fn snapshot(&self) -> &tellerkit_core::PermSnapshot {
+        &self.snapshot
+    }
+
+    pub fn menu(&self) -> &[MenuView] {
+        &self.menu
+    }
+
+    pub fn filter_ms(&self) -> f64 {
+        self.filter_ms
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct ReloadOutcome {
-    pub menu_version: u64,
-    pub source: String,
-    pub verify_failed: bool,
-    pub note: String,
-    pub menu: Option<Vec<MenuView>>,
+    menu_version: u64,
+    source: String,
+    verify_failed: bool,
+    note: String,
+    menu: Option<Vec<MenuView>>,
+}
+
+impl ReloadOutcome {
+    pub fn menu_version(&self) -> u64 {
+        self.menu_version
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub fn verify_failed(&self) -> bool {
+        self.verify_failed
+    }
+
+    pub fn note(&self) -> &str {
+        &self.note
+    }
+
+    pub fn menu(&self) -> &Option<Vec<MenuView>> {
+        &self.menu
+    }
 }
 
 /// 会话视图（给界面看的三元组）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionView {
-    pub locked: bool,
-    pub reason: Option<String>,
-    pub idle_secs: u64,
+    locked: bool,
+    reason: Option<String>,
+    idle_secs: u64,
+}
+
+impl SessionView {
+    pub fn locked(&self) -> bool {
+        self.locked
+    }
+
+    pub fn reason(&self) -> &Option<String> {
+        &self.reason
+    }
+
+    pub fn idle_secs(&self) -> u64 {
+        self.idle_secs
+    }
 }
 
 /// 对账视图：聚合 + 最近明细。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reconciliation {
     /// 统计起点（当日 00:00 的秒级字符串）
-    pub since: String,
-    pub summary: Vec<StatusRow>,
-    pub recent: Vec<RecentTxView>,
+    since: String,
+    summary: Vec<StatusRow>,
+    recent: Vec<RecentTxView>,
+}
+
+impl Reconciliation {
+    pub fn since(&self) -> &str {
+        &self.since
+    }
+
+    pub fn summary(&self) -> &[StatusRow] {
+        &self.summary
+    }
+
+    pub fn recent(&self) -> &[RecentTxView] {
+        &self.recent
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusRow {
-    pub status: String,
-    pub count: i64,
-    pub amount_cents: i64,
+    status: String,
+    count: i64,
+    amount_cents: i64,
+}
+
+impl StatusRow {
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+
+    pub fn count(&self) -> i64 {
+        self.count
+    }
+
+    pub fn amount_cents(&self) -> i64 {
+        self.amount_cents
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecentTxView {
-    pub key: String,
-    pub tx_code: String,
-    pub amount_cents: i64,
-    pub status: String,
-    pub reference: Option<String>,
+    key: String,
+    tx_code: String,
+    amount_cents: i64,
+    status: String,
+    reference: Option<String>,
+}
+
+impl RecentTxView {
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    pub fn tx_code(&self) -> &str {
+        &self.tx_code
+    }
+
+    pub fn amount_cents(&self) -> i64 {
+        self.amount_cents
+    }
+
+    pub fn status(&self) -> &str {
+        &self.status
+    }
+
+    pub fn reference(&self) -> &Option<String> {
+        &self.reference
+    }
 }
 
 /// 当日 00:00 的秒级时间戳（零填充，与账本 `created_at` 同格式）。
@@ -99,9 +246,19 @@ fn start_of_day(now_secs: u64) -> String {
 /// 待处置异常交易的展示结构。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TxExceptionView {
-    pub key: String,
+    key: String,
     /// `marked_for_reversal` | `marked_for_roll_forward`
-    pub kind: String,
+    kind: String,
+}
+
+impl TxExceptionView {
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
 }
 
 /// 演示用授权端口：固定由"主管 T0101"批准。
@@ -111,11 +268,7 @@ struct DemoSupervisor;
 
 impl Authorizer for DemoSupervisor {
     fn authorize(&self, _request: &ReversalRequest) -> Authorization {
-        Authorization {
-            approver: "T0101".to_string(),
-            granted: true,
-            reason: "演示：主管授权".to_string(),
-        }
+        Authorization::new("T0101", true, "演示：主管授权")
     }
 }
 
@@ -137,6 +290,31 @@ impl<'a> ShellApp<'a> {
         }
     }
 
+    // ---------- 会话闸门 ----------
+
+    /// 资金/打印/冲正/重放/业务包入口的统一会话校验。
+    ///
+    /// 锁屏与未登录的判定**只信 Rust 侧状态**——前端 tick 可以被跳过，
+    /// 覆盖层下的 iframe 也能发 postMessage，只有这里是唯一真相。
+    /// 判定失败即写审计（拒绝原因），且绝不触达主机。
+    fn require_unlocked(&self, action: &str) -> Result<(), String> {
+        match &self.state.session {
+            Some(g) if !g.is_locked() => Ok(()),
+            other => {
+                let (reason, detail) = match other {
+                    None => ("尚未登录", "未登录即调用受保护命令"),
+                    Some(g) => {
+                        let why = g.reason().map(|r| r.label()).unwrap_or("会话已锁定");
+                        ("会话已锁定", why)
+                    }
+                };
+                let actor = self.actor();
+                self.audit(&actor, action, "", "denied", detail);
+                Err(format!("{reason}：{detail}。请回到锁屏界面解锁后再试"))
+            }
+        }
+    }
+
     // ---------- 启动与菜单 ----------
 
     /// 启动：本地包优先，业务包合并，网络只在本地不可用时兜底。
@@ -148,33 +326,34 @@ impl<'a> ShellApp<'a> {
             .map_err(|e| e.to_string())?;
         let load_ms = started.elapsed().as_secs_f64() * 1000.0;
 
-        let mut tree: MenuTree = outcome.loaded.tree;
-        let menu_version = tree.menu_version;
-        let pack_bytes = outcome.loaded.bytes;
-        let source = match outcome.loaded.source {
+        let (loaded, mut notes) = outcome.into_parts();
+        let pack_bytes = loaded.bytes();
+        let source = match loaded.source() {
             LoadSource::LocalFile { .. } => "local".to_string(),
             LoadSource::NetworkFallback { .. } => "network".to_string(),
         };
+        let mut tree: MenuTree = loaded.into_tree();
+        let menu_version = tree.menu_version();
 
         // 业务包：扫描 → 验签 → 依赖拓扑 → 合并菜单
-        let mut notes = outcome.notes;
         let pkg_dir = std::path::Path::new(&self.state.appdata_dir).join("packages");
         let (plan, failures) = pkg::scan_dir(
             &pkg_dir,
-            &tellerkit_core::mock::demo_verifying_key(),
+            &self.state.verifying_key,
             crate::ports::shell_version(),
         );
-        let conflicts = pkg::merge_packages(&mut tree, &plan.ordered);
-        self.state.packages = plan.ordered;
+        let conflicts = pkg::merge_packages(&mut tree, plan.ordered());
+        self.state.packages = plan.ordered().to_vec();
 
         for package in &self.state.packages {
             notes.push(format!(
                 "已加载业务包 {} v{}",
-                package.manifest.id, package.manifest.version
+                package.id(),
+                package.version()
             ));
         }
         for failure in &failures {
-            notes.push(format!("跳过业务包 {}：{}", failure.id, failure.reason));
+            notes.push(format!("跳过业务包 {}：{}", failure.id(), failure.reason()));
         }
         for conflict in &conflicts {
             notes.push(format!("业务包菜单冲突，保留主壳版本：{conflict}"));
@@ -183,12 +362,12 @@ impl<'a> ShellApp<'a> {
             notes.push(w.clone());
         }
 
-        let menu_nodes = tree.nodes.len();
+        let menu_nodes = tree.node_count();
         self.state.menu = Some(tree);
 
         Ok(BootSummary {
             shell_version: env!("CARGO_PKG_VERSION").to_string(),
-            pubkey_hex: tellerkit_core::mock::demo_pubkey_hex(),
+            pubkey_hex: pubkey_to_hex(&self.state.verifying_key),
             appdata_dir: self.state.appdata_dir.clone(),
             offline: self.mock_offline(),
             local_versions: self.state.store.list_versions(),
@@ -218,7 +397,7 @@ impl<'a> ShellApp<'a> {
             .as_ref()
             .ok_or("菜单尚未加载，请先完成启动流程")?;
         let started = std::time::Instant::now();
-        let menu = filter::filter_visible(menu_tree, &snapshot);
+        let menu = filter_visible(menu_tree, &snapshot);
         let filter_ms = started.elapsed().as_secs_f64() * 1000.0;
 
         self.state.snapshot = Some(snapshot.clone());
@@ -227,11 +406,11 @@ impl<'a> ShellApp<'a> {
             self.clock.now_secs(),
         ));
         self.audit(
-            &snapshot.teller_no,
+            snapshot.teller_no(),
             "login",
-            &snapshot.outlet_code,
+            snapshot.outlet_code(),
             "ok",
-            &format!("角色 {}", snapshot.role_label),
+            &format!("角色 {}", snapshot.role_label()),
         );
 
         Ok(LoginOutcome {
@@ -243,7 +422,7 @@ impl<'a> ShellApp<'a> {
 
     pub fn logout(&mut self) -> Result<(), String> {
         if let Some(snapshot) = self.state.snapshot.clone() {
-            self.audit(&snapshot.teller_no, "logout", "", "ok", "");
+            self.audit(snapshot.teller_no(), "logout", "", "ok", "");
         }
         self.state.session = None;
         self.state.clear_session();
@@ -253,15 +432,15 @@ impl<'a> ShellApp<'a> {
     pub fn current_menu(&self) -> Result<Vec<MenuView>, String> {
         let snapshot = self.state.snapshot.as_ref().ok_or("尚未登录")?;
         let menu = self.state.menu.as_ref().ok_or("菜单尚未加载")?;
-        Ok(filter::filter_visible(menu, snapshot))
+        Ok(filter_visible(menu, snapshot))
     }
 
     /// 后台版本探测。菜单版本更新不重置权限快照——两者独立演进。
     pub fn check_update(&mut self) -> Result<sync::UpdateOutcome, String> {
         let outcome = sync::check_and_update(self.state.remote.as_ref(), &self.state.store);
-        if outcome.updated {
+        if outcome.updated() {
             if let Ok(loaded) = self.state.store.load_latest() {
-                self.state.menu = Some(loaded.tree);
+                self.state.menu = Some(loaded.into_tree());
             }
         }
         Ok(outcome)
@@ -271,23 +450,25 @@ impl<'a> ShellApp<'a> {
     pub fn reload_from_disk(&mut self) -> Result<ReloadOutcome, String> {
         let outcome = sync::reload(self.state.remote.as_ref(), &self.state.store)
             .map_err(|e| e.to_string())?;
-        let note = outcome.notes.join("；");
+        let note = outcome.notes().join("；");
+        let verify_failed = outcome.verify_failed();
+        let loaded = outcome.into_loaded();
         let menu = self
             .state
             .snapshot
             .as_ref()
-            .map(|snap| filter::filter_visible(&outcome.loaded.tree, snap));
-        let menu_version = outcome.loaded.tree.menu_version;
-        let source = match outcome.loaded.source {
+            .map(|snap| filter_visible(loaded.tree(), snap));
+        let menu_version = loaded.tree().menu_version();
+        let source = match loaded.source() {
             LoadSource::LocalFile { .. } => "local".to_string(),
             LoadSource::NetworkFallback { .. } => "network".to_string(),
         };
-        self.state.menu = Some(outcome.loaded.tree);
+        self.state.menu = Some(loaded.into_tree());
 
         Ok(ReloadOutcome {
             menu_version,
             source,
-            verify_failed: outcome.verify_failed,
+            verify_failed,
             note,
             menu,
         })
@@ -297,7 +478,7 @@ impl<'a> ShellApp<'a> {
 
     /// 状态不明的交易：标记待冲正。这是超时后的**唯一**正确处置。
     fn mark_if_uncertain(&mut self, key: &str, result: &TxResult) {
-        if result.status == TxStatus::MarkedForReversal {
+        if result.status() == TxStatus::MarkedForReversal {
             self.state
                 .reversal
                 .mark(key, ExceptionKind::MarkedForReversal);
@@ -323,14 +504,9 @@ impl<'a> ShellApp<'a> {
 
     /// 申请冲正：本地授权 → 主机受理 → 拿到流水号后才算处置完成。
     pub fn request_reversal(&mut self, key: &str, reason: &str) -> Result<String, String> {
+        self.require_unlocked("reversal")?;
         let actor = self.actor();
-        let request = ReversalRequest {
-            idempotency_key: key.to_string(),
-            initiator: actor.clone(),
-            tx_code: String::new(),
-            amount_cents: 0,
-            reason: reason.to_string(),
-        };
+        let request = ReversalRequest::new(key, &actor, "", 0, reason);
 
         // 1. 授权（当前是演示主管；接 IAM 后换成真实授权端口）
         self.state
@@ -355,11 +531,12 @@ impl<'a> ShellApp<'a> {
     }
 
     pub fn submit_transaction(&mut self, request: TxRequest) -> Result<TxResult, String> {
+        self.require_unlocked("submit_tx")?;
         // 契约 lifecycle.md 不变量 7：主机没声明幂等，就不许离线挂起。
         // 挂起意味着"以后一定会重发"，而重发只有服务端按幂等键去重才不会重复入账。
-        if request.offline_capable && !self.remote.supports_idempotency() {
+        if request.offline_capable() && !self.remote.supports_idempotency() {
             let actor = self.actor();
-            let code = request.tx_code.clone();
+            let code = request.tx_code().to_string();
             self.audit(
                 &actor,
                 "submit_tx",
@@ -371,20 +548,20 @@ impl<'a> ShellApp<'a> {
                 "该主机未声明幂等支持，不能离线挂起交易（请联系管理员确认主机契约）".to_string(),
             );
         }
-        let amount_cents = request.amount_cents;
-        let code = request.tx_code.clone();
-        let key = request.idempotency_key.clone();
+        let amount_cents = request.amount_cents();
+        let code = request.tx_code().to_string();
+        let key = request.idempotency_key().to_string();
         let actor = self.actor();
 
         let result = self.state.tx.submit(self.remote.as_ref(), request);
         self.mark_if_uncertain(&key, &result);
 
-        let detail = format!("status={:?} amount_cents={amount_cents}", result.status);
+        let detail = format!("status={:?} amount_cents={amount_cents}", result.status());
         self.audit(
             &actor,
             "submit_tx",
             &code,
-            if result.status == TxStatus::Committed {
+            if result.status() == TxStatus::Committed {
                 "ok"
             } else {
                 "failed"
@@ -395,6 +572,7 @@ impl<'a> ShellApp<'a> {
     }
 
     pub fn replay_pending(&mut self) -> Result<String, String> {
+        self.require_unlocked("replay")?;
         let remote = Arc::clone(&self.remote);
         let now = self.clock.now_secs();
         let run = tellerkit_core::replay::run_once(
@@ -403,59 +581,59 @@ impl<'a> ShellApp<'a> {
             remote.as_ref(),
             now,
         );
-        let journal_error = self.state.tx.take_journal_error();
-        let actor = self.actor();
 
-        if let Some(err) = journal_error {
-            self.audit(&actor, "replay", "tx_queue", "failed", &err);
-        }
-        if run.attempted == 0 && run.still_pending == 0 {
+        if run.attempted() == 0 && run.still_pending() == 0 {
             return Ok("没有待重放的交易".to_string());
         }
-        if run.attempted == 0 {
-            return Ok(format!("还有 {} 笔挂起，均未到重试时间", run.still_pending));
+        if run.attempted() == 0 {
+            return Ok(format!(
+                "还有 {} 笔挂起，均未到重试时间",
+                run.still_pending()
+            ));
         }
 
         let detail = format!(
             "attempted={} committed={} pending={} gave_up={}",
-            run.attempted,
-            run.committed,
-            run.still_pending,
-            run.gave_up.len()
+            run.attempted(),
+            run.committed(),
+            run.still_pending(),
+            run.gave_up().len()
         );
+        let actor = self.actor();
         self.audit(&actor, "replay", "tx_queue", "ok", &detail);
 
         Ok(format!(
             "重放 {} 笔：成功 {} 笔，仍挂起 {} 笔{}",
-            run.attempted,
-            run.committed,
-            run.still_pending,
-            if run.gave_up.is_empty() {
+            run.attempted(),
+            run.committed(),
+            run.still_pending(),
+            if run.gave_up().is_empty() {
                 String::new()
             } else {
-                format!("，{} 笔已放弃自动重试，需人工处理", run.gave_up.len())
+                format!("，{} 笔已放弃自动重试，需人工处理", run.gave_up().len())
             }
         ))
     }
 
     pub fn tx_pending_count(&self) -> usize {
-        self.state.tx.pending_requests().len()
+        self.state.tx.pending_count()
     }
 
     // ---------- 设备 ----------
 
     pub fn print_voucher(&mut self, voucher: Voucher) -> Result<PrintReceipt, String> {
+        self.require_unlocked("print_voucher")?;
         // 白名单先于动作：未登记的型号连纸都不该动
         self.state
             .devices
             .ensure_allowed(&self.state.policy)
             .map_err(|e| e.to_string())?;
-        let tx_code = voucher.tx_code.clone();
-        let template = voucher.template.clone();
+        let tx_code = voucher.tx_code().to_string();
+        let template = voucher.template().to_string();
         let outcome = self
             .state
             .devices
-            .printer
+            .printer()
             .print(&voucher)
             .map_err(|e| e.to_string());
         let actor = self.actor();
@@ -525,11 +703,12 @@ impl<'a> ShellApp<'a> {
     // ---------- 业务包 ----------
 
     pub fn package_module(&self, route: &str) -> Result<String, String> {
+        self.require_unlocked("package_module")?;
         for package in &self.state.packages {
-            if let Some(module) = package.routes.get(route) {
-                return package.assets.get(module).cloned().ok_or_else(|| {
-                    format!("包 {} 的模块 {module} 未随包提供", package.manifest.id)
-                });
+            if let Some(module) = package.route(route) {
+                return package
+                    .asset(&module)
+                    .ok_or_else(|| format!("包 {} 的模块 {module} 未随包提供", package.id()));
             }
         }
         Err("该路由不是业务包提供的".to_string())
@@ -554,19 +733,19 @@ impl<'a> ShellApp<'a> {
             summary: rows
                 .into_iter()
                 .map(|r| StatusRow {
-                    status: r.status,
-                    count: r.count,
-                    amount_cents: r.amount_cents,
+                    status: r.status().to_string(),
+                    count: r.count(),
+                    amount_cents: r.amount_cents(),
                 })
                 .collect(),
             recent: recent
                 .into_iter()
                 .map(|r| RecentTxView {
-                    key: r.idempotency_key,
-                    tx_code: r.tx_code,
-                    amount_cents: r.amount_cents,
-                    status: r.status,
-                    reference: r.reference,
+                    key: r.idempotency_key().to_string(),
+                    tx_code: r.tx_code().to_string(),
+                    amount_cents: r.amount_cents(),
+                    status: r.status().to_string(),
+                    reference: r.reference().clone(),
                 })
                 .collect(),
         })
@@ -582,15 +761,15 @@ impl<'a> ShellApp<'a> {
             .map(|e| {
                 format!(
                     "{} · {} {} {} · {}{}",
-                    e.at,
-                    e.actor,
-                    e.action,
-                    e.target,
-                    e.result,
-                    if e.detail.is_empty() {
+                    e.at(),
+                    e.actor(),
+                    e.action(),
+                    e.target(),
+                    e.result(),
+                    if e.detail().is_empty() {
                         String::new()
                     } else {
-                        format!(" · {}", e.detail)
+                        format!(" · {}", e.detail())
                     }
                 )
             })
@@ -602,14 +781,7 @@ impl<'a> ShellApp<'a> {
         let Some(journal) = &self.state.audit else {
             return;
         };
-        let event = AuditEvent {
-            actor: actor.to_string(),
-            action: action.to_string(),
-            target: target.to_string(),
-            result: result.to_string(),
-            detail: detail.to_string(),
-            at: String::new(),
-        };
+        let event = AuditEvent::new(actor, action, target, result, detail);
         if let Err(e) = journal.audit(&event) {
             eprintln!("审计写入失败：{e}");
         }
@@ -636,7 +808,7 @@ impl<'a> ShellApp<'a> {
         self.state
             .snapshot
             .as_ref()
-            .map(|s| s.teller_no.clone())
+            .map(|s| s.teller_no().to_string())
             .unwrap_or_else(|| "unknown".into())
     }
 }
@@ -663,8 +835,7 @@ mod tests {
 
     fn state_with(clock: Arc<FrozenClock>) -> AppState {
         let dir = std::env::temp_dir().join(format!("tk-app-test-{}", std::process::id()));
-        let store =
-            tellerkit_core::store::MenuStore::new(dir, tellerkit_core::mock::demo_verifying_key());
+        let store = tellerkit_core::MenuStore::new(dir, tellerkit_core::mock::demo_verifying_key());
         let mock = Arc::new(crate::ports::MockRemote::default());
         let mut state = AppState::new(
             store,
@@ -672,8 +843,11 @@ mod tests {
             TxEngine::new(),
             None,
             None,
-            Arc::clone(&mock) as Arc<dyn RemoteBanking>,
-            Some(mock),
+            crate::ports::RemoteChoice::new(
+                Arc::clone(&mock) as Arc<dyn RemoteBanking>,
+                Some(mock),
+            ),
+            tellerkit_core::mock::demo_verifying_key(),
         );
         state.clock = clock;
         state.session = Some(SessionGuard::new(SessionPolicy::default(), 0));
@@ -713,7 +887,7 @@ mod tests {
         ));
 
         let mut req = TxRequest::new("account.deposit", "k-offline");
-        req.offline_capable = true;
+        req.set_offline_capable(true);
         let err = ShellApp::new(&mut state)
             .submit_transaction(req)
             .unwrap_err();
@@ -722,15 +896,15 @@ mod tests {
         // 在线模式不走这条拦截：会一路到端点，端点不存在则是"主机拒绝"（交易结论），
         // 不是 Err——状态机把失败表达成 TxResult，这一点不能被测试写反。
         let mut online = TxRequest::new("account.deposit", "k-online");
-        online.offline_capable = false;
+        online.set_offline_capable(false);
         let result = ShellApp::new(&mut state)
             .submit_transaction(online)
             .expect("在线模式不应被幂等规则拦下");
-        assert_eq!(result.status, TxStatus::Rejected);
+        assert_eq!(result.status(), TxStatus::Rejected);
         assert!(
-            result.message.contains("没有为该服务登记任何端点"),
+            result.message().contains("没有为该服务登记任何端点"),
             "实际：{}",
-            result.message
+            result.message()
         );
     }
 
@@ -744,5 +918,75 @@ mod tests {
         clock.set(400);
         let view = ShellApp::new(&mut state).session_touch();
         assert!(view.locked, "锁定期间的操作不得解锁");
+    }
+
+    /// 锁定后所有资金/打印/冲正/重放/包入口一律拒绝，
+    /// 且主机调用次数为 0——把 mock 设成"在线且有响应"，
+    /// 若闸门失效就会返回成功，测试会失败。
+    fn locked_state() -> AppState {
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let mut state = state_with(Arc::clone(&clock));
+        clock.set(180);
+        assert!(ShellApp::new(&mut state).session_tick().locked);
+        state
+    }
+
+    #[test]
+    fn locked_session_refuses_all_protected_commands() {
+        let mut state = locked_state();
+
+        let err = ShellApp::new(&mut state)
+            .submit_transaction(TxRequest::new("account.deposit", "k-lock"))
+            .unwrap_err();
+        assert!(err.contains("会话已锁定"), "提交应被闸门拒绝：{err}");
+
+        let err = ShellApp::new(&mut state)
+            .print_voucher(Voucher::new("voucher", "account.deposit"))
+            .unwrap_err();
+        assert!(err.contains("会话已锁定"), "打印应被闸门拒绝：{err}");
+
+        let err = ShellApp::new(&mut state)
+            .request_reversal("k-lock", "冲正")
+            .unwrap_err();
+        assert!(err.contains("会话已锁定"), "冲正应被闸门拒绝：{err}");
+
+        let err = ShellApp::new(&mut state).replay_pending().unwrap_err();
+        assert!(err.contains("会话已锁定"), "重放应被闸门拒绝：{err}");
+
+        let err = ShellApp::new(&mut state)
+            .package_module("pkg.any.route")
+            .unwrap_err();
+        assert!(err.contains("会话已锁定"), "业务包入口应被闸门拒绝：{err}");
+    }
+
+    #[test]
+    fn missing_session_refuses_protected_commands() {
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let mut state = state_with(clock);
+        state.session = None;
+
+        let err = ShellApp::new(&mut state)
+            .submit_transaction(TxRequest::new("account.deposit", "k-none"))
+            .unwrap_err();
+        assert!(err.contains("尚未登录"), "未登录应被闸门拒绝：{err}");
+
+        let err = ShellApp::new(&mut state).replay_pending().unwrap_err();
+        assert!(err.contains("尚未登录"), "未登录重放应被闸门拒绝：{err}");
+
+        let err = ShellApp::new(&mut state)
+            .request_reversal("k-none", "冲正")
+            .unwrap_err();
+        assert!(err.contains("尚未登录"), "未登录冲正应被闸门拒绝：{err}");
+    }
+
+    #[test]
+    fn unlocked_session_allows_commands_to_reach_host() {
+        // 反向对照：解锁后必须真的走到主机，证明闸门不是"一律拒绝"。
+        let clock = Arc::new(FrozenClock(AtomicU64::new(0)));
+        let mut state = state_with(clock);
+        let result = ShellApp::new(&mut state)
+            .submit_transaction(TxRequest::new("account.deposit", "k-ok"))
+            .expect("解锁后应放行到主机");
+        assert_eq!(result.status(), TxStatus::Committed);
     }
 }

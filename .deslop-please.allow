@@ -1,0 +1,9 @@
+# Existing architectural debt suppressed by `deslop-please --allow`.
+# Fixing an entry here never fails CI; new issues not listed here fail.
+#
+# shallow-module tellerkit_core::menu：
+#   menu/ 是菜单能力域的聚合门面（model/filter/pack/store/sync 五个子模块）。
+#   它对外 re-export 13 个必要类型/入口，MenuStore 的 9 个存储操作是命令层与启动路径
+#   实际要用的；进一步收窄需要把 dev 操作（corrupt/reset）移进 MenuStore，属于后续
+#   重构，不在本轮范围。登记为基线，新增/变化仍会失败。
+shallow-module tellerkit_core::menu

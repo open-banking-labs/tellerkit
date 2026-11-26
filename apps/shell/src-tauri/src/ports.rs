@@ -13,6 +13,7 @@
 //! 违反它，这层抽象就白抽了。
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -40,6 +41,29 @@ impl Clock for SystemClock {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0)
+    }
+}
+
+/// 一次远端选择的结果：真实路由或演示远端，二选一。
+///
+/// 把 `remote` 与 `mock` 绑在一起传，避免 `AppState::new` 为演示开关单独加一个参数；
+/// 将来去掉演示远端时，这里就是唯一需要改的构造点。
+pub struct RemoteChoice {
+    remote: Arc<dyn RemoteBanking>,
+    mock: Option<Arc<MockRemote>>,
+}
+
+impl RemoteChoice {
+    pub fn new(remote: Arc<dyn RemoteBanking>, mock: Option<Arc<MockRemote>>) -> Self {
+        Self { remote, mock }
+    }
+
+    pub fn remote(&self) -> &Arc<dyn RemoteBanking> {
+        &self.remote
+    }
+
+    pub fn mock(&self) -> Option<&Arc<MockRemote>> {
+        self.mock.as_ref()
     }
 }
 
@@ -145,11 +169,7 @@ impl MockRemote {
     }
 
     fn mock_host(&self, state: &MockRemoteState) -> MockHost {
-        MockHost {
-            menu_version: state.menu_version,
-            offline: state.offline,
-            serve_tampered: state.tampered,
-        }
+        MockHost::new(state.menu_version, state.offline, state.tampered)
     }
 }
 
@@ -158,11 +178,7 @@ impl MenuSource for MockRemote {
         let state = self.snapshot();
         self.mock_host(&state)
             .probe()
-            .map(|p| MenuVersionProbe {
-                latest: p.latest,
-                shell_compat_min: p.shell_compat_min,
-                shell_compat_max: p.shell_compat_max,
-            })
+            .map(|p| MenuVersionProbe::new(p.latest(), p.shell_compat_min(), p.shell_compat_max()))
             .map_err(|e| RemoteError::Unavailable(e.to_string()))
     }
 
@@ -208,12 +224,12 @@ impl TxHost for MockRemote {
         }
         // 同键复用流水号：这就是服务端该有的幂等行为
         if let Ok(mut map) = self.accepted.lock() {
-            if let Some(existing) = map.get(&request.idempotency_key) {
+            if let Some(existing) = map.get(request.idempotency_key()) {
                 return Ok(existing.clone());
             }
             let n = self.tx_seq.fetch_add(1, Ordering::SeqCst) + 1;
             let reference = format!("TX{n:08}");
-            map.insert(request.idempotency_key.clone(), reference.clone());
+            map.insert(request.idempotency_key().to_string(), reference.clone());
             return Ok(reference);
         }
         Err(HostError::Unavailable)
@@ -227,11 +243,7 @@ pub fn demo_roles() -> Vec<(&'static str, &'static str)> {
 
 /// 主壳版本，用于业务包兼容判定。
 pub fn shell_version() -> Version {
-    Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or(Version {
-        major: 0,
-        minor: 0,
-        patch: 0,
-    })
+    Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or(Version::new(0, 0, 0))
 }
 
 #[cfg(test)]
