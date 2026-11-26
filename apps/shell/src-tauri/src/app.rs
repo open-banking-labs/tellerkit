@@ -838,7 +838,7 @@ impl<'a> ShellApp<'a> {
         }
         if let Some(template) = template {
             if !caps.allows_template(template) {
-                return Err(self.deny_package_call(call, tx_code, "未声明模板"));
+                return Err(self.deny_package_call(call, template, "未声明模板"));
             }
         }
         Ok(())
