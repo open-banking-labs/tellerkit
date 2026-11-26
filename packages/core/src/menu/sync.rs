@@ -171,7 +171,7 @@ pub fn check_and_update(host: &dyn MenuSource, store: &MenuStore) -> UpdateOutco
         }
     };
 
-    if local.map_or(false, |current| probe.latest() <= current) {
+    if local.is_some_and(|current| probe.latest() <= current) {
         let note = match local {
             Some(current) if probe.latest() < current => {
                 format!(
@@ -229,7 +229,7 @@ pub fn check_and_update(host: &dyn MenuSource, store: &MenuStore) -> UpdateOutco
             ),
         };
     }
-    if local.map_or(false, |current| version < current) {
+    if local.is_some_and(|current| version < current) {
         return UpdateOutcome {
             checked: true,
             local,
