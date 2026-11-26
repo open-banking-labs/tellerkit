@@ -179,6 +179,10 @@ try {
     if (!baseline[key] || typeof baseline[key] !== "object" || Array.isArray(baseline[key])) {
       throw new Error(`缺少 ${key} 计数表`);
     }
+    // Windows 上 rel() 产出反斜杠，基线统一按 POSIX 路径记账。
+    baseline[key] = Object.fromEntries(
+      Object.entries(baseline[key]).map(([k, v]) => [k.replace(/\\/g, "/"), v]),
+    );
   }
 } catch (e) {
   console.error(`✗ check-module-depth 基线不可用（${BASELINE_PATH}）：${e.message}`);
