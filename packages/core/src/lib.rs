@@ -5,20 +5,18 @@
 
 pub mod banking;
 pub mod device;
-pub mod filter;
+mod menu;
 pub mod mock;
-pub mod model;
-pub mod pack;
 pub mod perm;
 pub mod pkg;
 pub mod remote;
 pub mod replay;
 pub mod reversal;
 pub mod session;
-pub mod store;
-pub mod sync;
 pub mod tx;
 pub mod update;
+
+pub use menu::{filter, model, pack, store, sync};
 
 pub use banking::{MenuVersionProbe, RemoteBanking, RemoteError, RoutedBanking, ServiceNames};
 pub use device::{
