@@ -57,6 +57,10 @@ Software Design》的 "deep modules, narrow interfaces"）对 `docs/p1-11-progre
 - **拆成新的 `packages/protocol` 等 crate**：ADR-0006 已否决，当前没有第二个消费者。
 - **本机安装 deslop-please 跑 cargo**：违反编译纪律；改为构建机运行。
 
+## 豁免记录
+
+- `shallow-module tellerkit_core::menu`：`menu/` 是菜单域聚合门面，对外 re-export 的 13 个类型/入口是命令层与启动路径实际要用的；进一步收窄需要把 dev 操作（corrupt/reset）移进 `MenuStore`，属后续重构。已登记 `.deslop-please.allow`，新增问题仍会失败。
+
 ## 验收
 
 - `npm run gate` 绿（含第 7 道 `check-module-depth`）。

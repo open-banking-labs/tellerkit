@@ -10,17 +10,17 @@
 
 use std::sync::Arc;
 
+use tellerkit_core as sync;
 use tellerkit_core::device::{PrintReceipt, Voucher};
-use tellerkit_core::filter::MenuView;
 use tellerkit_core::mock::DemoRole;
-use tellerkit_core::model::MenuTree;
-use tellerkit_core::pack::pubkey_to_hex;
 use tellerkit_core::pkg;
+use tellerkit_core::pubkey_to_hex;
 use tellerkit_core::reversal::{Authorization, Authorizer, ExceptionKind, ReversalRequest};
 use tellerkit_core::session::{SessionGuard, SessionPolicy};
-use tellerkit_core::sync;
 use tellerkit_core::tx::{TxRequest, TxResult, TxStatus};
-use tellerkit_core::{filter, LoadSource};
+use tellerkit_core::MenuTree;
+use tellerkit_core::MenuView;
+use tellerkit_core::{filter_visible, LoadSource};
 use tellerkit_journal_sqlite::AuditEvent;
 
 use crate::ports::{Clock, RemoteBanking};
@@ -397,7 +397,7 @@ impl<'a> ShellApp<'a> {
             .as_ref()
             .ok_or("菜单尚未加载，请先完成启动流程")?;
         let started = std::time::Instant::now();
-        let menu = filter::filter_visible(menu_tree, &snapshot);
+        let menu = filter_visible(menu_tree, &snapshot);
         let filter_ms = started.elapsed().as_secs_f64() * 1000.0;
 
         self.state.snapshot = Some(snapshot.clone());
@@ -432,7 +432,7 @@ impl<'a> ShellApp<'a> {
     pub fn current_menu(&self) -> Result<Vec<MenuView>, String> {
         let snapshot = self.state.snapshot.as_ref().ok_or("尚未登录")?;
         let menu = self.state.menu.as_ref().ok_or("菜单尚未加载")?;
-        Ok(filter::filter_visible(menu, snapshot))
+        Ok(filter_visible(menu, snapshot))
     }
 
     /// 后台版本探测。菜单版本更新不重置权限快照——两者独立演进。
@@ -457,7 +457,7 @@ impl<'a> ShellApp<'a> {
             .state
             .snapshot
             .as_ref()
-            .map(|snap| filter::filter_visible(loaded.tree(), snap));
+            .map(|snap| filter_visible(loaded.tree(), snap));
         let menu_version = loaded.tree().menu_version();
         let source = match loaded.source() {
             LoadSource::LocalFile { .. } => "local".to_string(),
@@ -835,8 +835,7 @@ mod tests {
 
     fn state_with(clock: Arc<FrozenClock>) -> AppState {
         let dir = std::env::temp_dir().join(format!("tk-app-test-{}", std::process::id()));
-        let store =
-            tellerkit_core::store::MenuStore::new(dir, tellerkit_core::mock::demo_verifying_key());
+        let store = tellerkit_core::MenuStore::new(dir, tellerkit_core::mock::demo_verifying_key());
         let mock = Arc::new(crate::ports::MockRemote::default());
         let mut state = AppState::new(
             store,

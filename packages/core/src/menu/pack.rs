@@ -16,7 +16,7 @@
 //! 安全边界（必须写进任何对外表述）：签名只能"检测篡改"和"阻止非授权方下发
 //! 菜单包"，**不能**防住本机管理员。真正的权限边界永远在服务端接口。
 
-use crate::model::{MenuTree, TreeError};
+use crate::menu::model::{MenuTree, TreeError};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 
@@ -213,7 +213,7 @@ pub fn pubkey_from_hex(s: &str) -> Result<VerifyingKey, PackError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::MenuNode;
+    use crate::menu::model::MenuNode;
     use rand::rngs::OsRng;
 
     fn tree() -> MenuTree {

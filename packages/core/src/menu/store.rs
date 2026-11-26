@@ -15,8 +15,8 @@
 //! - 写入走 `tmp -> fsync -> rename`，断电不会留下半个文件；
 //! - 加载时**先验签再解码**，任何一步失败都不允许使用该文件。
 
-use crate::model::MenuTree;
-use crate::pack::{self, MenuPack, PackError};
+use crate::menu::model::MenuTree;
+use crate::menu::pack::{self, MenuPack, PackError};
 use ed25519_dalek::VerifyingKey;
 use std::fs;
 use std::io::Write;
@@ -97,16 +97,16 @@ impl MenuStore {
         }
     }
 
-    pub fn with_keep(mut self, keep: usize) -> Self {
+    pub(crate) fn with_keep(mut self, keep: usize) -> Self {
         self.keep = keep.max(1);
         self
     }
 
-    pub fn dir(&self) -> &Path {
+    pub(crate) fn dir(&self) -> &Path {
         &self.dir
     }
 
-    pub fn pubkey(&self) -> &VerifyingKey {
+    pub(crate) fn pubkey(&self) -> &VerifyingKey {
         &self.pubkey
     }
 
@@ -154,7 +154,7 @@ impl MenuStore {
     }
 
     /// 加载指定版本（回滚场景）。
-    pub fn load_version(&self, version: u64) -> Result<LoadedMenu, StoreError> {
+    pub(crate) fn load_version(&self, version: u64) -> Result<LoadedMenu, StoreError> {
         let path = self.path_for(version);
         let bytes = fs::read(&path)?;
         let tree = pack::open(&bytes, &self.pubkey)?;
@@ -168,7 +168,7 @@ impl MenuStore {
     /// 验签后原子安装。返回解码后的树，便于调用方立即使用。
     ///
     /// 安装前先验签：坏包绝不落到正式文件名上。
-    pub fn install(&self, bytes: &[u8]) -> Result<MenuTree, StoreError> {
+    pub(crate) fn install(&self, bytes: &[u8]) -> Result<MenuTree, StoreError> {
         let pack = MenuPack::verify(bytes, &self.pubkey)?;
         let tree = pack.decode()?;
         self.ensure_dir()?;
@@ -195,7 +195,7 @@ impl MenuStore {
     }
 
     /// 只保留最近 `keep` 个版本。
-    pub fn prune(&self) {
+    pub(crate) fn prune(&self) {
         let versions = self.list_versions();
         for old in versions.into_iter().skip(self.keep) {
             let _ = fs::remove_file(self.path_for(old));

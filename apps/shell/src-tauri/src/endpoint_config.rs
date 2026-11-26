@@ -392,7 +392,7 @@ mod tests {
         std::fs::write(&path, payload).unwrap();
 
         let key = SigningKey::generate(&mut OsRng);
-        let pubkey = tellerkit_core::pack::pubkey_to_hex(&key.verifying_key());
+        let pubkey = tellerkit_core::pubkey_to_hex(&key.verifying_key());
         let sig_path = dir.path().join("endpoints.json.sig");
         std::fs::write(&sig_path, hex::encode(key.sign(payload).to_bytes())).unwrap();
 

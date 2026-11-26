@@ -10,7 +10,7 @@
 
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
-use tellerkit_core::pack::pubkey_from_hex;
+use tellerkit_core::pubkey_from_hex;
 
 /// 校验失败的原因。文案要能直接给运维看。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -86,7 +86,7 @@ mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
     use rand::rngs::OsRng;
-    use tellerkit_core::pack::pubkey_to_hex;
+    use tellerkit_core::pubkey_to_hex;
 
     fn keypair() -> (SigningKey, String) {
         let key = SigningKey::generate(&mut OsRng);

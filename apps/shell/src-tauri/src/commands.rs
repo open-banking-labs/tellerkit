@@ -11,8 +11,8 @@ use tauri::State;
 use ts_rs::TS;
 
 use tellerkit_core::device::{PrintReceipt, Voucher};
-use tellerkit_core::filter::MenuView;
 use tellerkit_core::tx::{TxRequest, TxResult};
+use tellerkit_core::MenuView;
 use tellerkit_core::PermSnapshot;
 
 use crate::app::ShellApp;

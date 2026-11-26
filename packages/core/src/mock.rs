@@ -6,8 +6,8 @@
 //! 只存在于服务端构建环节，客户端只内置公钥。
 
 use crate::banking::{MenuSource, MenuVersionProbe, RemoteError};
-use crate::model::{MenuNode, MenuTree, NodeStatus};
-use crate::pack::MenuPack;
+use crate::menu::model::{MenuNode, MenuTree, NodeStatus};
+use crate::menu::pack::MenuPack;
 use crate::perm::PermSnapshot;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use std::collections::BTreeMap;
@@ -31,7 +31,7 @@ pub fn demo_verifying_key() -> VerifyingKey {
 }
 
 pub fn demo_pubkey_hex() -> String {
-    crate::pack::pubkey_to_hex(&demo_verifying_key())
+    crate::menu::pack::pubkey_to_hex(&demo_verifying_key())
 }
 
 /// 演示菜单树：覆盖典型柜面分组、叶子与按钮级权限。
@@ -283,9 +283,9 @@ impl MockHost {
             &demo_signing_key(),
         )
         .map_err(|e| HostError::Pack(e.to_string()))?;
-        if self.serve_tampered && bytes.len() > crate::pack::HEADER_LEN + 3 {
+        if self.serve_tampered && bytes.len() > crate::menu::pack::HEADER_LEN + 3 {
             // 故意改坏一个 payload 字节：客户端必须拒绝并回退。
-            let idx = crate::pack::HEADER_LEN + 3;
+            let idx = crate::menu::pack::HEADER_LEN + 3;
             bytes[idx] ^= 0xFF;
         }
         Ok(bytes)
@@ -315,8 +315,8 @@ impl MenuSource for MockHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filter::filter_visible;
-    use crate::pack;
+    use crate::menu::filter::filter_visible;
+    use crate::menu::pack;
 
     #[test]
     fn demo_tree_is_valid() {

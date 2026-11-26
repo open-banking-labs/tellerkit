@@ -9,7 +9,7 @@
 //!
 //! 整个函数是纯内存递归，2000 节点量级 < 1ms。
 
-use crate::model::{MenuNode, MenuTree, NodeStatus, NodeType};
+use crate::menu::model::{MenuNode, MenuTree, NodeStatus, NodeType};
 use crate::perm::PermSnapshot;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -143,7 +143,7 @@ fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::MenuNode;
+    use crate::menu::model::MenuNode;
     use crate::perm::PermSnapshot;
     use std::collections::BTreeMap;
 

@@ -271,12 +271,12 @@ impl MenuTree {
     }
 
     /// 按 code 建立索引。
-    pub fn index(&self) -> HashMap<&str, &MenuNode> {
+    pub(crate) fn index(&self) -> HashMap<&str, &MenuNode> {
         self.nodes.iter().map(|n| (n.code.as_str(), n)).collect()
     }
 
     /// 根节点（parent 为空），按 sort 排序。
-    pub fn roots(&self) -> Vec<&MenuNode> {
+    pub(crate) fn roots(&self) -> Vec<&MenuNode> {
         let mut out: Vec<&MenuNode> = self
             .nodes
             .iter()
@@ -287,7 +287,7 @@ impl MenuTree {
     }
 
     /// 指定父节点的直接子节点，按 sort 排序。
-    pub fn children_of(&self, parent: &str) -> Vec<&MenuNode> {
+    pub(crate) fn children_of(&self, parent: &str) -> Vec<&MenuNode> {
         let mut out: Vec<&MenuNode> = self
             .nodes
             .iter()
@@ -315,7 +315,7 @@ impl MenuTree {
     }
 
     /// 导出 code -> title 映射，便于审计日志记录"用户点了什么"。
-    pub fn title_map(&self) -> BTreeMap<&str, &str> {
+    pub(crate) fn title_map(&self) -> BTreeMap<&str, &str> {
         self.nodes
             .iter()
             .map(|n| (n.code.as_str(), n.title.as_str()))

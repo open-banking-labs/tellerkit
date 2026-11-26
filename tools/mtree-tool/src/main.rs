@@ -17,8 +17,8 @@
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use std::process::ExitCode;
-use tellerkit_core::model::MenuTree;
-use tellerkit_core::pack::{self, MenuPack};
+use tellerkit_core::MenuPack;
+use tellerkit_core::MenuTree;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -72,7 +72,10 @@ fn keygen() -> Result<(), String> {
     use rand::rngs::OsRng;
     let sk = SigningKey::generate(&mut OsRng);
     println!("private_key={}", hex::encode(sk.to_bytes()));
-    println!("public_key={}", pack::pubkey_to_hex(&sk.verifying_key()));
+    println!(
+        "public_key={}",
+        tellerkit_core::pubkey_to_hex(&sk.verifying_key())
+    );
     println!("\n私钥只应留在服务端构建环境；公钥内置到客户端。");
     Ok(())
 }
@@ -453,7 +456,7 @@ fn pkg_verify(rest: &[String]) -> Result<(), String> {
 /// 数据由**真实核心逻辑**产出（同一份 demo 树、同一个 filter_visible），
 /// 因此浏览器里看到的就是客户端会渲染的结果，不存在第二套实现。
 fn fixtures(rest: &[String]) -> Result<(), String> {
-    use tellerkit_core::filter::filter_visible;
+    use tellerkit_core::filter_visible;
     use tellerkit_core::mock::DemoRole;
 
     let out = positional(rest)
@@ -463,7 +466,7 @@ fn fixtures(rest: &[String]) -> Result<(), String> {
     std::fs::create_dir_all(&out).map_err(|e| format!("创建目录失败: {e}"))?;
 
     let tree = tellerkit_core::mock::demo_tree(7);
-    let pack_bytes = tellerkit_core::pack::MenuPack::encode(
+    let pack_bytes = tellerkit_core::MenuPack::encode(
         &tree,
         tellerkit_core::mock::SHELL_COMPAT_MIN,
         tellerkit_core::mock::SHELL_COMPAT_MAX,
@@ -472,7 +475,7 @@ fn fixtures(rest: &[String]) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
 
     let open_started = std::time::Instant::now();
-    let _ = tellerkit_core::pack::open(&pack_bytes, &tellerkit_core::mock::demo_verifying_key())
+    let _ = tellerkit_core::open(&pack_bytes, &tellerkit_core::mock::demo_verifying_key())
         .map_err(|e| e.to_string())?;
     let open_ms = open_started.elapsed().as_secs_f64() * 1000.0;
 
@@ -593,14 +596,14 @@ fn build(rest: &[String]) -> Result<(), String> {
     );
     println!(
         "公钥: {}",
-        pack::pubkey_to_hex(&signing_key.verifying_key())
+        tellerkit_core::pubkey_to_hex(&signing_key.verifying_key())
     );
     Ok(())
 }
 
 fn parse_pubkey(rest: &[String]) -> Result<VerifyingKey, String> {
     match flag(rest, "--pubkey") {
-        Some(h) => pack::pubkey_from_hex(&h).map_err(|e| e.to_string()),
+        Some(h) => tellerkit_core::pubkey_from_hex(&h).map_err(|e| e.to_string()),
         None => Ok(tellerkit_core::mock::demo_verifying_key()),
     }
 }
@@ -637,7 +640,7 @@ fn inspect(rest: &[String]) -> Result<(), String> {
         pack.shell_compat_max()
     );
     println!("payload_len   = {} 字节", pack.payload().len());
-    println!("signature     = {} 字节", pack::SIGNATURE_LEN);
+    println!("signature     = {} 字节", tellerkit_core::SIGNATURE_LEN);
     Ok(())
 }
 
@@ -646,7 +649,7 @@ fn dump(rest: &[String]) -> Result<(), String> {
     let file = pos.first().ok_or("缺少 .mtree 路径")?;
     let bytes = std::fs::read(file).map_err(|e| format!("读取失败: {e}"))?;
     let vk = parse_pubkey(rest)?;
-    let tree = pack::open(&bytes, &vk).map_err(|e| format!("打开失败: {e}"))?;
+    let tree = tellerkit_core::open(&bytes, &vk).map_err(|e| format!("打开失败: {e}"))?;
     println!(
         "{}",
         serde_json::to_string_pretty(&tree).map_err(|e| e.to_string())?

@@ -7,8 +7,8 @@
 //! 2. **不能自证来源**：加载时把 `source` 强制改写为 `pkg:<id>`；
 //! 3. **不能越权**：包里声明的权限码只是"供给"，授权仍在服务端。
 
-use crate::model::{MenuNode, MenuTree, TreeError};
-use crate::pack::PackError;
+use crate::menu::model::{MenuNode, MenuTree, TreeError};
+use crate::menu::pack::PackError;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -523,16 +523,16 @@ pub fn plan_load(packages: Vec<BizPackage>, shell: Version) -> LoadPlan {
     for package in packages {
         let id = package.id();
         let range = match ShellRange::parse(&package.min_shell(), &package.max_shell()) {
-                Ok(r) => r,
-                Err(e) => {
-                    plan.skipped.push(PackageDecision {
-                        id,
-                        loaded: false,
-                        reason: format!("版本范围非法：{e}"),
-                    });
-                    continue;
-                }
-            };
+            Ok(r) => r,
+            Err(e) => {
+                plan.skipped.push(PackageDecision {
+                    id,
+                    loaded: false,
+                    reason: format!("版本范围非法：{e}"),
+                });
+                continue;
+            }
+        };
         if !range.accepts(shell) {
             plan.skipped.push(PackageDecision {
                 id,
@@ -875,7 +875,7 @@ mod tests {
     // S-06
     #[test]
     fn package_permissions_grant_nothing_without_server() {
-        use crate::filter::filter_visible;
+        use crate::menu::filter::filter_visible;
         use std::collections::BTreeMap as Map;
 
         let mut tree = MenuTree::new(1, vec![]);

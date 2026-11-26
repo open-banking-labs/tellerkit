@@ -4,8 +4,8 @@
 //! 因此这些路径可以在没有 GUI 的环境里被完整测到。
 
 use crate::banking::MenuSource;
-use crate::pack;
-use crate::store::{LoadSource, LoadedMenu, MenuStore, StoreError};
+use crate::menu::pack;
+use crate::menu::store::{LoadSource, LoadedMenu, MenuStore, StoreError};
 
 /// 启动结果。
 #[derive(Debug, Clone)]
