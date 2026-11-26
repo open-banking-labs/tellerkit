@@ -13,36 +13,88 @@
  * 确实已过时的记录，在 .agents/dispatch-superseded.json 显式登记原因；这是
  * 唯一允许跳过复算的出口，且会在输出里点名，不会伪装成"全部可复算"。
  *
- * 这就是"轨迹门禁"的最小可用形态：不采集会话日志，只保证
- * 「记录里写的结论」与「现在还能复现的事实」一致。
+ * 豁免条目必须写全 reason / approver / date。历史字符串条目只在
+ * tools/trajectory-legacy-approvals.json 登记了审批人与日期后才兼容读取，
+ * 并在输出里明确提示补登；新条目一律按对象格式校验。
  */
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
-import { ROOT, rel } from "./paths.mjs";
+import { ROOT } from "./paths.mjs";
 
 const DIR = join(ROOT, ".agents/dispatches");
 const SUPERSEDED = join(ROOT, ".agents/dispatch-superseded.json");
+const LEGACY = join(ROOT, "tools/trajectory-legacy-approvals.json");
 const errors = [];
 const notes = [];
-let superseded = {};
+let superseded = null;
+let legacy = {};
+
 if (existsSync(SUPERSEDED)) {
   try {
     superseded = JSON.parse(readFileSync(SUPERSEDED, "utf8"));
-  } catch {
-    errors.push(".agents/dispatch-superseded.json 不是合法 JSON");
+  } catch (e) {
+    errors.push(`.agents/dispatch-superseded.json 不是合法 JSON：${e.message}`);
+  }
+  if (superseded !== null && (typeof superseded !== "object" || Array.isArray(superseded))) {
+    errors.push(".agents/dispatch-superseded.json 必须是 JSON 对象（null 不是合法豁免表）");
+    superseded = null;
+  }
+} else {
+  errors.push(".agents/dispatch-superseded.json 不存在：无法校验豁免条目");
+}
+if (superseded === null && !errors.length) {
+  errors.push(".agents/dispatch-superseded.json 解析为 null：无法校验豁免条目");
+}
+
+try {
+  legacy = JSON.parse(readFileSync(LEGACY, "utf8")) ?? {};
+} catch {
+  errors.push(`tools/trajectory-legacy-approvals.json 不是合法 JSON`);
+}
+
+const nonEmpty = (v) => typeof v === "string" && v.trim().length > 0;
+
+/** 归一化成 {reason, approver, date}；缺任一字段就报错，不静默放行。 */
+function exemptionOf(name, value) {
+  const where = `.agents/dispatch-superseded.json 的 ${name}`;
+  if (nonEmpty(value)) {
+    const meta = legacy[name];
+    if (!meta || !nonEmpty(meta.approver) || !nonEmpty(meta.date)) {
+      errors.push(
+        `${where} 是旧字符串格式：必须在 tools/trajectory-legacy-approvals.json 登记 approver 与 date`,
+      );
+      return null;
+    }
+    notes.push(`${where} 是旧字符串格式，审批信息由 legacy 表补齐，请尽快改写为对象格式`);
+    return { reason: value, approver: meta.approver, date: meta.date };
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    errors.push(`${where} 的豁免条目格式非法（需要 reason / approver / date）`);
+    return null;
+  }
+  const missing = ["reason", "approver", "date"].filter((k) => !nonEmpty(value[k]));
+  if (missing.length) {
+    errors.push(`${where} 的豁免条目缺少非空字段：${missing.join(", ")}`);
+    return null;
+  }
+  return { reason: value.reason, approver: value.approver, date: value.date };
+}
+
+const exemptions = new Map();
+if (superseded) {
+  for (const [name, value] of Object.entries(superseded)) {
+    const item = exemptionOf(name, value);
+    if (item) exemptions.set(name, item);
   }
 }
 
-if (!existsSync(DIR)) {
-  console.log("✓ check-trajectory 通过（还没有派发记录）");
-  process.exit(0);
-}
-
-const files = readdirSync(DIR).filter((f) => f.endsWith(".json"));
+const files = existsSync(DIR)
+  ? readdirSync(DIR).filter((f) => f.endsWith(".json"))
+  : [];
 let checked = 0;
 let supersededCount = 0;
-for (const name of Object.keys(superseded)) {
+for (const name of exemptions.keys()) {
   if (!files.includes(name)) {
     errors.push(`.agents/dispatch-superseded.json 登记了不存在的记录：${name}`);
   }
@@ -70,15 +122,13 @@ for (const file of files) {
     errors.push(`${where} 判为 OUT_OF_SCOPE 却没有记录任何越界文件：判定与证据矛盾`);
   }
 
-  // 已显式作废的记录不参与复算；作废必须写原因，避免"静默跳过"
-  if (Object.hasOwn(superseded, file)) {
-    const reason = superseded[file];
-    if (typeof reason !== "string" || reason.trim() === "") {
-      errors.push(`${where} 已登记作废但没有写原因`);
-    } else {
-      supersededCount++;
-      notes.push(`${where} 已作废：${reason}`);
-    }
+  // 已显式作废的记录不参与复算；作废必须写全原因/审批人/日期，避免"静默跳过"
+  const exemption = exemptions.get(file);
+  if (exemption) {
+    supersededCount++;
+    notes.push(
+      `${where} 已作废：${exemption.reason}（${exemption.approver} / ${exemption.date}）`,
+    );
     continue;
   }
 
@@ -148,7 +198,7 @@ if (errors.length) {
   for (const e of errors) console.error("  • " + e);
   console.error(
     `\n共 ${errors.length} 条。修复建议：记录不可改——任务变了就重新派发并以新记录替换，` +
-      `或在 .agents/dispatch-superseded.json 登记作废原因；判定与证据矛盾说明有人手改过记录。\n`,
+      `或在 .agents/dispatch-superseded.json 按 reason/approver/date 登记作废；判定与证据矛盾说明有人手改过记录。\n`,
   );
   process.exit(1);
 }

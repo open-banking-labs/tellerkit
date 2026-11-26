@@ -60,4 +60,5 @@ console.log(`契约结构体                  ${contracts.structs}`);
 console.log(`生成的 TS 类型              ${contracts.generatedTypes}`);
 console.log(`IPC 命令                    ${contracts.commands}`);
 console.log("");
-console.log("测试数与门禁以 `npm run gate` 的退出码为准，不要在这里猜。");
+console.log("这里只报数字：`npm run gate` 是静态预检（exit 0 不等于编译/测试通过）；");
+console.log("合并裁决 = CI required checks（test / clippy / bindings / build / gate 全绿）。");

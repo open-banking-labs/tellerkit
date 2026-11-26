@@ -1,0 +1,8 @@
+{
+  "$comment": "历史字符串式豁免的审批出处（只读迁移记录）。新条目必须直接在 .agents/dispatch-superseded.json 写全 reason / approver / date；补齐后可从这里删除。",
+  "2026-11-24T06-55-32-982Z-T-11.json": {
+    "approver": "hi-open-banking（提交 2a744a2）",
+    "date": "2026-11-26",
+    "source": "git log -1 --format='%an %ad' -- .agents/dispatch-superseded.json"
+  }
+}
