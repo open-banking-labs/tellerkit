@@ -198,6 +198,8 @@ pub enum ReversalError {
     AlreadyConfirmed,
     #[error("没有待确认的冲正申请")]
     NoPendingReversal,
+    #[error("冲正流水号为空：不能确认冲正，请等待主机回执或重试")]
+    EmptyHostReference,
     #[error("冲正状态落盘失败：{0}")]
     Persistence(String),
 }
@@ -331,6 +333,14 @@ impl ReversalBook {
         self.reversals.get(idempotency_key)
     }
 
+    /// 已授权但主机还没回流水号的申请——柜员的重试出口。
+    /// 已确认的申请不在此列：那是 `AlreadyReversed`，不能重新打主机。
+    pub fn awaiting_confirmation_of(&self, idempotency_key: &str) -> Option<&ReversalRecord> {
+        self.reversals
+            .get(idempotency_key)
+            .filter(|record| record.host_reference.is_none())
+    }
+
     /// 主机回了流水号：这一刻才算处置完成。
     ///
     /// 客户端不得自己调它来"假装完成"——调用方必须是主机回执的处理路径。
@@ -339,6 +349,11 @@ impl ReversalBook {
         idempotency_key: &str,
         host_reference: &str,
     ) -> Result<(), ReversalError> {
+        // 空白流水号不是回执。写进去会让 `is_confirmed` 立刻为真，
+        // 异常清单被清掉，但账上其实什么都没发生。
+        if host_reference.trim().is_empty() {
+            return Err(ReversalError::EmptyHostReference);
+        }
         let Some(record) = self.reversals.get(idempotency_key) else {
             return Err(ReversalError::NoPendingReversal);
         };
@@ -635,6 +650,36 @@ mod tests {
             book.reversal_of("TX-001").unwrap().host_reference(),
             Some("HOST-1")
         );
+    }
+
+    // 空白流水号不能把"已授权未确认"变成"已确认"：异常清单必须继续挂账。
+    #[test]
+    fn blank_host_reference_never_confirms_a_reversal() {
+        let mut book = ReversalBook::new();
+        book.mark("TX-001", ExceptionKind::MarkedForReversal);
+        let record = book
+            .request(&request("T01"), &StubAuthorizer::granting("T02"))
+            .unwrap();
+
+        assert_eq!(record.host_reference(), None);
+        assert_eq!(
+            book.awaiting_confirmation_of("TX-001"),
+            Some(&record),
+            "已授权未确认必须有读取出口供重试"
+        );
+        for blank in ["", "   ", "\t\n "] {
+            assert_eq!(
+                book.confirm("TX-001", blank).unwrap_err(),
+                ReversalError::EmptyHostReference,
+                "空白回执 {blank:?} 不得写进凭证"
+            );
+            assert!(!book.is_confirmed("TX-001"));
+            assert_eq!(book.outstanding().len(), 1);
+        }
+        assert_eq!(book.reversal_of("TX-001").unwrap().host_reference(), None);
+
+        book.confirm("TX-001", "HOST-1").unwrap();
+        assert!(book.awaiting_confirmation_of("TX-001").is_none());
     }
 
     #[test]

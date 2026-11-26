@@ -595,20 +595,19 @@ impl TxEngine {
 }
 
 /// 载荷签名：幂等键相同但内容不同，说明键被复用，必须拒绝。
+///
+/// 用规范化 JSON 数组（BTreeMap 本身按键有序、字符串由 JSON 转义）并加版本号：
+/// 早先的 `format!("{k}={v}") + join(",")` 让 `{"a":"b","c":"d"}` 和
+/// `{"a":"b,c=d"}` 撞成同一签名，键复用检查被绕过。
 fn request_signature(request: &TxRequest) -> String {
-    let mut parts: Vec<String> = request
-        .elements
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect();
-    parts.sort();
-    format!(
-        "{}|{}|{}|{}",
-        request.tx_code,
+    let canonical = serde_json::to_string(&(
+        request.tx_code.as_str(),
         request.amount_cents,
         request.offline_capable,
-        parts.join(",")
-    )
+        &request.elements,
+    ))
+    .expect("字符串、整数、布尔与字符串映射的序列化不会失败");
+    format!("v2|{canonical}")
 }
 
 /// 校验只拦"明显不该发给主机"的请求，不做业务规则（业务规则在主机侧）。
@@ -1120,6 +1119,50 @@ mod tests {
         assert!(second.reference().is_none(), "不得把第一笔的流水号给出去");
         assert_eq!(host.calls(), 1, "载荷冲突在本地就能判，不必打主机");
         assert!(engine.pending_count() == 0);
+    }
+
+    // 幂等签名必须按 JSON 规范化：把逗号/等号嵌进要素值，不得与分隔符碰撞。
+    #[test]
+    fn idempotent_signature_rejects_encoded_element_collision() {
+        let host = ScriptedHost::new(vec![Ok("TX-A".into()), Ok("TX-B".into())]);
+        let mut engine = TxEngine::new();
+
+        let first = engine.submit(
+            &host,
+            req("k-collision").element("a", "b").element("c", "d"),
+        );
+        assert_eq!(first.reference(), Some("TX-A"));
+
+        // 旧签名把两组要素都拼成 `a=b,c=d`，会误当重复提交并放行第一笔的流水号。
+        let collided = engine.submit(&host, req("k-collision").element("a", "b,c=d"));
+        assert_eq!(collided.status(), TxStatus::Rejected);
+        assert!(collided.message().contains("幂等键已用于另一笔交易"));
+        assert!(collided.reference().is_none());
+        assert_eq!(host.calls(), 1, "碰撞必须在本地被拒绝，不得再打主机");
+    }
+
+    // 同一碰撞也不能绕过挂起队列的冲突检查，否则换一批重放要素就会重复入账。
+    #[test]
+    fn pending_signature_rejects_encoded_element_collision() {
+        let host = ScriptedHost::always(Err(HostError::Timeout));
+        let mut engine = TxEngine::new();
+        let first = engine.submit(
+            &host,
+            req("k-pend-collision")
+                .offline(true)
+                .element("a", "b")
+                .element("c", "d"),
+        );
+        assert_eq!(first.status(), TxStatus::Pending);
+
+        let collided = engine.submit(
+            &host,
+            req("k-pend-collision").offline(true).element("a", "b,c=d"),
+        );
+        assert_eq!(collided.status(), TxStatus::Rejected);
+        assert!(collided.message().contains("幂等键已用于另一笔挂起交易"));
+        assert_eq!(engine.pending_count(), 1);
+        assert_eq!(host.calls(), 1);
     }
 
     // S-02 边界：去重必须按 key 隔离。不同幂等键不得互相吞掉，
